@@ -15,7 +15,7 @@ message passing, and hot code loading -- rather than a mutable Lisp image.
 │  Tool / skill plugins                │   -- not yet built
 │  (shell, fs, http, lisp-eval, ...)   │
 ├─────────────────────────────────────┤
-│  Sub-agent supervisor                │   -- not yet built
+│  Sub-agent supervisor                │   apps/nyc (nyc-agent, nyc-agent-sup)
 ├─────────────────────────────────────┤
 │  nyc: context, service, registry     │   -- apps/nyc
 ├─────────────────────────────────────┤
@@ -46,13 +46,17 @@ has no built-in "wait for a named service" primitive. It's resolved by
 
 ## What's built vs. deferred
 
-Built: `nyc-context`, `nyc-service`, `nyc-registry`, and a demo plugin pair
+Built: `nyc-context`, `nyc-service`, `nyc-registry`, a demo plugin pair
 proving a consumer can mount before its provider, react to the provider
-dying and restarting, and have its disposer fire correctly on unmount.
+dying and restarting, and have its disposer fire correctly on unmount, and
+sub-agent delegation (`nyc-agent`, `nyc-agent-sup` -- see `docs/delegation.md`):
+a dynamic supervisor that starts and stops one process per delegated
+sub-agent on demand, with crash isolation and a tagged done-message protocol
+for a sub-agent to report back to its parent.
 
-Deferred (tracked on the project's sr.ht tracker, in this order): sub-agent
-delegation, ephemeral scratch REPLs, the tool/skill plugin convention, the
-vault (durable steering messages), checkpoint/rollback, and a decision on
-how much of the "prompt is a REPL" surface should be raw LFE forms vs. a
-constrained DSL -- full form evaluation is arbitrary code execution with
-agent privileges, so that's a security decision to make deliberately.
+Deferred (tracked on the project's sr.ht tracker, in this order): ephemeral
+scratch REPLs, the tool/skill plugin convention, the vault (durable steering
+messages), checkpoint/rollback, and a decision on how much of the "prompt is
+a REPL" surface should be raw LFE forms vs. a constrained DSL -- full form
+evaluation is arbitrary code execution with agent privileges, so that's a
+security decision to make deliberately.

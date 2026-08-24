@@ -11,7 +11,7 @@ passing, and hot code loading instead of a mutable Lisp image.
 the harness built on top of it.
 
 See [docs/](docs/) for architecture, the registry's design, how to write a
-plugin, and how to build and run this.
+plugin, sub-agent delegation, and how to build and run this.
 
 ## License
 
