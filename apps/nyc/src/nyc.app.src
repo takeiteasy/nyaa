@@ -1,0 +1,11 @@
+{application, nyc,
+ [{description, "Cordis-inspired plugin/service runtime core: context, service, registry"},
+  {vsn, "0.1.0"},
+  {registered, ['nyc-sup', 'nyc-registry']},
+  {mod, {'nyc-app', []}},
+  {applications, [kernel, stdlib]},
+  {env, []},
+  {modules, []},
+  {licenses, ["GPL-3.0-only"]},
+  {links, []}
+ ]}.

@@ -1,0 +1,10 @@
+_build/
+_checkouts/
+.rebar3/
+rebar3.crashdump
+*.beam
+*.o
+*.dylib
+.DS_Store
+DRAFT.md
+ROADMAP.md

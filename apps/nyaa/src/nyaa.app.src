@@ -1,0 +1,11 @@
+{application, nyaa,
+ [{description, "nyaa harness -- agent loop and tool/skill plugins on top of nyc"},
+  {vsn, "0.1.0"},
+  {registered, ['nyaa-sup']},
+  {mod, {'nyaa-app', []}},
+  {applications, [kernel, stdlib, nyc]},
+  {env, []},
+  {modules, []},
+  {licenses, ["GPL-3.0-only"]},
+  {links, []}
+ ]}.
