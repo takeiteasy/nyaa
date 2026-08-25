@@ -29,9 +29,9 @@ rebar3 as test ltest
 ```
 
 Runs every test module: `nyaa-demo-tests` (mount-order independence,
-dependency-down/re-ready, disposer firing) and `patchbay-agent-tests`
-(delegation, crash isolation, tagged done protocol). patchbay's own test
-suite lives in its own repo.
+dependency-down/re-ready, disposer firing, registry-crash self-healing)
+and `patchbay-agent-tests` (delegation, crash isolation, tagged done
+protocol). patchbay's own test suite lives in its own repo.
 
 Note for anyone adding a test file: `ltest` discovers test suites by
 scanning compiled beams for the `ltest-unit` behaviour tag, not by the
@@ -74,3 +74,16 @@ exit(ProvPid, kill).
 This is the property the whole stack exists to prove: a plugin mounted
 before its dependency exists doesn't crash, doesn't block, and becomes
 ready on its own once the dependency appears.
+
+## Security & trust
+
+The planned prompt-as-REPL surface evaluates **raw LFE forms**. That is a
+deliberate decision, not an oversight: a form evaluator is arbitrary code
+execution with whatever privileges the runtime holds -- full access to the
+node, its filesystem, and every registered service. Until a constrained
+DSL exists (opt-in, capability-scoped, evaluated without `eval` on raw
+forms), do not point the prompt surface at untrusted input: no network
+listeners feeding it, no multi-user exposure, no third-party plugins that
+forward outside content into it. The constrained DSL is tracked as future
+work; raw evaluation is the bootstrap posture for a single-operator,
+trusted-plugin runtime.

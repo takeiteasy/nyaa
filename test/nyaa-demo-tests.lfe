@@ -10,7 +10,7 @@
 ;;; property this runtime exists to provide (see docs/registry.md). Both
 ;;; mount orders are tested, since the
 ;;; provider-first order is the one that exercises subscribe's replay
-;;; of an already-existing registration (see patchbay_registry.lfe) rather
+;;; of an already-existing registration (see patchbay_registry) rather
 ;;; than a live #(patchbay_registry registered ...) message.
 ;;;
 ;;; Each test starts its own patchbay + nyaa application pair and drains a
@@ -102,6 +102,45 @@
         (is-equal 'ok (patchbay_context:unmount ctx 'demo-consumer))
         (is-equal '#(consumer terminated shutdown) (recv-one 500))
         (is-equal '#(error not_found) (patchbay_registry:lookup 'demo-consumer))))))
+
+(deftest registry-crash-self-heals
+  ;;; The whole point of the registry's crash recovery: killing the
+  ;;; registry process must not break the provider/consumer
+  ;;; relationship. The fresh instance restores registrations,
+  ;;; subscriptions and monitors from its backup table; the services
+  ;;; themselves never notice beyond a brief lookup gap.
+  (with-apps
+    (lambda ()
+      (let* ((ctx (root-ctx))
+             (reporter (self))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-consumer:child_spec reporter)))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-provider:child_spec reporter))))
+        (drain ()) ; discard the initial waiting/ready/ready messages
+        (let ((`#(ok #(,prov-pid ,_)) (patchbay_registry:lookup 'demo-provider))
+              (old (whereis 'patchbay_registry)))
+          (exit old 'kill)
+          (await-restart old 100)
+          ;; Same provider, discoverable again, without either service
+          ;; having been restarted:
+          (let ((`#(ok #(,prov-pid-2 ,_)) (patchbay_registry:lookup 'demo-provider)))
+            (is-equal prov-pid prov-pid-2))
+          ;; And the rebuilt wiring is live in both directions -- the
+          ;; consumer still hears about the provider going away and
+          ;; coming back:
+          (exit prov-pid 'kill)
+          (let ((msgs (drain ())))
+            (is (lists:member '#(consumer dep-down demo-provider killed) msgs))
+            (is (lists:any (match-lambda ((`#(consumer ready ,_)) 'true) ((_) 'false)) msgs))))))))
+
+(defun await-restart (old n)
+  (let ((cur (whereis 'patchbay_registry)))
+    (if (andalso (is_pid cur) (=/= cur old))
+      cur
+      (if (=< n 0)
+        (error 'registry-did-not-restart)
+        (progn
+          (timer:sleep 25)
+          (await-restart old (- n 1)))))))
 
 (defun recv-one (timeout)
   (receive
