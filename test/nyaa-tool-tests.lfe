@@ -34,7 +34,7 @@
     (after 300 (lists:reverse acc))))
 
 (defun mount-all ()
-  ;;; Mounts the three standard tools onto the fresh root context and
+  ;;; Mounts the four standard tools onto the fresh root context and
   ;;; returns the fs sandbox root once every tool is registered -- the
   ;;; sandbox dir doubles as proof the child_spec arg plumbing works.
   (let ((`#(ok #(,ctx ,_)) (patchbay_registry:lookup 'nyaa-root))
@@ -42,8 +42,9 @@
     (patchbay_context:mount ctx (nyaa-tool-shell:child_spec))
     (patchbay_context:mount ctx (nyaa-tool-fs:child_spec tmpdir))
     (patchbay_context:mount ctx (nyaa-tool-eval:child_spec))
+    (patchbay_context:mount ctx (nyaa-tool-repl:child_spec))
     (each (lambda (name) (await-registered name))
-          '(tool-shell tool-fs tool-eval))
+          '(tool-shell tool-fs tool-eval tool-repl))
     tmpdir))
 
 (defun each (f names)
@@ -83,7 +84,8 @@
                      (=:= '#(ok tool) (maps:find 'kind props)))
                     (_ 'false)))
                 (patchbay_registry:names))))
-        (is-equal '(tool-eval tool-fs tool-shell) (lists:sort tool-names))))))
+        (is-equal '(tool-eval tool-fs tool-repl tool-shell)
+                  (lists:sort tool-names))))))
 
 (deftest describe-returns-convention-metadata
   (with-apps
@@ -188,3 +190,32 @@
                                      timeout 200))))
       (is-match `#(ok 4)
                 (call-tool 'tool-eval `#(invoke #m(form (+ 2 2))))))))
+
+(deftest repl-tool-roundtrip-with-state-and-pristine
+  (with-apps
+    (lambda ()
+      (mount-all)
+      ;; Lazily creates the REPL, then state sticks across invocations:
+      (is-match `#(ok 10)
+                (call-tool 'tool-repl
+                           `#(invoke #m(id t1 form (set n 10)))))
+      (is-match `#(ok 11)
+                (call-tool 'tool-repl
+                           `#(invoke #m(id t1 form (+ n 1)))))
+      ;; pristine=true discards t1 and evaluates against a fresh one:
+      (is-match `#(error ,_)
+                (call-tool 'tool-repl
+                           `#(invoke #m(id t1 form n pristine true))))
+      ;; The fresh t1 still works:
+      (is-match `#(ok 3)
+                (call-tool 'tool-repl
+                           `#(invoke #m(id t1 form (+ 1 2))))))))
+
+(deftest repl-tool-rejects-bad-requests
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (is-match `#(error #(bad_request "id required"))
+                (call-tool 'tool-repl `#(invoke #m(form (+ 1 2)))))
+      (is-match `#(error #(bad_request "form required"))
+                (call-tool 'tool-repl `#(invoke #m(id x)))))))

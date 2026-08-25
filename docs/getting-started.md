@@ -31,9 +31,10 @@ rebar3 as test ltest
 Runs every test module: `nyaa-demo-tests` (mount-order independence,
 dependency-down/re-ready, disposer firing, registry-crash self-healing),
 `nyaa-tool-tests` (tool convention: discovery, describe/invoke, sandbox
-and timeout enforcement), and `patchbay-agent-tests` (delegation, crash
-isolation, tagged done protocol). patchbay's own test suite lives in its
-own repo.
+and timeout enforcement), `nyaa-repl-tests` (scratch REPLs: lifecycle,
+cross-eval state, pristine resets, crash/timeout resilience), and
+`patchbay-agent-tests` (delegation, crash isolation, tagged done
+protocol). patchbay's own test suite lives in its own repo.
 
 Note for anyone adding a test file: `ltest` discovers test suites by
 scanning compiled beams for the `ltest-unit` behaviour tag, not by the
@@ -77,6 +78,21 @@ This is the property the whole stack exists to prove: a plugin mounted
 before its dependency exists doesn't crash, doesn't block, and becomes
 ready on its own once the dependency appears.
 
+## Play with a scratch REPL
+
+REPLs are created lazily on first eval and keep their env across evals
+(see docs/tools.md, "Scratch REPLs"):
+
+```erlang
+'nyaa-repl':eval(scratch, '(set answer 42)).
+'nyaa-repl':eval(scratch, '(* answer 2)').   %% => {ok,84}
+%% pristine: same id, fresh empty REPL
+'nyaa-repl':eval(scratch, 'answer', #{pristine => true}).
+```
+
+(The Erlang shell needs the quoted module atom `'nyaa-repl'` -- the
+module name contains a hyphen.)
+
 ## Security & trust
 
 The planned prompt-as-REPL surface evaluates **raw LFE forms**. That is a
@@ -90,9 +106,9 @@ forward outside content into it. The constrained DSL is tracked as future
 work; raw evaluation is the bootstrap posture for a single-operator,
 trusted-plugin runtime.
 
-The standard tool plugins (`tool-shell`, `tool-fs`, `tool-eval` -- see
-docs/tools.md) are the same surface in plugin form and inherit this
-posture: trusted operator only.
+The standard tool plugins (`tool-shell`, `tool-fs`, `tool-eval`,
+`tool-repl` -- see docs/tools.md) are the same surface in plugin form
+and inherit this posture: trusted operator only.
 
 ## Tool plugins
 
