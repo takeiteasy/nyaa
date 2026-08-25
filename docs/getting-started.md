@@ -29,9 +29,11 @@ rebar3 as test ltest
 ```
 
 Runs every test module: `nyaa-demo-tests` (mount-order independence,
-dependency-down/re-ready, disposer firing, registry-crash self-healing)
-and `patchbay-agent-tests` (delegation, crash isolation, tagged done
-protocol). patchbay's own test suite lives in its own repo.
+dependency-down/re-ready, disposer firing, registry-crash self-healing),
+`nyaa-tool-tests` (tool convention: discovery, describe/invoke, sandbox
+and timeout enforcement), and `patchbay-agent-tests` (delegation, crash
+isolation, tagged done protocol). patchbay's own test suite lives in its
+own repo.
 
 Note for anyone adding a test file: `ltest` discovers test suites by
 scanning compiled beams for the `ltest-unit` behaviour tag, not by the
@@ -87,3 +89,12 @@ listeners feeding it, no multi-user exposure, no third-party plugins that
 forward outside content into it. The constrained DSL is tracked as future
 work; raw evaluation is the bootstrap posture for a single-operator,
 trusted-plugin runtime.
+
+The standard tool plugins (`tool-shell`, `tool-fs`, `tool-eval` -- see
+docs/tools.md) are the same surface in plugin form and inherit this
+posture: trusted operator only.
+
+## Tool plugins
+
+The tool/skill convention and its reference implementations (shell, fs,
+eval) are documented in [docs/tools.md](tools.md).

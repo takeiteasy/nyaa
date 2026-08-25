@@ -2,7 +2,7 @@
 [{<<"lfe">>,{pkg,<<"lfe">>,<<"2.2.2">>},0},
  {<<"patchbay">>,
   {git,"git@github.com:takeiteasy/patchbay.git",
-       {ref,"fb0a8faeda4d7a90b41f6d56632c8062d0290a42"}},
+       {ref,"dba12e15fa041528c8089f03911e1565413e1998"}},
   0}]}.
 [
 {pkg_hash,[
