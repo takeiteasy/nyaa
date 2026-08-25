@@ -1,11 +1,16 @@
 # Getting started
 
+This repo is the **nyaa harness**. The runtime core it builds on lives in
+its own repo: [patchbay](https://github.com/takeiteasy/patchbay) -- see
+that repo's docs for architecture, the registry design, the plugin
+contract, and sub-agent delegation.
+
 ## Toolchain
 
 - Erlang/OTP (developed against OTP 29 / ERTS 17.0.5)
 - [rebar3](https://rebar3.org/)
 
-Everything else (`lfe`, `rebar3_lfe`, `ltest`) is pulled from Hex by
+Everything else (`patchbay`, `lfe`, `rebar3_lfe`, `ltest`) is pulled by
 `rebar.config`; no global LFE install is required.
 
 ## Build
@@ -14,8 +19,8 @@ Everything else (`lfe`, `rebar3_lfe`, `ltest`) is pulled from Hex by
 rebar3 compile
 ```
 
-This builds both umbrella apps: `apps/nyc` (the core runtime) and
-`apps/nyaa` (the harness).
+Fetches patchbay from GitHub (`trunk` branch) plus the LFE toolchain, and
+compiles the harness.
 
 ## Test
 
@@ -23,16 +28,20 @@ This builds both umbrella apps: `apps/nyc` (the core runtime) and
 rebar3 as test ltest
 ```
 
-Runs every test module across both apps. `rebar3 as test lfe ltest --suite
-<name>` is documented by the plugin but does not actually filter to a
-single suite as of `rebar3_lfe` 0.5.8/`ltest` 0.13.11 -- it still runs
-every discovered module; don't rely on it for isolating one suite's output.
+Runs every test module: `nyaa-demo-tests` (mount-order independence,
+dependency-down/re-ready, disposer firing) and `patchbay-agent-tests`
+(delegation, crash isolation, tagged done protocol). patchbay's own test
+suite lives in its own repo.
 
 Note for anyone adding a test file: `ltest` discovers test suites by
 scanning compiled beams for the `ltest-unit` behaviour tag, not by the
 presence of `deftest` forms alone -- a test module needs
 `(behaviour ltest-unit)` in its `defmodule` or `ltest` will silently report
 "no unit tests found" for it.
+
+Note for cold checkouts: if `rebar3 as test ltest` fails with
+`lfe_comp not found` while compiling ltest's own sources, run plain
+`rebar3 compile` once first to warm the default profile, then retry.
 
 ## Run the demo interactively
 
@@ -44,26 +53,24 @@ Then, from the shell:
 
 ```erlang
 application:ensure_all_started(nyaa).
-{ok, {Ctx, _}} = 'nyc-registry':lookup('nyaa-root').
+{ok, {Ctx, _}} = patchbay_registry:lookup('nyaa-root').
 Reporter = self().
-'nyc-context':mount(Ctx, 'nyaa-demo-consumer':child_spec(Reporter)).
+patchbay_context:mount(Ctx, 'nyaa-demo-consumer':child_spec(Reporter)).
 %% flush() to see {consumer, waiting} -- mounted before its dependency exists
-'nyc-context':mount(Ctx, 'nyaa-demo-provider':child_spec(Reporter)).
+patchbay_context:mount(Ctx, 'nyaa-demo-provider':child_spec(Reporter)).
 %% flush() again to see {consumer, ready, Pid} and {provider, ready}
-'nyc-registry':names().
+patchbay_registry:names().
 ```
 
 Kill the provider and watch the consumer react:
 
 ```erlang
-{ok, {ProvPid, _}} = 'nyc-registry':lookup('demo-provider').
+{ok, {ProvPid, _}} = patchbay_registry:lookup('demo-provider').
 exit(ProvPid, kill).
 %% flush() -- {consumer, dep-down, 'demo-provider', killed}, then
 %% {consumer, ready, NewPid} once the supervisor restarts it
 ```
 
-This is the property the whole core exists to prove: a plugin mounted
+This is the property the whole stack exists to prove: a plugin mounted
 before its dependency exists doesn't crash, doesn't block, and becomes
-ready on its own once the dependency appears. See `docs/registry.md` for
-how that's implemented and `docs/plugins.md` for how to write your own
-plugin.
+ready on its own once the dependency appears.

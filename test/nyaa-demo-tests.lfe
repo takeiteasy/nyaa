@@ -10,10 +10,10 @@
 ;;; property this runtime exists to provide (see docs/registry.md). Both
 ;;; mount orders are tested, since the
 ;;; provider-first order is the one that exercises subscribe's replay
-;;; of an already-existing registration (see nyc-registry.lfe) rather
-;;; than a live #(nyc-registry registered ...) message.
+;;; of an already-existing registration (see patchbay_registry.lfe) rather
+;;; than a live #(patchbay_registry registered ...) message.
 ;;;
-;;; Each test starts its own nyc + nyaa application pair and drains a
+;;; Each test starts its own patchbay + nyaa application pair and drains a
 ;;; reporter mailbox rather than depending on message arrival order
 ;;; between unrelated services -- the provider always sends its own
 ;;; {provider, ready} on every (re)start regardless of what the
@@ -22,13 +22,13 @@
 
 (defun with-apps (thunk)
   (application:stop 'nyaa)
-  (application:stop 'nyc)
+  (application:stop 'patchbay)
   (let ((`#(ok ,_) (application:ensure_all_started 'nyaa)))
     (try
       (funcall thunk)
       (after
         (application:stop 'nyaa)
-        (application:stop 'nyc)
+        (application:stop 'patchbay)
         ;; Stopping the apps tears down every mounted service, which
         ;; fires their terminate/2 disposers -- those send their own
         ;; {X, terminated, _} messages to this same reporter process a
@@ -39,7 +39,7 @@
         (drain ())))))
 
 (defun root-ctx ()
-  (let ((`#(ok #(,pid ,_)) (nyc-registry:lookup 'nyaa-root)))
+  (let ((`#(ok #(,pid ,_)) (patchbay_registry:lookup 'nyaa-root)))
     pid))
 
 (defun drain (acc)
@@ -57,9 +57,9 @@
     (lambda ()
       (let* ((ctx (root-ctx))
              (reporter (self))
-             (`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
         (expect '#(consumer waiting) 500)
-        (let ((`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-provider:child_spec reporter))))
+        (let ((`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-provider:child_spec reporter))))
           'ok)
         (let ((msgs (drain ())))
           (is (lists:any (match-lambda ((`#(consumer ready ,_)) 'true) ((_) 'false)) msgs))
@@ -70,9 +70,9 @@
     (lambda ()
       (let* ((ctx (root-ctx))
              (reporter (self))
-             (`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-provider:child_spec reporter))))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-provider:child_spec reporter))))
         (expect '#(provider ready) 500)
-        (let ((`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
+        (let ((`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
           'ok)
         (let ((msgs (drain ())))
           (is (lists:member '#(consumer waiting) msgs))
@@ -83,10 +83,10 @@
     (lambda ()
       (let* ((ctx (root-ctx))
              (reporter (self))
-             (`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-consumer:child_spec reporter)))
-             (`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-provider:child_spec reporter))))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-consumer:child_spec reporter)))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-provider:child_spec reporter))))
         (drain ()) ; discard the initial waiting/ready/ready messages
-        (let ((`#(ok #(,prov-pid ,_)) (nyc-registry:lookup 'demo-provider)))
+        (let ((`#(ok #(,prov-pid ,_)) (patchbay_registry:lookup 'demo-provider)))
           (exit prov-pid 'kill))
         (let ((msgs (drain ())))
           (is (lists:member '#(consumer dep-down demo-provider killed) msgs))
@@ -97,11 +97,11 @@
     (lambda ()
       (let* ((ctx (root-ctx))
              (reporter (self))
-             (`#(ok ,_) (nyc-context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
+             (`#(ok ,_) (patchbay_context:mount ctx (nyaa-demo-consumer:child_spec reporter))))
         (drain ())
-        (is-equal 'ok (nyc-context:unmount ctx 'demo-consumer))
+        (is-equal 'ok (patchbay_context:unmount ctx 'demo-consumer))
         (is-equal '#(consumer terminated shutdown) (recv-one 500))
-        (is-equal '#(error not-found) (nyc-registry:lookup 'demo-consumer))))))
+        (is-equal '#(error not_found) (patchbay_registry:lookup 'demo-consumer))))))
 
 (defun recv-one (timeout)
   (receive

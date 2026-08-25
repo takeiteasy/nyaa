@@ -1,11 +1,11 @@
 (defmodule nyaa-demo-consumer
   (export
     (child_spec 1)
-    (service-name 0)
+    (service_name 0)
     (dependencies 0)
     (init 1)
     (ready 2)
-    (dep-down 3)
+    (dep_down 3)
     (terminate 2)))
 
 ;;; The other half of the vertical-slice demo (see docs/plugins.md).
@@ -14,13 +14,13 @@
 
 (defun child_spec (reporter)
   `#m(id demo-consumer
-      start #(nyc-service start_link (nyaa-demo-consumer ,reporter))
+      start #(patchbay_service start_link (nyaa-demo-consumer ,reporter))
       restart transient
       shutdown 5000
       type worker
-      modules (nyc-service)))
+      modules (patchbay_service)))
 
-(defun service-name () 'demo-consumer)
+(defun service_name () 'demo-consumer)
 (defun dependencies () '(demo-provider))
 
 (defun init (reporter)
@@ -32,7 +32,7 @@
     (erlang:send (maps:get 'reporter state) `#(consumer ready ,provider-pid)))
   `#(ok ,state))
 
-(defun dep-down (dep-name reason state)
+(defun dep_down (dep-name reason state)
   (erlang:send (maps:get 'reporter state) `#(consumer dep-down ,dep-name ,reason))
   `#(ok ,state))
 

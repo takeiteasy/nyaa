@@ -2,16 +2,23 @@
 
 **N**ot **Y**our **A**verage **A**gent
 
-A Cordis-inspired plugin/service runtime, in LFE on OTP, meant to host an
-agent loop with sub-agent delegation, isolated scratch REPLs, live code
-upgrade, and checkpoint/rollback -- built on supervision trees, message
-passing, and hot code loading instead of a mutable Lisp image.
+An agent harness on the BEAM (in LFE): an agent loop with sub-agent
+delegation, isolated scratch REPLs, live code upgrade, and
+checkpoint/rollback -- built on supervision trees, message passing, and
+hot code loading instead of a mutable Lisp image.
 
-`apps/nyc` is the core runtime (context, service, registry). `apps/nyaa` is
-the harness built on top of it.
+It is built on [patchbay](https://github.com/takeiteasy/patchbay), a
+standalone Cordis-inspired plugin/service runtime core (contexts,
+services with mount-order-independent dependency injection, a race-free
+registry, dynamic sub-agent supervision). patchbay is pure Erlang with
+zero non-OTP dependencies, and its plugin contracts are plain atoms,
+tuples, and maps -- so plugins can be written in any BEAM language. See
+the [patchbay docs](https://github.com/takeiteasy/patchbay/tree/trunk/docs)
+for architecture and the plugin contract; this repo's
+[docs/getting-started.md](docs/getting-started.md) covers building and
+running the demo pair in `src/demo/` that exercises the core.
 
-See [docs/](docs/) for architecture, the registry's design, how to write a
-plugin, sub-agent delegation, and how to build and run this.
+Both projects share one issue tracker: `~takeiteasy/nyaa` on sourcehut.
 
 ## License
 
