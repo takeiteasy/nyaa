@@ -17,6 +17,8 @@ the [patchbay docs](https://github.com/takeiteasy/patchbay/tree/trunk/docs)
 for architecture and the plugin contract; this repo's
 [docs/getting-started.md](docs/getting-started.md) covers building and
 running the demo pair in `src/demo/` that exercises the core.
+In-repo conventions: tools & skills in [docs/tools.md](docs/tools.md),
+model backends in [docs/adapters.md](docs/adapters.md).
 
 Both projects share one issue tracker: `~takeiteasy/nyaa` on sourcehut.
 
