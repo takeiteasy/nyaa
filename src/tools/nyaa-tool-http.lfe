@@ -149,7 +149,9 @@
 (defun lowered-headers (pairs)
   (lists:map
     (lambda (pair)
-      (list (string:lowercase (car pair)) (cadr-of pair)))
+      ;;; httpc wants {Name, Value} tuples; a list pair makes
+      ;;; httpc:header_parse crash with function_clause.
+      (tuple (string:lowercase (car pair)) (cadr-of pair)))
     pairs))
 
 (defun to-chars (v)
@@ -163,75 +165,105 @@
 
 ;;; --- transport ---------------------------------------------------------------
 (defun do-request (method url headers body timeout-ms)
-  (let* ((request
-           (tuple url
-                  headers
-                  (content-type-for headers body)
-                  body))
+  ;;; Shape rules learned against OTP29 httpc:
+  ;;;  - verb-less methods (GET) reject four-element requests =>
+  ;;;    {error,invalid_request}; only add ctype/body when sending.
+  ;;;  - an upper-case verb atom yields {error,invalid_method}.
+  (let* ((body-present? (/= body ""))
+         (request
+           (if (not body-present?)
+             (tuple url headers)
+             (tuple url
+                    (headers-without-content-type headers)
+                    (content-type-for headers)
+                    body)))
          (http-opts
-           (list '(autoredirect false)
+           (list (tuple 'autoredirect 'false)
                  (tuple 'timeout timeout-ms)
                  (tuple 'connect_timeout (min timeout-ms 10000))))
-         ;;; VALUE-style catch (no clauses): failures arrive wrapped as
-         ;;; #(EXIT _) and are classified below -- avoids the try/catch
-         ;;; clause-syntax minefield entirely.
          (answer
            (catch
              (httpc:request
-               (erlang:list_to_atom method)
+               (erlang:list_to_atom (string:lowercase method))
                request
                http-opts
-               '(full_result false)))))
+               (list `#(full_result true))))))
     (cond
-      ((httpc-exit? answer)
-       '#(error #(error "httpc raised unexpectedly")))
-      ((httpc-success? answer)
+      ((exit-wrapper? answer)
+       ;; keep the real reason visible instead of a blanket blob.
+       `#(error #(error ,(io_lib:format "~120w" (list (element 2 answer))))))
+      ((success-wrapper? answer)
        (let* ((meta (element 1 (element 2 answer)))
               (hdrs (element 2 (element 2 answer)))
-              (payload (element 3 (element 2 answer)))
-              (code (element 2 meta)))
-         `#(ok #m(status ,code
+              (payload (element 3 (element 2 answer))))
+         `#(ok #m(status ,(element 2 meta)
                   headers ,(headers->map hdrs)
                   body ,(as-binary payload)))))
-      ((and (is_tuple answer) (=:= 2 (erlang:tuple_size answer))
+      ((and (is_tuple answer)
+            (=:= 2 (erlang:tuple_size answer))
             (=:= 'error (element 1 answer)))
        (classify (element 2 answer)))
       ('true
        '#(error #(error "unexpected httpc reply shape"))))))
 
-(defun httpc-exit? (a)
-  (and (is_tuple a)
-       (=:= 2 (erlang:tuple_size a))
-       (=:= 'EXIT (element 1 a))))
+(defun exit-wrapper? (a)
+  ;;; branch-ordered so element/tuple_size never see non-tuples.
+  (cond
+    ((not (is_tuple a)) 'false)
+    ((/= 2 (erlang:tuple_size a)) 'false)
+    ((=:= 'EXIT (element 1 a)) 'true)
+    ('true 'false)))
 
-(defun httpc-success? (a)
-  (and (is_tuple a)
-       (=:= 2 (erlang:tuple_size a))
-       (=:= 'ok (element 1 a))
-       (is_tuple (element 2 a))
-       (=:= 3 (erlang:tuple_size (element 2 a)))
-       (is_tuple (element 1 (element 2 a)))))
-(defun content-type-for (headers body)
+(defun success-wrapper? (a)
+  ;;; full-result success shape: {ok, {{Vsn,Code,Phrase}, Hdrs, Body}}
+  (cond
+    ((not (is_tuple a)) 'false)
+    ((/= 2 (erlang:tuple_size a)) 'false)
+    ((not (=:= 'ok (element 1 a))) 'false)
+    ((not (is_tuple (body-of a))) 'false)
+    ((/= 3 (erlang:tuple_size (body-of a))) 'false)
+    ;; version slot is a charlist (e.g. "HTTP/1.1"), not a tuple --
+    ;; anchor on the integer status code at meta position 2 instead.
+    ((not (is_tuple (element 1 (body-of a)))) 'false)
+    ((/= 3 (erlang:tuple_size (element 1 (body-of a)))) 'false)
+    ((not (is_integer (element 2 (element 1 (body-of a))))) 'false)
+    ('true 'true)))
+
+(defun body-of (a) (element 2 a))
+
+(defun content-type-for (headers)
+  ;;; httpc wants Content-Type as a dedicated field, not left in the
+  ;;; Headers list -- honor a caller-supplied value, default otherwise.
   (case (lists:keyfind "content-type" 1 headers)
-    ('false
-     (if (=:= body "") ""
-       "application/octet-stream"))
-    (_found "")))
+    ('false "application/octet-stream")
+    (`#(,_name ,value) value)))
+
+(defun headers-without-content-type (headers)
+  ;;; the dedicated ContentType field above already covers it; leaving
+  ;;; a duplicate in Headers risks httpc sending it twice on the wire.
+  (lists:filter
+    (lambda (pair) (/= (element 1 pair) "content-type"))
+    headers))
 
 (defun headers->map (pairs)
+  ;;; httpc headers are {Name, Value} tuples -- use element, never car.
   (lists:foldl
     (lambda (pair acc)
       (maps:put
-        (iolist_to_binary (to-chars (string:lowercase (car pair))))
-        (as-binary (cadr-of pair))
+        (as-lower-bin (element 1 pair))
+        (as-binary (element 2 pair))
         acc))
     #m()
     pairs))
 
+(defun as-lower-bin (name)
+  (iolist_to_binary
+    (to-chars (string:lowercase (unicode:characters_to_list name 'utf8)))))
+
 (defun as-binary (payload)
-  (cond
-    ((is_binary payload) payload)
-    ('true (iolist_to_binary payload))))
+  (if (is_binary payload)
+    payload
+    (iolist_to_binary payload)))
 
 (defun classify (reason)
   (cond

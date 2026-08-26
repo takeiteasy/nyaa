@@ -228,12 +228,12 @@
 
 (defun http-fake-handler (_method path body)
   (cond
-    ((=:= path "/echo")
+    ((=:= path #"/echo")
      `#(200 #m("Content-Type" "text/plain") ,body))
-    ((=:= path "/slow")
+    ((=:= path #"/slow")
      (timer:sleep 1500)
      `#(200 #m() ""))
-    ((=:= path "/gone")
+    ((=:= path #"/gone")
      '#(#(404 #m() "nope")))
     ('true
      `#(404 #m("Content-Type" "application/json") "{\"error\":\"nf\"}"))))
@@ -255,7 +255,7 @@
           (is-match `#(ok ,_) result)
           (is-equal 200 (maps:get 'status m))
           (is (is_map (maps:get 'headers m)))
-          (is (=:= 'error (maps:find #"content-type" (maps:get 'headers m)))))))))
+          (is-equal `#(ok #"text/plain") (maps:find #"content-type" (maps:get 'headers m))))))))
 
 (deftest http-post-sends-body-and-headers
   (with-apps
@@ -272,6 +272,26 @@
         (is-match `#(ok ,_) result)
         ;; echo endpoint returns the request body verbatim
         (is-equal #"payload=1" (maps:get 'body (element 2 result)))))))
+
+(deftest http-post-honors-caller-content-type
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let* ((srv (start-http-fake))
+             (base (nyaa-fake-http:url srv))
+             (result
+               (call-tool 'tool-http
+                          `#(invoke #m(url ,(iolist_to_binary (list base "/echo"))
+                                       method "POST"
+                                       headers #m("Content-Type" "application/json")
+                                       body #"{\"a\":1}")))))
+        (is-match `#(ok ,_) result)
+        (let ((requests (nyaa-fake-http:requests srv)))
+          (is-equal 1 (length requests))
+          ;; caller's explicit content-type must survive, not be
+          ;; clobbered to application/octet-stream.
+          (is-equal #"application/json"
+                     (maps:get 'content-type (car requests))))))))
 
 (deftest http-rejects-missing-url-without-hitting-the-wire
   (with-apps

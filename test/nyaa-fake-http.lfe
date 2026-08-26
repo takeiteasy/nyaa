@@ -95,23 +95,28 @@
   (if (is_list iolist) iolist (unicode:characters_to_list iolist 'utf8)))
 
 (defun handle-connection (handler sock delay)
-  (let ((request (read-request sock)))
-    (let ((answer
-            (catch
-              (funcall handler
-                       (maps:get 'method request)
-                       (maps:get 'path request)
-                       (maps:get 'body request)))))
-      (cond
-        ((=:= answer 'close)
-         'no-bytes)
-        ((is_tuple answer)
-         (respond sock answer delay))
-        ;; crashed handler: loud 5xx, test still gets its record.
-        ('true
-         (io:format "~p~n" (list answer))
-         (respond sock `#(500 #m() "") delay))))
+  ;;; read -> parse -> dispatch; any crash in our own plumbing gets a
+  ;;; visible log line plus an empty EOF reply, so tests fail loudly
+  ;;; but the fake keeps serving.
+  (let* ((result (catch (read-request sock)))
+         (request (if (is_map result) result (bogus-request)))
+         (_log
+           (if (is_map request)
+             'ok
+             (io:format "FAKE-PARSE-CRASH ~p~n" (list result))))
+         (answer
+           (if (is_map request)
+             (catch
+               (funcall handler
+                        (maps:get 'method request)
+                        (maps:get 'path request)
+                        (maps:get 'body request)))
+             #(500 #m() ""))))
+    (respond sock answer delay)
     request))
+
+(defun bogus-request ()
+  #m(method "" path "" body ""))
 
 (defun respond (sock answer delay)
   ;;; answers are tuples now -- access with element, never car.
@@ -224,7 +229,7 @@
         (finish-request sock (parse-head head) rest)))))
 
 (defun finish-request (sock head buffered)
-  (let* ((want (or-zero (maps:get 'content-length head)))
+  (let* ((want (or-zero (maps:get 'content-length head 0)))
          (have (erlang:byte_size buffered))
          (remaining (max 0 (- want have)))
          (body (if (=:= remaining 0)
