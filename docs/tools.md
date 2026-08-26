@@ -69,6 +69,7 @@ wedging the tool service.
 | fs | `tool-fs` | `op`, `path`, `data?` | sandboxed to the root dir given at mount time; ops: `read`, `write`, `list`, `mkdir`, `delete` |
 | eval | `tool-eval` | `form`, `timeout?` (default 5s) | evaluates an LFE form; **trusted operator only** |
 | repl | `tool-repl` | `id`, `form`, `pristine?`, `timeout?` (default 5s) | evaluates in a persistent scratch REPL (see below); **trusted operator only** |
+| http | `tool-http` | `url`, `method?`, `headers?`, `body?`, `timeout?` (default 30s) | single-shot stdlib-`httpc` client; redirects not followed; statuses pass through untouched |
 
 Each form/command runs bounded by its timeout: the shell tool closes the
 port on expiry, and the eval and repl tools run every expression in a

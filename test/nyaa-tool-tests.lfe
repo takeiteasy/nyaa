@@ -43,8 +43,9 @@
     (patchbay_context:mount ctx (nyaa-tool-fs:child_spec tmpdir))
     (patchbay_context:mount ctx (nyaa-tool-eval:child_spec))
     (patchbay_context:mount ctx (nyaa-tool-repl:child_spec))
+    (patchbay_context:mount ctx (nyaa-tool-http:child_spec))
     (each (lambda (name) (await-registered name))
-          '(tool-shell tool-fs tool-eval tool-repl))
+          '(tool-shell tool-fs tool-eval tool-repl tool-http))
     tmpdir))
 
 (defun each (f names)
@@ -84,7 +85,7 @@
                      (=:= '#(ok tool) (maps:find 'kind props)))
                     (_ 'false)))
                 (patchbay_registry:names))))
-        (is-equal '(tool-eval tool-fs tool-repl tool-shell)
+        (is-equal '(tool-eval tool-fs tool-http tool-repl tool-shell)
                   (lists:sort tool-names))))))
 
 (deftest describe-returns-convention-metadata
@@ -219,3 +220,98 @@
                 (call-tool 'tool-repl `#(invoke #m(form (+ 1 2)))))
       (is-match `#(error #(bad_request "form required"))
                 (call-tool 'tool-repl `#(invoke #m(id x)))))))
+
+;;; --- tool-http (#15): single-shot HTTP via stdlib httpc -----------------
+;;;
+;;; Exercised against the same offline nyaa-fake-http used by the
+;;; adapter suite; network-free and deterministic.
+
+(defun http-fake-handler (_method path body)
+  (cond
+    ((=:= path "/echo")
+     `#(200 #m("Content-Type" "text/plain") ,body))
+    ((=:= path "/slow")
+     (timer:sleep 1500)
+     `#(200 #m() ""))
+    ((=:= path "/gone")
+     '#(#(404 #m() "nope")))
+    ('true
+     `#(404 #m("Content-Type" "application/json") "{\"error\":\"nf\"}"))))
+
+(defun start-http-fake ()
+  (let ((`#(ok ,srv)
+         (nyaa-fake-http:start #'http-fake-handler/3)))
+    srv))
+
+(deftest http-get-roundtrip-canned-body
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let ((base (nyaa-fake-http:url (start-http-fake))))
+        (let* ((result
+                 (call-tool 'tool-http
+                            `#(invoke #m(url ,(iolist_to_binary (list base "/echo?x=1"))))))
+              (m (element 2 result)))
+          (is-match `#(ok ,_) result)
+          (is-equal 200 (maps:get 'status m))
+          (is (is_map (maps:get 'headers m)))
+          (is (=:= 'error (maps:find #"content-type" (maps:get 'headers m)))))))))
+
+(deftest http-post-sends-body-and-headers
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let* ((srv (start-http-fake))
+             (base (nyaa-fake-http:url srv))
+             (result
+               (call-tool 'tool-http
+                          `#(invoke #m(url ,(iolist_to_binary (list base "/echo"))
+                                       method "POST"
+                                       headers #m("X-Tag" "abc")
+                                       body #"payload=1")))))
+        (is-match `#(ok ,_) result)
+        ;; echo endpoint returns the request body verbatim
+        (is-equal #"payload=1" (maps:get 'body (element 2 result)))))))
+
+(deftest http-rejects-missing-url-without-hitting-the-wire
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let ((srv (start-http-fake)))
+        (is-match `#(error #(bad_request ,_))
+                  (call-tool 'tool-http `#(invoke #m(method GET))))
+        (is-equal 0 (length (nyaa-fake-http:requests srv)))))))
+
+(deftest http-timeout-is-bounded-and-surfaces-as-error
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let ((srv (start-http-fake)))
+        (let ((base (nyaa-fake-http:url srv)))
+          (is-match `#(error timeout)
+                    (call-tool
+                      'tool-http
+                      `#(invoke #m(url ,(iolist_to_binary (list base "/slow"))
+                                   timeout 200)))))))))
+
+(deftest http-non-ok-status-passes-through
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let ((base (nyaa-fake-http:url (start-http-fake))))
+        (let ((result
+                (call-tool 'tool-http
+                           `#(invoke #m(url ,(iolist_to_binary (list base "/nope")))))))
+          ;; the tool is a plain client: status passes through untouched.
+          (is-equal 404 (maps:get 'status (element 2 result))))))))
+
+(deftest http-unreachable-host-is-unavailable
+  (with-apps
+    (lambda ()
+      (mount-all)
+      (let ((srv (start-http-fake)))
+        (let ((dead (nyaa-fake-http:url srv)))
+          (nyaa-fake-http:stop srv)
+          (is-match `#(error unavailable)
+                    (call-tool 'tool-http
+                               `#(invoke #m(url ,(iolist_to_binary (list dead "/x")))))))))))
