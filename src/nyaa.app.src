@@ -3,7 +3,7 @@
   {vsn, "0.1.0"},
   {registered, ['nyaa-sup']},
   {mod, {'nyaa-app', []}},
-  {applications, [kernel, stdlib, patchbay]},
+  {applications, [kernel, stdlib, ssl, inets, patchbay]},
   {env, []},
   {modules, []},
   {licenses, ["GPL-3.0-only"]},
