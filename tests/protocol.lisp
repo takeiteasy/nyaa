@@ -1,0 +1,181 @@
+(in-package #:nyaa/tests)
+(in-suite :nyaa)
+
+;;; The protocol convention exercised through the real registry and service
+;;; stack, against an echo protocol that implements the contract and nothing
+;;; else: discovery by registration props, pre-flight checking on both the
+;;; COMPLETE and the bare M:CALL paths, content normalisation, and the
+;;; streaming vocabulary.
+
+(m:defservice protocol-echo () ()
+  (:name :protocol-echo))
+
+(defmethod m:metadata ((service protocol-echo))
+  (list :kind :protocol
+        :name :protocol-echo
+        :summary "Echo the last user message"
+        :params '((:temperature number :doc "sampling temperature"))))
+
+(nyaa:define-protocol-handler protocol-echo (service request)
+  (let* ((ref (getf request :ref))
+         (text (nyaa:content-text
+                (getf (car (last (getf request :messages))) :content))))
+    (when (getf request :stream)
+      (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref text))
+      (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref "!"))
+      (nyaa:emit-event (getf request :stream) (nyaa:done ref :stop)))
+    (list :ok (list :role :assistant
+                    :content (nyaa:normalize-content
+                              (concatenate 'string text "!"))
+                    :tool-calls nil
+                    :done t
+                    :meta (list :echoed (length (getf request :messages)))))))
+
+(defvar *protocol-context* nil)
+
+(defun call-with-protocol (body)
+  (let* ((registry (make-instance 'm:registry))
+         (m:*registry* registry)
+         (context (m:start-service (make-instance 'm:context :name :protocols)
+                                   :registry registry)))
+    (setf *protocol-context* context)
+    (unwind-protect
+         (progn (m:mount context 'protocol-echo)
+                (funcall body))
+      (m:stop context))))
+
+(defmacro with-protocol (&body body)
+  `(call-with-protocol (lambda () ,@body)))
+
+(defun hello (&rest extra)
+  (append (list :messages '((:role :user :content "hello"))) extra))
+
+;;; --- the convention --------------------------------------------------
+
+(test protocols-are-discoverable-via-props
+  (with-protocol
+    (is (equal '(:protocol-echo) (nyaa:protocols)))
+    (is (null (nyaa:tools)))))
+
+(test protocol-describes-itself
+  (with-protocol
+    (let ((metadata (nyaa:describe-protocol :protocol-echo)))
+      (is (eq :protocol (getf metadata :kind)))
+      (is (stringp (getf metadata :summary)))
+      (is (eq :temperature (caar (getf metadata :params)))))))
+
+(test complete-performs-one-turn
+  (with-protocol
+    (let ((result (apply #'nyaa:complete :protocol-echo (hello))))
+      (is (eq :ok (first result)))
+      (let ((reply (second result)))
+        (is (eq :assistant (getf reply :role)))
+        (is (eq t (getf reply :done)))
+        (is (equal "hello!" (nyaa:content-text (getf reply :content))))
+        (is (= 1 (getf (getf reply :meta) :echoed)))))))
+
+(test unknown-request-keys-are-ignored
+  ;; A portable caller may offer a superset: a key the protocol does not
+  ;; know must pass through rather than being rejected.
+  (with-protocol
+    (is (eq :ok (first (apply #'nyaa:complete :protocol-echo
+                              (hello :top-k 40 :seed 7)))))))
+
+(test content-blocks-and-flat-strings-agree
+  (with-protocol
+    (is (equal (nyaa:complete :protocol-echo
+                              :messages '((:role :user :content "hello")))
+               (nyaa:complete
+                :protocol-echo
+                :messages '((:role :user
+                             :content ((:type :text :text "hello")))))))))
+
+;;; --- pre-flight -------------------------------------------------------
+
+(defun bad-request-p (result)
+  (let ((reason (nyaa:tool-error result)))
+    (and (consp reason) (eq :bad-request (first reason)))))
+
+(test a-malformed-request-never-reaches-the-protocol
+  (with-protocol
+    (is (bad-request-p (nyaa:complete :protocol-echo)))
+    (is (bad-request-p (nyaa:complete :protocol-echo :messages '())))
+    (is (bad-request-p (nyaa:complete :protocol-echo
+                                      :messages '((:role :bard :content "x")))))
+    (is (bad-request-p (nyaa:complete :protocol-echo
+                                      :messages '((:role :tool :content "x")))))
+    (is (bad-request-p
+         (nyaa:complete :protocol-echo
+                        :messages '((:role :assistant
+                                     :tool-calls ((:name :tool-shell)))))))))
+
+(test a-bare-call-is-checked-too
+  ;; The check lives in the handler as well, so reaching a protocol without
+  ;; COMPLETE cannot skip it.
+  (with-protocol
+    (is (bad-request-p
+         (m:call (m:lookup :protocol-echo)
+                 '(:complete :messages ((:role :bard :content "x"))))))
+    (is (bad-request-p (m:call (m:lookup :protocol-echo) '(:sing))))))
+
+(test the-four-roles-are-accepted
+  (with-protocol
+    (is (eq :ok (first (nyaa:complete
+                        :protocol-echo
+                        :messages '((:role :system :content "be terse")
+                                    (:role :user :content "ls")
+                                    (:role :assistant :content nil
+                                     :tool-calls ((:id "c1" :name :tool-shell
+                                                   :arguments (:cmd "ls"))))
+                                    (:role :tool :tool-call-id "c1"
+                                     :content "a.lisp"))))))))
+
+;;; --- streaming --------------------------------------------------------
+
+(test streaming-to-a-function-sink
+  (with-protocol
+    (let* ((events '())
+           (result (apply #'nyaa:complete :protocol-echo
+                          (hello :ref :r1
+                                 :stream (lambda (event) (push event events))))))
+      (setf events (nreverse events))
+      (is (eq :ok (first result)))
+      (is (equal '(:text-delta :text-delta :done)
+                 (mapcar (lambda (event) (getf event :type)) events)))
+      (is (every (lambda (event) (eq :r1 (getf event :ref))) events))
+      (is (equal "hello" (getf (first events) :text)))
+      (is (eq :stop (getf (third events) :reason))))))
+
+(test streaming-to-a-process-sink
+  (with-protocol
+    (let* ((collected '())
+           (done (bt:make-semaphore))
+           (sink (m:spawn (lambda ()
+                            (loop for event = (m:receive :timeout 5)
+                                  while event
+                                  do (push event collected)
+                                  until (eq :done (getf event :type))
+                                  finally (bt:signal-semaphore done)))
+                          :name "protocol-sink")))
+      (apply #'nyaa:complete :protocol-echo (hello :ref 7 :stream sink))
+      (is (bt:wait-on-semaphore done :timeout 5))
+      (is (= 3 (length collected)))
+      (is (eq :done (getf (first collected) :type))))))
+
+(test a-null-sink-drops-events
+  (is (equal '(:type :done :ref nil :reason nil)
+             (nyaa:emit-event nil (nyaa:done nil)))))
+
+;;; --- results ----------------------------------------------------------
+
+(test backend-error-is-its-own-shape
+  (let ((result (nyaa:backend-error 429 "rate limited")))
+    (is (nyaa:tool-error-p result))
+    (is (equal '(:backend-error 429 "rate limited") (nyaa:tool-error result)))))
+
+(test tool-call-deltas-carry-argument-fragments
+  (let ((event (nyaa:tool-call-delta :r :id "c1" :name :tool-shell
+                                        :arguments "{\"cmd\"")))
+    (is (eq :tool-call-delta (getf event :type)))
+    (is (equal "c1" (getf event :id)))
+    (is (equal "{\"cmd\"" (getf event :arguments)))))

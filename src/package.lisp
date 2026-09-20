@@ -9,6 +9,11 @@
    ;; tool convention
    #:tools #:describe-tool #:invoke-tool
    #:tool-error #:tool-error-p #:tool-trust #:tool-schema
+   ;; protocol convention
+   #:protocols #:describe-protocol #:complete #:check-request
+   #:define-protocol-handler #:backend-error
+   #:normalize-content #:content-text #:text-block
+   #:text-delta #:tool-call-delta #:done #:emit-event
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
