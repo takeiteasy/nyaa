@@ -7,6 +7,7 @@
 ;;; command never wedges the tool service itself.
 
 (defvar *sandbox* nil "The fs tool's sandbox root for the running test.")
+(defvar *context* nil "The context the running test's tools are mounted in.")
 
 (defun call-with-tools (body)
   (let* ((registry (make-instance 'm:registry))
@@ -14,12 +15,15 @@
          (root (make-sandbox-directory))
          (context (m:start-service (make-instance 'm:context :name :tools)
                                    :registry registry)))
-    (setf *sandbox* root)
+    (setf *sandbox* root
+          *context* context)
     (unwind-protect
          (progn
            (m:mount context 'nyaa:tool-fs :root root)
            (m:mount context 'nyaa:tool-shell)
            (m:mount context 'nyaa:tool-http)
+           (m:mount context 'nyaa:tool-eval)
+           (m:mount context 'nyaa:tool-repl)
            (funcall body))
       (m:stop context)
       (uiop:delete-directory-tree (uiop:ensure-directory-pathname root)
@@ -49,7 +53,15 @@
   (with-tools
     ;; kind=tool in the registration props, found through names + lookup:
     ;; the context and meow's own entries must not appear.
-    (is (equal '(:tool-fs :tool-http :tool-shell) (nyaa:tools)))))
+    (is (equal '(:tool-eval :tool-fs :tool-http :tool-repl :tool-shell)
+               (nyaa:tools)))))
+
+(test metadata-carries-a-trust-level
+  (with-tools
+    (is (eq :operator (nyaa:tool-trust (nyaa:describe-tool :tool-shell))))
+    (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-fs))))
+    ;; A tool that names none is an agent tool.
+    (is (eq :agent (nyaa:tool-trust '(:kind :tool))))))
 
 (test describe-returns-convention-metadata
   (with-tools
@@ -250,3 +262,105 @@ err
       (stop-fake-http server)
       (is (eq :unavailable
               (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url))))))))
+
+;;; --- eval --------------------------------------------------------------
+
+(test eval-returns-the-value-and-the-output
+  (with-tools
+    (let ((result (tool :tool-eval :form "(progn (princ \"printed\") (+ 1 2))")))
+      (is (equal "3" (result-value result :value)))
+      (is (equal "printed" (result-value result :out))))))
+
+(test eval-reports-a-reader-error-as-a-bad-request
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error (tool :tool-eval :form "(+ 1")))))))
+
+(test eval-reports-a-signalled-form-as-an-error
+  (with-tools
+    (let ((reason (nyaa:tool-error (tool :tool-eval :form "(error \"boom\")"))))
+      (is (eq :error (first reason)))
+      (is (search "boom" (second reason))))))
+
+(test eval-does-not-evaluate-at-read-time
+  ;; *READ-EVAL* is nil in the worker, so #. never runs.
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error
+                       (tool :tool-eval :form "'#.(error \"read-eval ran\")")))))))
+
+(test eval-keeps-no-state-between-calls
+  (with-tools
+    (is (eq :ok (first (tool :tool-eval :form "(defparameter *x* 1)"))))
+    (let ((reason (nyaa:tool-error (tool :tool-eval :form "*x*"))))
+      (is (eq :error (first reason))))))
+
+(test eval-enforces-its-timeout-and-stays-alive
+  (with-tools
+    (is (eq :timeout (nyaa:tool-error (tool :tool-eval :form "(loop)"
+                                                       :timeout 500))))
+    (is (equal "4" (result-value (tool :tool-eval :form "(+ 2 2)") :value)))))
+
+(test eval-requires-a-form
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error (tool :tool-eval :timeout 100)))))))
+
+;;; --- repl --------------------------------------------------------------
+
+(test repl-threads-state-through-one-session
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *x* 41)")
+    (is (equal "42" (result-value (tool :tool-repl :id "a" :form "(incf *x*)")
+                                  :value)))))
+
+(test repl-sessions-are-isolated
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+    (is (eq :error (first (nyaa:tool-error
+                           (tool :tool-repl :id "b" :form "*x*")))))))
+
+(test repl-pristine-restarts-the-session-empty
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+    (is (eq :error (first (nyaa:tool-error
+                           (tool :tool-repl :id "a" :form "*x*"
+                                            :pristine t)))))))
+
+(test repl-timeout-restarts-the-session-empty
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+    (is (eq :timeout (nyaa:tool-error (tool :tool-repl :id "a" :form "(loop)"
+                                                       :timeout 500))))
+    ;; The killed worker is forgotten, so the id answers again -- empty.
+    (is (eq :error (first (nyaa:tool-error
+                           (tool :tool-repl :id "a" :form "*x*")))))))
+
+(defparameter +getpid-form+
+  ;; A worker runs the host implementation, so the bare image it starts has
+  ;; exactly the internals this one does.
+  #+sbcl "(sb-unix:unix-getpid)"
+  #+ecl "(si:getpid)"
+  #+ccl "(ccl::getpid)")
+
+(defun unix-process-alive-p (pid)
+  (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
+                                        :ignore-error-status t))))
+
+(test repl-workers-die-with-the-service
+  (let ((pids '()))
+    (with-tools
+      (dolist (id '("a" "b"))
+        (push (parse-integer
+               (result-value (tool :tool-repl :id id :form +getpid-form+) :value))
+              pids))
+      (is (every #'unix-process-alive-p pids)))
+    ;; The fixture stopped the context, which unwinds the effect holding
+    ;; each worker.
+    (dolist (pid pids)
+      (is (not (unix-process-alive-p pid))))))
+
+(test repl-requires-a-form
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error (tool :tool-repl :timeout 100)))))))

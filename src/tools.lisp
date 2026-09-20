@@ -54,6 +54,11 @@ runs on, and the tool's own (:error :timeout) is never seen."
 (defun tool-error (result)
   (when (tool-error-p result) (second result)))
 
+(defun tool-trust (metadata)
+  "METADATA's :TRUST, or :AGENT when it names none. :OPERATOR marks a tool
+that only a trusted operator may reach."
+  (getf metadata :trust :agent))
+
 ;;; --- argument coercion -----------------------------------------------
 
 ;;; Model-supplied arguments arrive as whatever the caller had to hand:

@@ -13,7 +13,9 @@
                (:file "tool-fs")
                (:file "tool-shell")
                (:file "tool-http")
-               (:file "worker"))
+               (:file "worker")
+               (:file "tool-eval")
+               (:file "tool-repl"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"

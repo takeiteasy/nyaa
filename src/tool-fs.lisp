@@ -20,6 +20,7 @@
 (defmethod m:metadata ((service tool-fs))
   (list :kind :tool
         :name :tool-fs
+        :trust :agent
         :summary "Read, write, list and delete files inside the sandboxed root"
         :params '(:op "read | write | list | mkdir | delete"
                   :path "path relative to the sandbox root"

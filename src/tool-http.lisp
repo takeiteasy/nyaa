@@ -17,6 +17,7 @@
 (defmethod m:metadata ((service tool-http))
   (list :kind :tool
         :name :tool-http
+        :trust :operator
         :summary "Perform a single-shot HTTP request"
         :params '(:url "target URL, http or https"
                   :method "HTTP verb, default GET"

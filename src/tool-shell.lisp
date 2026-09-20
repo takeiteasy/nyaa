@@ -15,6 +15,7 @@
 (defmethod m:metadata ((service tool-shell))
   (list :kind :tool
         :name :tool-shell
+        :trust :operator
         :summary "Run a shell command (sh -c) and capture merged output"
         :params '(:cmd "command string to run"
                   :timeout "kill the command after this many milliseconds")))

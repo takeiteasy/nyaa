@@ -30,6 +30,7 @@ The [tools](tools.md) mount into a meow context:
 (defvar *tools* (meow:start-service (make-instance 'meow:context :name :tools)))
 (meow:mount *tools* 'nyaa:tool-fs :root "/srv/workspace")
 (meow:mount *tools* 'nyaa:tool-shell)
+(meow:mount *tools* 'nyaa:tool-eval)
 (nyaa:invoke-tool :tool-shell :cmd "echo hello")
 ```
 
