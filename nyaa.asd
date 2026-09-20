@@ -12,7 +12,8 @@
                (:file "tools")
                (:file "tool-fs")
                (:file "tool-shell")
-               (:file "tool-http"))
+               (:file "tool-http")
+               (:file "worker"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
@@ -23,6 +24,7 @@
                (:file "suite")
                (:file "smoke")
                (:file "fake-http")
+               (:file "worker")
                (:file "tools"))
   :perform (test-op (o c)
              (unless (symbol-call :fiveam :run! :nyaa)

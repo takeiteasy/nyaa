@@ -1,0 +1,26 @@
+(in-package #:nyaa/tests)
+(in-suite :nyaa)
+
+;;; The worker protocol on its own, below the tools that use it: the
+;;; handshake, one exchange, and what a lapsed deadline leaves behind.
+
+(defmacro with-worker ((worker) &body body)
+  `(let ((,worker (nyaa::start-worker)))
+     (unwind-protect (progn (is (not (null ,worker))) ,@body)
+       (nyaa::kill-worker ,worker))))
+
+(test worker-round-trips-a-form
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval w "(list 1 2)" 5000)))
+      (is (equal "(1 2)" (getf (second result) :value))))))
+
+(test worker-is-unavailable-when-it-cannot-start
+  (let ((nyaa:*worker-command* (list "/nonexistent/lisp" "--eval")))
+    (is (null (nyaa::start-worker)))))
+
+(test worker-dies-with-its-deadline
+  (with-worker (w)
+    (is (eq :timeout (nyaa:tool-error (nyaa::worker-eval w "(loop)" 500))))
+    (is (not (nyaa::worker-alive-p w)))
+    ;; A dead worker answers, rather than blocking a caller that reuses it.
+    (is (eq :unavailable (nyaa:tool-error (nyaa::worker-eval w "1" 500))))))

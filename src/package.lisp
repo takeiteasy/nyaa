@@ -9,5 +9,7 @@
    ;; tool convention
    #:tools #:describe-tool #:invoke-tool
    #:tool-error #:tool-error-p
+   ;; workers
+   #:*worker-command*
    ;; tools
    #:tool-fs #:tool-shell #:tool-http))
