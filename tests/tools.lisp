@@ -347,6 +347,14 @@ err
   (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
                                         :ignore-error-status t))))
 
+(defun wait-for-exit (pid &optional (deadline 2.0))
+  "True once PID is gone. Stopping a service is not documented to block
+until its effects have unwound, so the check polls rather than assume."
+  (loop repeat (ceiling deadline 0.05)
+        while (unix-process-alive-p pid)
+        do (sleep 0.05))
+  (not (unix-process-alive-p pid)))
+
 (test repl-workers-die-with-the-service
   (let ((pids '()))
     (with-tools
@@ -358,7 +366,7 @@ err
     ;; The fixture stopped the context, which unwinds the effect holding
     ;; each worker.
     (dolist (pid pids)
-      (is (not (unix-process-alive-p pid))))))
+      (is (wait-for-exit pid)))))
 
 (test repl-requires-a-form
   (with-tools

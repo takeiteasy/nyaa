@@ -31,6 +31,7 @@ The [tools](tools.md) mount into a meow context:
 (meow:mount *tools* 'nyaa:tool-fs :root "/srv/workspace")
 (meow:mount *tools* 'nyaa:tool-shell)
 (meow:mount *tools* 'nyaa:tool-eval)
+(meow:mount *tools* 'nyaa:tool-repl)
 (nyaa:invoke-tool :tool-shell :cmd "echo hello")
 ```
 
