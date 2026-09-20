@@ -1,7 +1,7 @@
 ;;; The worker's read/eval/print loop. This file is not part of the nyaa
 ;;; system: it is read as text at compile time and handed to a bare child
 ;;; Lisp on its command line, so it must stay a single form that loads
-;;; nothing. See src/worker.lisp for the protocol.
+;;; nothing. See worker.lisp for the protocol.
 
 (let ((p (or (find-package "NYAA-WORKER")
              (make-package "NYAA-WORKER" :use '("CL")))))

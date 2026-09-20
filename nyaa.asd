@@ -5,20 +5,20 @@
   :version "0.1.0"
   :depends-on ("meow" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
                "usocket" "bordeaux-threads" "uiop")
-  :pathname "src/"
   :serial t
   :components ((:file "package")
                (:file "nyaa")
                (:file "schema")
-               (:file "tools")
+               (:file "tool")
                (:file "protocol")
-               (:file "tool-fs")
-               (:file "tool-shell")
-               (:file "tool-http")
                (:file "worker")
                (:static-file "worker-program.lisp")
-               (:file "tool-eval")
-               (:file "tool-repl"))
+               (:module "tools"
+                :components ((:file "fs")
+                             (:file "shell")
+                             (:file "http")
+                             (:file "eval")
+                             (:file "repl"))))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
