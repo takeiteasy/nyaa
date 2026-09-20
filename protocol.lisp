@@ -18,9 +18,11 @@
         #'string< :key #'string))
 
 (defun %protocol-process (name &key (registry m:*registry*))
-  (let ((process (m:lookup name :registry registry)))
-    (unless process (error "No protocol registered under ~s." name))
-    process))
+  "NAME's process and its registration props. A provider answers the same
+messages, so both reach a backend through here."
+  (multiple-value-bind (process props) (m:lookup name :registry registry)
+    (unless process (error "Nothing registered under ~s." name))
+    (values process props)))
 
 (defun describe-protocol (name &key (registry m:*registry*))
   "NAME's metadata plist."
@@ -84,14 +86,19 @@ single-text-block case."
 ;;; merely echoed. Tracked in ~takeiteasy/nyaa#32.
 
 (defun complete (name &rest request)
-  "Perform one turn against protocol NAME. Returns (:ok plist) or
+  "Perform one turn against protocol or provider NAME. Returns (:ok plist) or
 (:error reason)."
   (let ((problem (check-request request)))
     (if problem
         (bad-request "~a" problem)
-        (m:call (%protocol-process name)
-                (list* :complete request)
-                :timeout (%caller-timeout request)))))
+        (multiple-value-bind (process props) (%protocol-process name)
+          (m:call process
+                  (list* :complete request)
+                  ;; A provider delegates to its protocol, so the reply
+                  ;; travels two hops and each waiter needs its own margin.
+                  :timeout (%caller-timeout
+                            request
+                            (if (eq (getf props :kind) :provider) 2 1)))))))
 
 ;;; --- streaming --------------------------------------------------------
 

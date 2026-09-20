@@ -47,6 +47,13 @@ request:
   :messages '((:role :user :content "hello")))
 ```
 
+A [provider](providers.md) carries that backend for you:
+
+```lisp
+(meow:mount *tools* 'nyaa:provider-ollama :model "llama3.2")
+(nyaa:complete :provider-ollama :messages '((:role :user :content "hello")))
+```
+
 Runs on SBCL and ECL.
 
 ## Tests

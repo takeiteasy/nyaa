@@ -30,12 +30,13 @@ props: meow has no props-filtered lookup."
 (defconstant +default-tool-timeout+ 30000
   "Milliseconds a tool gives its own work when the caller names no deadline.")
 
-(defun %caller-timeout (args)
+(defun %caller-timeout (args &optional (hops 1))
   "Seconds to wait on M:CALL, read from ARGS after coercion. A tool bounds
 its own work, so the caller must outlast it -- otherwise M:CALL's 5s default
 aborts the caller while the tool runs on, and the tool's own (:error
-:timeout) is never seen."
-  (+ 5 (/ (getf args :timeout +default-tool-timeout+) 1000)))
+:timeout) is never seen. HOPS is the number of services the call passes
+through, each of which needs that margin over the one it waits on."
+  (+ (* 5 hops) (/ (getf args :timeout +default-tool-timeout+) 1000)))
 
 (defun invoke-tool (name &rest args)
   "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason)."

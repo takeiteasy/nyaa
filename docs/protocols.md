@@ -10,7 +10,7 @@ adapters.
 | Layer | What it is | Where it lives |
 |---|---|---|
 | protocol | wire shape | a service, one per shape |
-| provider | base URL, auth, catalogue, quirks | the `define-provider` DSL |
+| provider | base URL, auth, catalogue, quirks | the [`define-provider`](providers.md) DSL |
 | model | a bound provider and model id | named by the orchestrator |
 
 ## The convention
@@ -172,10 +172,10 @@ repeats them, so a consumer of the sink alone needs no arrival order. The turn
 ends on `data: [DONE]` or on a `finish_reason`; a stream that stops before
 either is `(:backend-error ...)`.
 
-Ollama serves this API at `http://127.0.0.1:11434/v1` with no key, so the
-protocol is testable end to end locally. The offline tests run against the fake
-HTTP server; set `NYAA_OLLAMA_URL` (and optionally `NYAA_OLLAMA_MODEL`) to run
-the live ones too.
+`:provider-ollama` binds this protocol to a local backend with no key, so it is
+testable end to end locally — see [providers](providers.md). The offline tests
+run against the fake HTTP server; set `NYAA_OLLAMA_URL` (and optionally
+`NYAA_OLLAMA_MODEL`) to run the live ones too.
 
 ## Discovery
 
@@ -185,7 +185,8 @@ the live ones too.
 ```
 
 `protocols` scans registration props for `:kind :protocol`, the way `tools`
-scans for `:kind :tool`.
+scans for `:kind :tool`. `complete` reaches a [provider](providers.md) by name
+the same way, since a provider answers the same messages.
 
 ## Limitations
 

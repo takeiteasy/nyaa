@@ -20,7 +20,13 @@
                              (:file "eval")
                              (:file "repl")))
                (:module "protocols"
-                :components ((:file "openai"))))
+                :components ((:file "openai")))
+               ;; After the protocols: a provider layers its data onto one,
+               ;; and DEFINE-PROVIDER is a macro, so :serial order is what
+               ;; makes both available to a definition.
+               (:file "provider")
+               (:module "providers"
+                :components ((:file "ollama"))))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
@@ -34,6 +40,7 @@
                (:file "protocol")
                (:file "fake-http")
                (:file "protocol-openai")
+               (:file "provider")
                (:file "worker")
                (:file "tools"))
   :perform (test-op (o c)

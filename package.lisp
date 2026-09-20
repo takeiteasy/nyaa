@@ -14,6 +14,8 @@
    #:define-protocol-handler #:backend-error
    #:normalize-content #:content-text #:text-block
    #:text-delta #:tool-call-delta #:done #:emit-event
+   ;; provider convention
+   #:define-provider #:providers #:describe-provider #:provider
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
@@ -22,5 +24,7 @@
    #:*worker-command*
    ;; protocols
    #:protocol-openai
+   ;; providers
+   #:provider-ollama
    ;; tools
    #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl))
