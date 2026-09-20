@@ -68,7 +68,31 @@
     (let ((metadata (nyaa:describe-tool :tool-shell)))
       (is (eq :tool (getf metadata :kind)))
       (is (stringp (getf metadata :summary)))
-      (is (listp (getf metadata :params))))))
+      ;; The schema renders, so a protocol can put it in a tools array.
+      (is (nyaa:schema->json-schema (nyaa:tool-schema metadata))))))
+
+(test arguments-are-coerced-against-the-schema
+  (with-tools
+    ;; A model supplies strings whatever the declared type.
+    (is (equal (format nil "ok~%")
+               (result-value (tool :tool-shell :cmd "echo ok" :timeout "5000")
+                             :out)))
+    ;; :op is a member, so the string and the keyword name the same op.
+    (tool :tool-fs :op "write" :path "m.txt" :data "x")
+    (is (equal "x" (result-value (tool :tool-fs :op :read :path "m.txt") :data)))))
+
+(test an-unknown-parameter-is-a-bad-request
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error
+                       (tool :tool-shell :cmd "echo hi" :colour t)))))))
+
+(test a-string-timeout-outlives-the-default-call-timeout
+  ;; %CALLER-TIMEOUT reads the coerced arguments: a model-supplied "15000"
+  ;; must extend the caller's wait the same way 15000 does.
+  (with-tools
+    (is (eql 0 (result-value (tool :tool-shell :cmd "sleep 8" :timeout "15000")
+                             :exit)))))
 
 (test unknown-message-is-a-bad-request
   (with-tools

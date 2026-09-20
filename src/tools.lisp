@@ -14,29 +14,39 @@ props: meow has no props-filtered lookup."
         #'string< :key #'string))
 
 (defun %tool-process (name &key (registry m:*registry*))
-  (or (m:lookup name :registry registry)
-      (error "No tool registered under ~s." name)))
+  "NAME's process and its registration props, which carry the metadata."
+  (multiple-value-bind (process props) (m:lookup name :registry registry)
+    (unless process (error "No tool registered under ~s." name))
+    (values process props)))
 
 (defun describe-tool (name &key (registry m:*registry*))
   "NAME's metadata plist."
   (m:call (%tool-process name :registry registry) '(:describe)))
 
+(defun tool-schema (metadata)
+  "METADATA's parameter schema."
+  (getf metadata :params))
+
 (defconstant +default-tool-timeout+ 30000
   "Milliseconds a tool gives its own work when the caller names no deadline.")
 
 (defun %caller-timeout (args)
-  "Seconds to wait on M:CALL. A tool bounds its own work, so the caller must
-outlast it -- otherwise M:CALL's 5s default aborts the caller while the tool
-runs on, and the tool's own (:error :timeout) is never seen."
-  (let ((ms (getf args :timeout +default-tool-timeout+)))
-    (+ 5 (/ (if (and (integerp ms) (plusp ms)) ms +default-tool-timeout+)
-            1000))))
+  "Seconds to wait on M:CALL, read from ARGS after coercion. A tool bounds
+its own work, so the caller must outlast it -- otherwise M:CALL's 5s default
+aborts the caller while the tool runs on, and the tool's own (:error
+:timeout) is never seen."
+  (+ 5 (/ (getf args :timeout +default-tool-timeout+) 1000)))
 
 (defun invoke-tool (name &rest args)
   "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason)."
-  (m:call (%tool-process name)
-          (list* :invoke args)
-          :timeout (%caller-timeout args)))
+  (multiple-value-bind (process props) (%tool-process name)
+    (multiple-value-bind (coerced problem)
+        (coerce-args (tool-schema props) args)
+      (if problem
+          (bad-request "~a" problem)
+          (m:call process
+                  (list* :invoke coerced)
+                  :timeout (%caller-timeout coerced))))))
 
 ;;; --- results ---------------------------------------------------------
 
@@ -59,33 +69,24 @@ runs on, and the tool's own (:error :timeout) is never seen."
 that only a trusted operator may reach."
   (getf metadata :trust :agent))
 
-;;; --- argument coercion -----------------------------------------------
-
-;;; Model-supplied arguments arrive as whatever the caller had to hand:
-;;; strings, symbols or keywords. Accept all three, reject the rest.
-
-(defun arg-string (value)
-  "VALUE as a string, or NIL if it is absent or of an unusable type. NIL is
-absence, never the symbol name."
-  (typecase value
-    (null nil)
-    (string value)
-    (symbol (string-downcase (symbol-name value)))
-    (t nil)))
-
-(defun arg-timeout (args)
-  "ARGS' :timeout in milliseconds, or NIL if it is present but unusable."
-  (let ((ms (getf args :timeout +default-tool-timeout+)))
-    (and (integerp ms) (plusp ms) ms)))
+;;; --- the handler -----------------------------------------------------
 
 (defmacro define-tool-handler (class (service args) &body body)
   "Define HANDLE for CLASS: (:describe) answers METADATA and (:invoke . plist)
-runs BODY with ARGS bound to the plist. Meow intercepts %update-config,
-%effects and %timer-fire before HANDLE, so a tool must not use those heads."
-  `(defmethod m:handle ((,service ,class) message)
-     (case (first message)
-       (:describe (m:metadata ,service))
-       (:invoke (let ((,args (rest message)))
-                  (declare (ignorable ,args))
-                  ,@body))
-       (t (bad-request "unknown message ~s" (first message))))))
+runs BODY with ARGS bound to the plist, coerced against the metadata schema.
+Meow intercepts %update-config, %effects and %timer-fire before HANDLE, so a
+tool must not use those heads."
+  (a:with-gensyms (problem)
+    `(defmethod m:handle ((,service ,class) message)
+       (case (first message)
+         (:describe (m:metadata ,service))
+         ;; INVOKE-TOOL coerces too; doing it here as well means a tool
+         ;; reached by a bare M:CALL sees the same checked arguments.
+         (:invoke (multiple-value-bind (,args ,problem)
+                      (coerce-args (tool-schema (m:metadata ,service))
+                                   (rest message))
+                    (declare (ignorable ,args))
+                    (if ,problem
+                        (bad-request "~a" ,problem)
+                        (progn ,@body))))
+         (t (bad-request "unknown message ~s" (first message)))))))

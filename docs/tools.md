@@ -18,9 +18,14 @@ A tool registers under `:tool-<name>`, and its `metadata` plist carries
         :name :tool-shell
         :trust :operator
         :summary "Run a shell command (sh -c) and capture merged output"
-        :params '(:cmd "command string to run"
-                  :timeout "kill the command after this many milliseconds")))
+        :params `((:cmd string :required t :doc "command string to run")
+                  (:timeout (integer 1) :default ,+default-tool-timeout+
+                   :doc "kill the command after this many milliseconds"))))
 ```
+
+`:params` is a typed [schema](schema.md). It drives coercion and validation, so
+a tool reads its arguments with plain `getf`, and it renders to the JSON Schema
+a model needs for tool calling. `tool-schema` reads it out of the metadata.
 
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
@@ -33,7 +38,8 @@ class symbol, and names compare with `equal`, so `foo::tool-shell` and
 It answers two messages, through `define-tool-handler`:
 
 - `(:describe)` — replies with the metadata plist
-- `(:invoke . plist)` — performs the operation
+- `(:invoke . plist)` — coerces the plist against the schema, then performs the
+  operation
 
 Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 `handle`, so a tool must not use them.
@@ -49,7 +55,7 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 
 | Reason | Meaning |
 |---|---|
-| `(:bad-request msg)` | The invoke arguments are malformed. |
+| `(:bad-request msg)` | The invoke arguments are malformed, or will not coerce. |
 | `:timeout` | The deadline lapsed. |
 | `:unavailable` | The far end could not be reached. |
 | `(:error detail)` | Anything else. |
@@ -61,7 +67,8 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 
 `(tools)` scans registration props for `:kind :tool`. Props are a snapshot taken
 at registration — there is no setter — so a tool's advertised `:params` change
-only when it is reloaded.
+only when it is reloaded. `invoke-tool` reads the schema from there, which costs
+no message to the tool.
 
 ```lisp
 (nyaa:tools)  ; => (:tool-fs :tool-http :tool-shell)
@@ -72,7 +79,11 @@ only when it is reloaded.
 ```lisp
 (nyaa:describe-tool :tool-shell)
 (nyaa:invoke-tool :tool-shell :cmd "ls -la")
+(nyaa:schema->json-schema (nyaa:tool-schema (nyaa:describe-tool :tool-shell)))
 ```
+
+`invoke-tool` coerces its arguments against the tool's schema first, so a
+model-supplied `:timeout "15000"` bounds the wait exactly as `15000` does.
 
 `invoke-tool` waits longer than the tool's own `:timeout`, so the tool's bounded
 `(:error :timeout)` is what a caller sees. Calling a tool with a bare `m:call`
@@ -83,13 +94,14 @@ kept running.
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `:tool-fs` | `:op`, `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. |
+| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c`; merged stdout and stderr, plus the exit status. |
-| `:tool-http` | `:url`, `:method`, `:headers`, `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
+| `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
 
-`:timeout` is in milliseconds and defaults to 30000.
+`:timeout` is in milliseconds and defaults to 30000. Each tool's exact types
+are in its `:params`; see [schemas](schema.md) for the vocabulary.
 
 ```lisp
 (m:mount context 'nyaa:tool-fs :root "/srv/workspace")

@@ -19,40 +19,25 @@
         :name :tool-http
         :trust :operator
         :summary "Perform a single-shot HTTP request"
-        :params '(:url "target URL, http or https"
-                  :method "HTTP verb, default GET"
-                  :headers "plist of extra request headers"
-                  :body "request payload"
-                  :timeout "whole-exchange deadline in milliseconds")))
+        :params `((:url string :required t :doc "target URL, http or https")
+                  (:method (member :get :post :put :patch :delete :head :options)
+                   :default :get :doc "HTTP verb")
+                  (:headers (map-of string) :doc "extra request headers")
+                  (:body string :doc "request payload")
+                  (:timeout (integer 1) :default ,+default-tool-timeout+
+                   :doc "whole-exchange deadline in milliseconds"))))
 
 (define-tool-handler tool-http (service args)
-  (let ((url (arg-string (getf args :url)))
-        (timeout (arg-timeout args))
-        (headers (header-alist (getf args :headers))))
-    (cond
-      ((null url) (bad-request "url required, a string"))
-      ((null timeout) (bad-request "timeout must be a positive number of ms"))
-      ((eq headers :bad) (bad-request "headers must be a plist"))
-      (t (perform-request url
-                          (string-upcase (or (arg-string (getf args :method))
-                                             "GET"))
-                          headers
-                          (arg-string (getf args :body))
-                          timeout)))))
+  (perform-request (getf args :url)
+                   (getf args :method)
+                   (header-alist (getf args :headers))
+                   (getf args :body)
+                   (getf args :timeout)))
 
 (defun header-alist (headers)
-  "HEADERS, a flat plist of names and values, as a lower-cased alist, or :BAD.
-Every element must be usable as text: an alist of pairs has an even length too,
-and would otherwise pass as one empty header."
-  (cond
-    ((null headers) '())
-    ((and (listp headers)
-          (evenp (length headers))
-          (every #'arg-string headers))
-     (loop for (name value) on headers by #'cddr
-           collect (cons (string-downcase (arg-string name))
-                         (arg-string value))))
-    (t :bad)))
+  "HEADERS, a coerced plist of names and values, as a lower-cased alist."
+  (loop for (name value) on headers by #'cddr
+        collect (cons (string-downcase name) value)))
 
 (defun perform-request (url method headers body timeout-ms)
   (let ((result nil)
@@ -76,7 +61,7 @@ and would otherwise pass as one empty header."
       (multiple-value-bind (payload status response-headers)
           (apply #'drakma:http-request
                  url
-                 :method (a:make-keyword method)
+                 :method method
                  :redirect nil
                  ;; Content-Type is drakma's own argument. Leaving it in
                  ;; ADDITIONAL-HEADERS too would send it twice; dropping it

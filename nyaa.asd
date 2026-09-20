@@ -9,6 +9,7 @@
   :serial t
   :components ((:file "package")
                (:file "nyaa")
+               (:file "schema")
                (:file "tools")
                (:file "tool-fs")
                (:file "tool-shell")
@@ -25,6 +26,7 @@
   :serial t
   :components ((:file "package")
                (:file "suite")
+               (:file "schema")
                (:file "smoke")
                (:file "fake-http")
                (:file "worker")

@@ -21,30 +21,27 @@
         :name :tool-repl
         :trust :operator
         :summary "Evaluate a Lisp form in a persistent worker, one per id"
-        :params '(:id "session id, default \"default\""
-                  :form "source text of one form"
-                  :pristine "restart the session's worker first"
-                  :timeout "kill the worker after this many milliseconds")))
+        :params `((:id string :default "default" :doc "session id")
+                  (:form string :required t :doc "source text of one form")
+                  (:pristine boolean :default nil
+                   :doc "restart the session's worker first")
+                  (:timeout (integer 1) :default ,+default-tool-timeout+
+                   :doc "kill the worker after this many milliseconds"))))
 
 (define-tool-handler tool-repl (service args)
-  (let ((source (arg-string (getf args :form)))
-        (timeout (arg-timeout args))
-        (id (or (arg-string (getf args :id)) "default")))
-    (cond
-      ((null source) (bad-request "form required, a string"))
-      ((null timeout) (bad-request "timeout must be a positive number of ms"))
-      (t (when (getf args :pristine)
-           (drop-repl-worker service id))
-         (let ((worker (repl-worker service id)))
-           (if (null worker)
-               (fail :unavailable)
-               (let ((result (worker-eval worker source timeout)))
-                 ;; A worker that missed its deadline was killed; forget it
-                 ;; so the id starts empty rather than answering :unavailable
-                 ;; for ever.
-                 (unless (worker-alive-p worker)
-                   (drop-repl-worker service id))
-                 result)))))))
+  (let ((id (getf args :id)))
+    (when (getf args :pristine)
+      (drop-repl-worker service id))
+    (let ((worker (repl-worker service id)))
+      (if (null worker)
+          (fail :unavailable)
+          (let ((result (worker-eval worker (getf args :form)
+                                     (getf args :timeout))))
+            ;; A worker that missed its deadline was killed; forget it so the
+            ;; id starts empty rather than answering :unavailable for ever.
+            (unless (worker-alive-p worker)
+              (drop-repl-worker service id))
+            result)))))
 
 (defun repl-worker (service id)
   "ID's worker, started on first use. Each is held as an effect, so stopping

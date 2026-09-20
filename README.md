@@ -13,6 +13,7 @@ Runs on SBCL and ECL.
 
 - [Getting started](docs/getting-started.md)
 - [Tools](docs/tools.md)
+- [Parameter schemas](docs/schema.md)
 
 ## License
 

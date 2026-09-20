@@ -22,19 +22,18 @@
         :name :tool-fs
         :trust :agent
         :summary "Read, write, list and delete files inside the sandboxed root"
-        :params '(:op "read | write | list | mkdir | delete"
-                  :path "path relative to the sandbox root"
-                  :data "file contents, for write")))
+        :params '((:op (member :read :write :list :mkdir :delete) :required t
+                   :doc "operation to perform")
+                  (:path string :required t
+                   :doc "path relative to the sandbox root")
+                  (:data string :doc "file contents, for write"))))
 
 (define-tool-handler tool-fs (service args)
-  (let ((path (arg-string (getf args :path)))
-        (op (getf args :op)))
-    (cond
-      ((null path) (bad-request "path required, a string"))
-      (t (let ((resolved (normalize-path (join-path (fs-root service) path))))
-           (if (under-root (fs-root service) resolved)
-               (apply-fs-op op resolved args)
-               (fail (list :forbidden "path escapes sandbox root"))))))))
+  (let ((resolved (normalize-path (join-path (fs-root service)
+                                             (getf args :path)))))
+    (if (under-root (fs-root service) resolved)
+        (apply-fs-op (getf args :op) resolved args)
+        (fail (list :forbidden "path escapes sandbox root")))))
 
 ;;; --- the sandbox -----------------------------------------------------
 
@@ -77,9 +76,10 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
 
 (defun apply-fs-op (op path args)
   (handler-case
-      (case (a:make-keyword (string-upcase (or (arg-string op) "")))
+      (case op
         (:read (ok :data (a:read-file-into-string path)))
-        (:write (let ((data (arg-string (getf args :data))))
+        ;; :data is required for write alone, which the schema cannot say.
+        (:write (let ((data (getf args :data)))
                   (if (null data)
                       (bad-request "data required for write, a string")
                       (progn
@@ -99,7 +99,7 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
         (:delete (if (uiop:directory-exists-p path)
                      (bad-request "delete refuses directories")
                      (progn (delete-file path) (ok))))
-        (t (bad-request "op must be read|write|list|mkdir|delete")))
+        (t (bad-request "unknown op ~s" op)))
     (file-error (e) (fail (list :error (princ-to-string e))))))
 
 (defun entry-name (pathname)

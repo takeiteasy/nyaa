@@ -17,16 +17,12 @@
         :name :tool-shell
         :trust :operator
         :summary "Run a shell command (sh -c) and capture merged output"
-        :params '(:cmd "command string to run"
-                  :timeout "kill the command after this many milliseconds")))
+        :params `((:cmd string :required t :doc "command string to run")
+                  (:timeout (integer 1) :default ,+default-tool-timeout+
+                   :doc "kill the command after this many milliseconds"))))
 
 (define-tool-handler tool-shell (service args)
-  (let ((cmd (arg-string (getf args :cmd)))
-        (timeout (arg-timeout args)))
-    (cond
-      ((null cmd) (bad-request "cmd required, a string"))
-      ((null timeout) (bad-request "timeout must be a positive number of ms"))
-      (t (run-command cmd timeout)))))
+  (run-command (getf args :cmd) (getf args :timeout)))
 
 (defun run-command (cmd timeout-ms)
   (let* ((process (uiop:launch-program (list "/bin/sh" "-c" cmd)

@@ -14,17 +14,14 @@
         :name :tool-eval
         :trust :operator
         :summary "Evaluate a Lisp form in a single-use worker process"
-        :params '(:form "source text of one form"
-                  :timeout "kill the worker after this many milliseconds")))
+        :params `((:form string :required t :doc "source text of one form")
+                  (:timeout (integer 1) :default ,+default-tool-timeout+
+                   :doc "kill the worker after this many milliseconds"))))
 
 (define-tool-handler tool-eval (service args)
-  (let ((source (arg-string (getf args :form)))
-        (timeout (arg-timeout args)))
-    (cond
-      ((null source) (bad-request "form required, a string"))
-      ((null timeout) (bad-request "timeout must be a positive number of ms"))
-      (t (let ((worker (start-worker)))
-           (if (null worker)
-               (fail :unavailable)
-               (unwind-protect (worker-eval worker source timeout)
-                 (kill-worker worker))))))))
+  (let ((worker (start-worker)))
+    (if (null worker)
+        (fail :unavailable)
+        (unwind-protect
+             (worker-eval worker (getf args :form) (getf args :timeout))
+          (kill-worker worker)))))
