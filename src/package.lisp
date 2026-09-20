@@ -1,6 +1,7 @@
 (defpackage #:nyaa
   (:use #:cl)
   (:local-nicknames (#:a #:alexandria)
-                    (#:m #:meow))
+                    (#:m #:meow)
+                    (#:json #:com.inuoe.jzon))
   (:export
    #:*version*))

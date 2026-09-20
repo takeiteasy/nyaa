@@ -17,9 +17,11 @@ git clone https://github.com/takeiteasy/trivial-high-precision-timer \
 (ql:quickload :nyaa)
 ```
 
-Dependencies: `meow` and `alexandria`. meow pulls in `bordeaux-threads`
-(bt2 API), `closer-mop` and `trivial-high-precision-timer`, which is not in
-a Quicklisp dist and needs the local project above.
+Dependencies: `meow`, `alexandria`, [`jzon`](https://github.com/Zulu-Inuoe/jzon)
+for JSON and [`drakma`](https://edicl.github.io/drakma/) for HTTP. meow pulls
+in `bordeaux-threads` (bt2 API), `closer-mop` and
+`trivial-high-precision-timer`, which is not in a Quicklisp dist and needs the
+local project above. drakma needs OpenSSL for HTTPS.
 
 Runs on SBCL and ECL.
 
@@ -36,4 +38,11 @@ and exits non-zero on failure:
 
 ```sh
 tests/test.sh ecl
+```
+
+Tests that make real network requests are skipped unless `NYAA_LIVE_HTTP` is
+set:
+
+```sh
+NYAA_LIVE_HTTP=1 tests/test.sh
 ```
