@@ -40,12 +40,17 @@
                           timeout)))))
 
 (defun header-alist (headers)
+  "HEADERS, a flat plist of names and values, as a lower-cased alist, or :BAD.
+Every element must be usable as text: an alist of pairs has an even length too,
+and would otherwise pass as one empty header."
   (cond
     ((null headers) '())
-    ((and (listp headers) (evenp (length headers)))
+    ((and (listp headers)
+          (evenp (length headers))
+          (every #'arg-string headers))
      (loop for (name value) on headers by #'cddr
-           collect (cons (string-downcase (or (arg-string name) ""))
-                         (or (arg-string value) ""))))
+           collect (cons (string-downcase (arg-string name))
+                         (arg-string value))))
     (t :bad)))
 
 (defun perform-request (url method headers body timeout-ms)

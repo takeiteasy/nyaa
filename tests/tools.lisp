@@ -217,6 +217,15 @@ err
                                  :test #'string=)))))
         (stop-fake-http server)))))
 
+(test http-rejects-malformed-headers
+  (with-tools
+    ;; An alist has an even length too; it must not pass as one empty header.
+    (dolist (headers '((("X-Tag" . "a") ("Y" . "b")) ("X-Tag") (:x-tag 7)))
+      (is (equal :bad-request
+                 (first (nyaa:tool-error
+                         (tool :tool-http :url "http://127.0.0.1:1/x"
+                                          :headers headers))))))))
+
 (test http-rejects-a-missing-url-without-hitting-the-wire
   (with-tools
     (let ((server (start-fake-http #'echo-handler)))
