@@ -14,6 +14,7 @@
                (:file "tool-shell")
                (:file "tool-http")
                (:file "worker")
+               (:static-file "worker-program.lisp")
                (:file "tool-eval")
                (:file "tool-repl"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))

@@ -24,36 +24,16 @@
 ;;; outlives it. Upgrade path: start the child in its own process group and
 ;;; signal the group. Tracked in ~takeiteasy/nyaa#16.
 
-(defparameter *worker-program*
-  "(let ((p (or (find-package \"NYAA-WORKER\") (make-package \"NYAA-WORKER\" :use '(\"CL\")))))
-     (flet ((render (v)
-              (let ((*print-length* 100) (*print-level* 8) (*print-readably* nil)
-                    (*print-circle* t))
-                (let ((s (prin1-to-string v)))
-                  (if (> (length s) 4000) (concatenate 'string (subseq s 0 4000) \" ...\") s))))
-            (say (form) (prin1 form) (terpri) (finish-output)))
-       (let ((*package* p) (*read-eval* nil))
-         (say '(:ready))
-         (loop
-           (let ((message (handler-case (read *standard-input* nil :eof) (error () :eof))))
-             (unless (and (consp message) (eq (first message) :eval)) (return))
-             (let ((out (make-string-output-stream)))
-               (say (handler-case
-                        (let ((form (read-from-string (second message))))
-                          (handler-case
-                              (let ((value (let ((*standard-output* out) (*error-output* out))
-                                             (eval form))))
-                                (list :ok (render value) (get-output-stream-string out)))
-                            (error (e) (list :error (princ-to-string e)
-                                             (get-output-stream-string out)))))
-                      (error (e) (list :reader-error (princ-to-string e)))))))))))"
-  "The child's read/eval/print loop, passed on its command line.
+(defmacro worker-program ()
+  "The child's loop, read from worker-program.lisp as text when this file is
+compiled: it is source the child evaluates, not source the host loads.
+ASDF does not know that, so editing the program means touching this file too."
+  (uiop:read-file-string
+   (merge-pathnames "worker-program.lisp"
+                    (or *compile-file-truename* *load-truename*))))
 
-Values are rendered under *PRINT-LENGTH*, *PRINT-LEVEL* and a character cap,
-so a large or circular structure cannot flood the pipe.
-TODO: truncation is silent and the caller cannot ask for more. Upgrade path:
-report that a value was elided, and offer a handle to it.
-Tracked in ~takeiteasy/nyaa#26.")
+(defparameter *worker-program* (worker-program)
+  "The child's read/eval/print loop, passed on its command line.")
 
 (defparameter *worker-command* nil
   "Argv that starts a bare Lisp, or NIL for the host implementation. The
