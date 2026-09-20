@@ -79,6 +79,7 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
       (case op
         (:read (ok :data (a:read-file-into-string path)))
         ;; :data is required for write alone, which the schema cannot say.
+        ;; Tracked in ~takeiteasy/nyaa#30.
         (:write (let ((data (getf args :data)))
                   (if (null data)
                       (bad-request "data required for write, a string")

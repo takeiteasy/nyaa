@@ -6,6 +6,11 @@
 ;;;
 ;;; Specifiers are compared by symbol name, so a schema written in any
 ;;; package reads the same.
+;;;
+;;; TODO: a rendered schema is a hash table, so its property order is
+;;; whatever the implementation iterates in. Upgrade path: an ordered object
+;;; the renderer fills in declaration order.
+;;; Tracked in ~takeiteasy/nyaa#29.
 
 (defvar *absent* '#:absent
   "Marks a parameter the caller did not supply, which an explicit NIL is not.")

@@ -77,3 +77,11 @@ matching the closed set.
 
 A round trip preserves every specifier, its options and the `required` set.
 It does not preserve parameter order: a JSON object carries none.
+
+## Limitations
+
+- A parameter is `:required` or it is not; a parameter required only for some
+  other parameter's value still needs a check in the tool
+  ([#30](https://todo.sr.ht/~takeiteasy/nyaa/30)).
+- Property order in a rendered schema follows the implementation's hash table,
+  not the declaration ([#29](https://todo.sr.ht/~takeiteasy/nyaa/29)).
