@@ -39,22 +39,27 @@
 
 (defun stop-fake-http (server)
   (setf (fake-running server) nil)
-  (ignore-errors (usocket:socket-close (fake-socket server)))
+  ;; Wake the blocked accept with a throwaway connection, and close the
+  ;; listener only once the loop has left it. Closing a descriptor while
+  ;; another thread waits on it is a portability hazard: ECL on glibc
+  ;; aborts the image rather than signalling.
+  (ignore-errors
+   (usocket:socket-close (usocket:socket-connect "127.0.0.1" (fake-port server))))
   (ignore-errors (bt:join-thread (fake-thread server)))
+  (ignore-errors (usocket:socket-close (fake-socket server)))
   t)
 
 (defun fake-http-loop (server)
   (loop while (fake-running server)
         do (handler-case
-               (when (usocket:wait-for-input (fake-socket server)
-                                             :timeout 0.05 :ready-only t)
-                 (let ((connection (usocket:socket-accept
-                                    (fake-socket server)
-                                    :element-type '(unsigned-byte 8))))
-                   (unwind-protect
-                        (serve-connection server connection)
-                     (ignore-errors (usocket:socket-close connection)))))
-             ;; The listener is torn down under us when stop races accept.
+               (let ((connection (usocket:socket-accept
+                                  (fake-socket server)
+                                  :element-type '(unsigned-byte 8))))
+                 (unwind-protect
+                      (when (fake-running server)
+                        (serve-connection server connection))
+                   (ignore-errors (usocket:socket-close connection))))
+             ;; A half-open wake-up connection, or a listener already gone.
              (error () (return)))))
 
 (defun serve-connection (server connection)
