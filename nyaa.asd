@@ -3,20 +3,27 @@
   :author "George Watson"
   :license "GPLv3"
   :version "0.1.0"
-  :depends-on ("meow" "alexandria" "com.inuoe.jzon" "drakma")
+  :depends-on ("meow" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
+               "usocket" "bordeaux-threads" "uiop")
   :pathname "src/"
   :serial t
   :components ((:file "package")
-               (:file "nyaa"))
+               (:file "nyaa")
+               (:file "tools")
+               (:file "tool-fs")
+               (:file "tool-shell")
+               (:file "tool-http"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
-  :depends-on ("nyaa" "fiveam" "uiop")
+  :depends-on ("nyaa" "fiveam" "uiop" "usocket")
   :pathname "tests/"
   :serial t
   :components ((:file "package")
                (:file "suite")
-               (:file "smoke"))
+               (:file "smoke")
+               (:file "fake-http")
+               (:file "tools"))
   :perform (test-op (o c)
              (unless (symbol-call :fiveam :run! :nyaa)
                (error "nyaa tests failed"))))

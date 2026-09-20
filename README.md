@@ -12,6 +12,7 @@ Runs on SBCL and ECL.
 ## Docs
 
 - [Getting started](docs/getting-started.md)
+- [Tools](docs/tools.md)
 
 ## License
 
