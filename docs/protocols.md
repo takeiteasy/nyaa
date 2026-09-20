@@ -19,13 +19,13 @@ A protocol registers under `:protocol-<name>`, and its `metadata` plist carries
 `:kind :protocol`, a `:summary`, and optionally `:params`:
 
 ```lisp
-(m:defservice protocol-openai () ()
-  (:name :protocol-openai))
+(m:defservice protocol-example () ()
+  (:name :protocol-example))
 
-(defmethod m:metadata ((service protocol-openai))
+(defmethod m:metadata ((service protocol-example))
   (list :kind :protocol
-        :name :protocol-openai
-        :summary "OpenAI-compatible chat completions"
+        :name :protocol-example
+        :summary "One line on the wire shape"
         :params '((:temperature number :doc "sampling temperature"))))
 ```
 

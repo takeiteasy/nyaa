@@ -344,6 +344,16 @@ needs and a user message."
 
 ;;; --- live -------------------------------------------------------------
 
+(defun live-turn (base-url model &rest extra)
+  (apply #'nyaa:complete :protocol-openai
+         :base-url base-url :model model :timeout 120000 extra))
+
+(defun model-missing-p (result)
+  "A backend that answers but does not know the model, so the tag named by
+NYAA_OLLAMA_MODEL has not been pulled."
+  (let ((reason (nyaa:tool-error result)))
+    (and (consp reason) (eq :backend-error (first reason)) (= 404 (second reason)))))
+
 (test openai-live-completion
   ;; Off by default: CI must not depend on a model being installed. Ollama
   ;; serves this API at http://127.0.0.1:11434/v1 with no key.
@@ -358,28 +368,27 @@ needs and a user message."
           (unwind-protect
                (progn
                  (m:mount context 'nyaa:protocol-openai)
-                 (let ((result (nyaa:complete
-                                :protocol-openai
-                                :base-url base-url :model model
-                                :timeout 120000
-                                :messages '((:role :user
-                                             :content "Reply with the word ok.")))))
-                   (is (eq :ok (first result)))
-                   (is (plusp (length (nyaa:content-text
-                                       (getf (second result) :content))))))
-                 ;; And once more over SSE, where the deltas are genuinely
-                 ;; progressive rather than a body read at once.
-                 (let* ((events '())
-                        (result (nyaa:complete
-                                 :protocol-openai
-                                 :base-url base-url :model model
-                                 :timeout 120000
-                                 :ref :live
-                                 :stream (lambda (event) (push event events))
-                                 :messages '((:role :user
-                                              :content "Count to three.")))))
-                   (is (eq :ok (first result)))
-                   (is (plusp (count :text-delta events
-                                     :key (lambda (event) (getf event :type)))))
-                   (is (eq :done (getf (first events) :type)))))
+                 (let ((result (live-turn base-url model
+                                          :messages '((:role :user
+                                                       :content "Reply with the word ok.")))))
+                   (if (model-missing-p result)
+                       (skip "~a has no model ~a; set NYAA_OLLAMA_MODEL" base-url model)
+                       (progn
+                         (is (eq :ok (first result)))
+                         (is (plusp (length (nyaa:content-text
+                                             (getf (second result) :content)))))
+                         ;; And once more over SSE, where the deltas are
+                         ;; genuinely progressive rather than a body read at
+                         ;; once.
+                         (let* ((events '())
+                                (streamed
+                                  (live-turn base-url model
+                                             :ref :live
+                                             :stream (lambda (event) (push event events))
+                                             :messages '((:role :user
+                                                          :content "Count to three.")))))
+                           (is (eq :ok (first streamed)))
+                           (is (plusp (count :text-delta events
+                                             :key (lambda (event) (getf event :type)))))
+                           (is (eq :done (getf (first events) :type))))))))
             (m:stop context))))))

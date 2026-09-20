@@ -72,4 +72,5 @@ NYAA_LIVE_HTTP=1 tests/test.sh
 NYAA_OLLAMA_URL=http://127.0.0.1:11434/v1 tests/test.sh
 ```
 
-`NYAA_OLLAMA_MODEL` names the model, and defaults to `llama3.2`.
+`NYAA_OLLAMA_MODEL` names the model, and defaults to `llama3.2`. A backend that
+does not have that model skips the live tests rather than failing them.
