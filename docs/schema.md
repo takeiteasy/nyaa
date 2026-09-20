@@ -46,7 +46,7 @@ in-image callers pass keywords. `coerce-args` takes both:
 | `integer`, `number` | the number itself, or a string that parses wholly |
 | `boolean` | `t`, `nil`, `"true"`, `"false"` |
 | `(member ...)` | a string or symbol naming a member, whatever the case |
-| `(or null X)` | `nil`, or anything X accepts |
+| `(or null X)` | `nil`, which is null rather than false, or anything X accepts |
 | `(array-of X)` | a list or vector, coerced elementwise |
 | `(map-of X)` | a plist whose names are strings or symbols |
 | `(object ...)` | a plist, coerced as a nested schema |

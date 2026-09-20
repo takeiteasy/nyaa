@@ -100,8 +100,9 @@ kept running.
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
 
-`:timeout` is in milliseconds and defaults to 30000. Each tool's exact types
-are in its `:params`; see [schemas](schema.md) for the vocabulary.
+`:timeout` is in milliseconds and defaults to 30000. `tool-fs` bounds no work
+of its own, so it declares none and refuses one. Each tool's exact types are in
+its `:params`; see [schemas](schema.md) for the vocabulary.
 
 ```lisp
 (m:mount context 'nyaa:tool-fs :root "/srv/workspace")

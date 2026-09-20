@@ -87,6 +87,14 @@
                (first (nyaa:tool-error
                        (tool :tool-shell :cmd "echo hi" :colour t)))))))
 
+(test a-bare-call-is-coerced-too
+  ;; INVOKE-TOOL is not the only way in, so the handler coerces as well.
+  (with-tools
+    (is (eql 0 (result-value (m:call (m:lookup :tool-shell)
+                                     '(:invoke :cmd "true" :timeout "5000")
+                                     :timeout 10)
+                             :exit)))))
+
 (test a-string-timeout-outlives-the-default-call-timeout
   ;; %CALLER-TIMEOUT reads the coerced arguments: a model-supplied "15000"
   ;; must extend the caller's wait the same way 15000 does.
