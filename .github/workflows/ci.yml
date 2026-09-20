@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lisp: [sbcl, ecl]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Lisp
+        run: sudo apt-get update && sudo apt-get install -y sbcl ${{ matrix.lisp }}
+
+      - name: Install Quicklisp
+        run: |
+          curl -sSfLO https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive --no-userinit --load quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install)'
+          cp -R "$GITHUB_WORKSPACE" ~/quicklisp/local-projects/nyaa
+
+      - name: Install dependencies outside Quicklisp
+        run: |
+          git clone --depth 1 https://github.com/takeiteasy/meow \
+              ~/quicklisp/local-projects/meow
+          git clone --depth 1 https://github.com/takeiteasy/trivial-high-precision-timer \
+              ~/quicklisp/local-projects/trivial-high-precision-timer
+
+      - name: Test
+        run: tests/test.sh ${{ matrix.lisp }}

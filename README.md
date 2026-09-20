@@ -2,6 +2,17 @@
 
 **N**ot **Y**our **A**verage **A**gent
 
+An agent harness in Common Lisp, built on
+[meow](https://github.com/takeiteasy/meow). Tools, model adapters and the
+agent loop are meow services under one root context, so they mount in any
+order, restart under supervision, and are discovered through the registry.
+
+Runs on SBCL and ECL.
+
+## Docs
+
+- [Getting started](docs/getting-started.md)
+
 ## License
 
 ```
