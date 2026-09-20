@@ -10,11 +10,16 @@
   (is (fboundp 'meow:start-service)))
 
 (test json-round-trip
+  ;; Compare values, not the serialised string: jzon parses into a hash table
+  ;; and key order in STRINGIFY follows the implementation's hash iteration.
   (let* ((src "{\"a\":1,\"b\":[true,false,null],\"c\":{\"d\":\"x\"}}")
-         (v (com.inuoe.jzon:parse src)))
-    (is (= 1 (gethash "a" v)))
-    (is (equal "x" (gethash "d" (gethash "c" v))))
-    (is (string= src (com.inuoe.jzon:stringify v)))))
+         (v (com.inuoe.jzon:parse src))
+         (w (com.inuoe.jzon:parse (com.inuoe.jzon:stringify v))))
+    (is (= 1 (gethash "a" w)))
+    (is (equal "x" (gethash "d" (gethash "c" w))))
+    (is (equalp (gethash "b" v) (gethash "b" w)))
+    (is (eq 'cl:null (aref (gethash "b" w) 2)))
+    (is (null (aref (gethash "b" w) 1)))))
 
 (test json-reads-doubles
   ;; Numbers outside single-float range must survive; the adapters rely on it.
