@@ -76,7 +76,8 @@ a protocol embeds it in a larger request body rather than splicing strings.
 matching the closed set.
 
 A round trip preserves every specifier, its options and the `required` set.
-It does not preserve parameter order: a JSON object carries none.
+It does not preserve parameter order: a JSON object carries none, so an import
+is ordered by parameter name.
 
 ## Limitations
 

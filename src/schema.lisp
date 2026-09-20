@@ -294,7 +294,10 @@ their lower-cased name rather than as a symbol."
                                            (member key required :test #'equal))
                      schema))
              (gethash "properties" json))
-    (nreverse schema)))
+    ;; By name, not by hash iteration: jzon parses properties into a hash
+    ;; table, so an import ordered by it differs between implementations and
+    ;; a round trip through JSON would not compare equal.
+    (sort schema #'string< :key #'param-name)))
 
 (defun json-property->param (key property required)
   (let ((name (a:make-keyword (string-upcase key)))
