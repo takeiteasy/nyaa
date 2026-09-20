@@ -129,3 +129,17 @@
 (defun getf-string (plist key)
   (loop for (name value) on plist by #'cddr
         when (string= name key) return value))
+
+;;; --- server-sent events ----------------------------------------------
+
+(defun sse-body (&rest payloads)
+  "PAYLOADS, each a JSON chunk, as an SSE body of one data event each."
+  (with-output-to-string (out)
+    (dolist (payload payloads)
+      (format out "data: ~a~c~c~c~c"
+              payload #\Return #\Newline #\Return #\Newline))))
+
+(defun sse-response (&rest payloads)
+  "An answer a fake handler returns: 200, text/event-stream, PAYLOADS."
+  (list 200 '("Content-Type" "text/event-stream")
+        (apply #'sse-body payloads)))

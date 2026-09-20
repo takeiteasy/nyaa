@@ -128,6 +128,55 @@ A protocol bounds its own work by the request's timeout and cancels what is in
 flight, as tools do, so a wedged backend costs a timeout rather than a wedged
 service.
 
+## The OpenAI protocol
+
+`:protocol-openai` speaks chat completions: `POST <base-url>/chat/completions`,
+with SSE when the request carries a `:stream` sink. One mounted service answers
+for every backend of that shape — OpenRouter, Ollama, Groq, vLLM, LM Studio,
+llama.cpp-server — so base URL, model and auth travel in the request rather than
+in a config slot.
+
+```lisp
+(nyaa:complete :protocol-openai
+  :base-url "http://127.0.0.1:11434/v1"
+  :model "llama3.2"
+  :headers '("authorization" "Bearer sk-...")
+  :messages '((:role :user :content "hello"))
+  :tools (list (nyaa:describe-tool :tool-shell))
+  :stream sink :ref :turn-1
+  :temperature 0.2)
+```
+
+| Key | Meaning |
+|---|---|
+| `:base-url` | required; the API root, http or https, with or without a trailing slash |
+| `:model` | required; the model id the backend knows |
+| `:headers` | a plist of request headers, where the provider's auth goes |
+
+These are checked before the network, so a missing one is `(:bad-request ...)`
+rather than a failed exchange. They are not in `:params`, which advertises the
+sampling parameters — `:temperature`, `:top-p`, `:max-tokens`, `:stop` and
+`:seed` — for a provider to layer defaults on.
+
+`:meta` carries `:finish-reason`, the backend's `:id`, and `:usage` as a plist
+of token counts.
+
+Tool schemas render into the `tools` array through
+[`schema->json-schema`](schema.md). A `tool_calls` reply comes back as
+`:tool-calls` with a keyword name and a plist of arguments, read by the calling
+tool's own schema, ready for `invoke-tool`.
+
+Streaming reassembles what the wire splits: a tool call's id and name reach the
+wire once, on the first fragment of an index, and every `:tool-call-delta`
+repeats them, so a consumer of the sink alone needs no arrival order. The turn
+ends on `data: [DONE]` or on a `finish_reason`; a stream that stops before
+either is `(:backend-error ...)`.
+
+Ollama serves this API at `http://127.0.0.1:11434/v1` with no key, so the
+protocol is testable end to end locally. The offline tests run against the fake
+HTTP server; set `NYAA_OLLAMA_URL` (and optionally `NYAA_OLLAMA_MODEL`) to run
+the live ones too.
+
 ## Discovery
 
 ```lisp
@@ -149,3 +198,12 @@ scans for `:kind :tool`.
 - Rendering `:tools` onto a wire is each protocol's own work. A shared renderer
   waits until two protocols want the same one
   ([#33](https://todo.sr.ht/~takeiteasy/nyaa/33)).
+- A completion abandoned at its deadline leaves its reader thread blocked until
+  the backend answers or the connection drops
+  ([#34](https://todo.sr.ht/~takeiteasy/nyaa/34)).
+- A protocol service handles one completion at a time: meow's service loop runs
+  one message to completion before the next, so concurrent turns queue
+  ([#35](https://todo.sr.ht/~takeiteasy/nyaa/35)).
+- A tool call naming a tool absent from the request's `:tools` has no schema to
+  render its arguments by, and falls back to a heuristic
+  ([#36](https://todo.sr.ht/~takeiteasy/nyaa/36)).

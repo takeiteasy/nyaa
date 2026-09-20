@@ -20,5 +20,7 @@
    #:array-of #:object #:map-of
    ;; workers
    #:*worker-command*
+   ;; protocols
+   #:protocol-openai
    ;; tools
    #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl))

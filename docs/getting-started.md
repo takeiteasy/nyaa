@@ -36,6 +36,17 @@ The [tools](tools.md) mount into a meow context:
 (nyaa:invoke-tool :tool-shell :cmd "echo hello")
 ```
 
+A [protocol](protocols.md) mounts the same way, and carries its backend in the
+request:
+
+```lisp
+(meow:mount *tools* 'nyaa:protocol-openai)
+(nyaa:complete :protocol-openai
+  :base-url "http://127.0.0.1:11434/v1"
+  :model "llama3.2"
+  :messages '((:role :user :content "hello")))
+```
+
 Runs on SBCL and ECL.
 
 ## Tests
@@ -54,8 +65,11 @@ tests/test.sh ecl
 ```
 
 Tests that make real network requests are skipped unless `NYAA_LIVE_HTTP` is
-set:
+set, and the live protocol tests unless `NYAA_OLLAMA_URL` is:
 
 ```sh
 NYAA_LIVE_HTTP=1 tests/test.sh
+NYAA_OLLAMA_URL=http://127.0.0.1:11434/v1 tests/test.sh
 ```
+
+`NYAA_OLLAMA_MODEL` names the model, and defaults to `llama3.2`.

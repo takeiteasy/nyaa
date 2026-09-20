@@ -18,7 +18,9 @@
                              (:file "shell")
                              (:file "http")
                              (:file "eval")
-                             (:file "repl"))))
+                             (:file "repl")))
+               (:module "protocols"
+                :components ((:file "openai"))))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
@@ -31,6 +33,7 @@
                (:file "smoke")
                (:file "protocol")
                (:file "fake-http")
+               (:file "protocol-openai")
                (:file "worker")
                (:file "tools"))
   :perform (test-op (o c)
