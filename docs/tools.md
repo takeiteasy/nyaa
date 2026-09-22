@@ -146,6 +146,15 @@ and a `tool-repl` id starts empty again.
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
 
+`tool-http` opens its own connection and hands drakma the wrapped stream it
+expects for `:stream` — drakma's own `:connection-timeout` does not bound the
+whole exchange, and it cannot close a connection it opened internally.
+`:timeout` bounds the connect phase too, ahead of the exchange deadline. A
+deadline that lapses closes the socket, so the worker thread waiting on it
+errors out and unwinds instead of running until the server answers — except
+on ECL, where closing a socket does not interrupt another thread already
+blocked reading from it (see Limitations).
+
 ## Workers
 
 `tool-eval` and `tool-repl` evaluate in a worker: a separate Lisp process that
@@ -208,9 +217,9 @@ cannot surface through either. Seeing a value stays `tool-eval`'s job. See
 - The process-group kill `tool-shell` and workers use falls back to a
   leader-only kill with no perl on PATH, the same gap as before
   ([#54](https://todo.sr.ht/~takeiteasy/nyaa/54)).
-- A `tool-http` request abandoned at its deadline leaves its worker thread
-  running until the server answers
-  ([#17](https://todo.sr.ht/~takeiteasy/nyaa/17)).
+- A `tool-http` request abandoned at its deadline still leaks its worker
+  thread on ECL: closing the socket does not interrupt a blocked read there
+  the way it does on SBCL ([#55](https://todo.sr.ht/~takeiteasy/nyaa/55)).
 - A value too large to print is truncated silently, and the caller cannot ask
   for the rest ([#26](https://todo.sr.ht/~takeiteasy/nyaa/26)).
 - `tool-repl` handles one message at a time, so its sessions are isolated but

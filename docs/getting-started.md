@@ -18,11 +18,12 @@ git clone https://github.com/takeiteasy/trivial-high-precision-timer \
 ```
 
 Dependencies: `meow`, `alexandria`, [`jzon`](https://github.com/Zulu-Inuoe/jzon)
-for JSON, including the [schema](schema.md) rendering, [`drakma`](https://edicl.github.io/drakma/) with `flexi-streams` and
-`usocket` for HTTP, and `bordeaux-threads` (bt2 API) for the tool deadlines.
-meow pulls in `closer-mop` and `trivial-high-precision-timer`, which is not in a
-Quicklisp dist and needs the local project above. drakma needs OpenSSL for
-HTTPS.
+for JSON, including the [schema](schema.md) rendering, [`drakma`](https://edicl.github.io/drakma/) with `flexi-streams`,
+`usocket`, `puri`, `chunga` and `cl+ssl` for HTTP (`tool-http` opens its own
+connection so its deadline can close it; see [tools](tools.md)), and
+`bordeaux-threads` (bt2 API) for the tool deadlines. meow pulls in
+`closer-mop` and `trivial-high-precision-timer`, which is not in a Quicklisp
+dist and needs the local project above. `cl+ssl` needs OpenSSL for HTTPS.
 
 The [tools](tools.md) mount into a meow context:
 

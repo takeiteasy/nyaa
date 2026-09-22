@@ -81,6 +81,13 @@ process has actually exited, so the check polls rather than assume."
   (zerop (nth-value 2 (uiop:run-program (list "command" "-v" "perl")
                                         :ignore-error-status t))))
 
+(defun poll-until (predicate &optional (deadline 5.0) (interval 0.1))
+  "True once PREDICATE is false, polled rather than assumed instant."
+  (loop repeat (ceiling deadline interval)
+        while (funcall predicate)
+        do (sleep interval))
+  (not (funcall predicate)))
+
 ;;; --- the convention --------------------------------------------------
 
 (test tools-are-discoverable-via-props
@@ -294,11 +301,16 @@ err
 
 ;;; --- http ---------------------------------------------------------------
 
+(defvar *stall* nil
+  "Set around a request to /stall to hold the fake server's response, and
+cleared again so STOP-FAKE-HTTP's join does not wait on it.")
+
 (defun echo-handler (&key method path headers body)
   (declare (ignore method))
   (cond
     ((string= path "/echo") (list 200 '("Content-Type" "text/plain") body))
     ((string= path "/slow") (sleep 1.5) (list 200 '() ""))
+    ((string= path "/stall") (loop while *stall* do (sleep 0.02)) (list 200 '() ""))
     ((string= path "/moved") (list 302 '("Location" "/echo") ""))
     ((string= path "/boom") (list 500 '() "kaboom"))
     ((string= path "/seen") (list 200 '() (or (getf-string headers "x-tag") "")))
@@ -402,6 +414,39 @@ err
       (stop-fake-http server)
       (is (eq :unavailable
               (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url))))))))
+
+(test http-timeout-does-not-leak-its-worker-thread
+  ;; ~takeiteasy/nyaa#17: an abandoned request used to keep its worker
+  ;; thread alive until the server answered. *STALL* holds the fake
+  ;; server's response so the test controls exactly when that happens --
+  ;; SETF rather than LET, since the handler runs on the fake server's own
+  ;; thread, which does not see a dynamic binding made on this one.
+  (with-tools
+    (with-fake-http (url)
+      (setf *stall* t)
+      (unwind-protect
+           (is (eq :timeout
+                  (nyaa:tool-error (tool :tool-http :url (format nil "~a/stall" url)
+                                                    :timeout 300))))
+        ;; Releasing the handler lets the server close its side too, which
+        ;; is what actually frees a worker still blocked reading on ECL:
+        ;; closing our own socket from another thread does not interrupt
+        ;; that read there the way it does on SBCL (tools/http.lisp).
+        (setf *stall* nil))
+      (is (poll-until (lambda ()
+                        (find "nyaa-http-request" (bt:all-threads)
+                              :key #'bt:thread-name :test #'equal)))))))
+
+(test http-https-round-trip
+  ;; Off by default: CI must not depend on the network. Exercises the
+  ;; SSL-wrapped stream PERFORM-REQUEST builds for :STREAM
+  ;; (~takeiteasy/nyaa#17), which drakma never attaches on its own.
+  (if (uiop:getenv "NYAA_LIVE_HTTP")
+      (with-tools
+        (is (eql 404 (result-value
+                      (tool :tool-http :url "https://httpbingo.org/status/404")
+                      :status))))
+      (skip "set NYAA_LIVE_HTTP to run live HTTP tests")))
 
 ;;; --- eval --------------------------------------------------------------
 
