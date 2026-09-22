@@ -21,7 +21,7 @@
 ;;; reads or sets the cwd without taking this lock. Upgrade path: openat(2)
 ;;; and friends against a held directory fd, once all three implementations
 ;;; expose them (or carrying a small FFI shim for them is worth it).
-;;; Tracked in ~takeiteasy/nyaa#56.
+;;; Tracked in ~takeiteasy/nyaa#59.
 
 (defvar *fs-lock* (bt:make-lock :name "nyaa-fs-walk")
   "Serialises tool-fs's directory walk, which works by changing the
