@@ -16,7 +16,7 @@ back.
 ;; => (:ok (:restored (:tool-fs :assistant) :missing nil :mismatched nil :extra nil))
 ```
 
-Declared-state generations only, on both SBCL and ECL. SBCL image
+Declared-state generations only, on SBCL, ECL and CCL. SBCL image
 generations — `save-lisp-and-die`, relaunch-and-restore, an install-time
 recovery image — are a separate, not-yet-landed piece.
 
@@ -93,7 +93,7 @@ something the default `:agent` trust level should reach.
 `:dir` is a mount option (default `*generations-directory*`,
 `~/.nyaa/generations/`), read once at mount time — a caller wanting a
 different directory per call goes through `checkpoint`/`rollback` directly
-instead.
+instead, as [`tool-self`](self.md) does before every write it makes.
 
 ## Limitations
 

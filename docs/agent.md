@@ -61,8 +61,9 @@ the previous result's `:messages` back in as the next `:run`'s. Mount with
 
 `:tools` defaults to every discovered tool whose [`:trust`](tools.md) is
 `:agent` — `tool-fs`, `tool-plan`, `tool-image` and `tool-services` today;
-`tool-shell`, `tool-http`, `tool-eval` and `tool-repl` are all `:operator`
-and only reach the model when the mount site names them explicitly:
+`tool-shell`, `tool-http`, `tool-eval`, `tool-repl`, `tool-checkpoint` and
+`tool-self` are all `:operator` and only reach the model when the mount
+site names them explicitly:
 
 ```lisp
 (m:mount *ctx* 'nyaa:agent :model :provider-ollama :tools '(:tool-shell))

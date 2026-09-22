@@ -72,7 +72,7 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 | `:timeout` | The deadline lapsed. |
 | `:unavailable` | The far end could not be reached. |
 | `(:error detail)` | Anything else. |
-| `(:forbidden msg)` | `tool-fs` only: the path escapes the sandbox. |
+| `(:forbidden msg)` | `tool-fs`: the path escapes the sandbox. `tool-self`: the op is not in `:enable`. |
 
 `tool-error-p` and `tool-error` take a result apart.
 
@@ -116,6 +116,7 @@ kept running.
 | `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
 | `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
 | `:tool-checkpoint` | `:op`, `:label`, `:keep`, `:path` | Save, list and roll back generations of the harness's declared state. See [checkpoints](checkpoints.md). |
+| `:tool-self` | `:op`, `:form`, `:package`, `:name`, `:label`, `:limit`, `:timeout` | Evaluate, redefine and reload in the host image, each write gated by `:enable`, checkpointed and logged. See [self-modification](self.md). |
 
 `:timeout` is in milliseconds and defaults to 30000. `tool-fs`, `tool-image`
 and `tool-services` bound no work of their own, so they declare no `:timeout`
@@ -132,6 +133,7 @@ and refuse one. Each tool's exact types are in its `:params`; see
 (m:mount context 'nyaa:tool-image)
 (m:mount context 'nyaa:tool-services)
 (m:mount context 'nyaa:tool-checkpoint)
+(m:mount context 'nyaa:tool-self :enable '(:eval :define :reload))
 ```
 
 `tool-fs` refuses to delete directories, and offers no recursive delete: a tool
@@ -192,10 +194,11 @@ those available — walking and killing the descendant process tree by hand.
 ## Trust posture
 
 `tool-shell` runs any command, `tool-http` makes arbitrary network requests from
-the host, `tool-eval` and `tool-repl` evaluate arbitrary forms, and
-`tool-checkpoint` writes and reverts the harness's own declared state. All
-five are trusted-operator surfaces, marked `:trust :operator` at the
-definition site. `tool-fs` is confined to its sandbox root: a lexical check
+the host, `tool-eval` and `tool-repl` evaluate arbitrary forms,
+`tool-checkpoint` writes and reverts the harness's own declared state, and
+`tool-self` evaluates, redefines and reloads in the host image. All six are
+trusted-operator surfaces, marked `:trust :operator` at the definition
+site. `tool-fs` is confined to its sandbox root: a lexical check
 first, so a path outside the root is rejected before anything touches the
 filesystem, then an fd-based walk from the root, opening each component with
 `O_NOFOLLOW` and stepping into it — a symlink anywhere below the root is
@@ -211,8 +214,8 @@ and only tools that are themselves `:agent`-trusted — see
 `tool-image` and `tool-services` are `:agent`-trusted and read-only: neither
 ever returns a value or a slot, only flags and shapes, so a provider's
 `:api-key` (kept out of published metadata; see [providers](providers.md))
-cannot surface through either. Seeing a value stays `tool-eval`'s job. See
-[introspection](introspection.md).
+cannot surface through either. Seeing a value stays `tool-eval`, `tool-repl`
+or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 

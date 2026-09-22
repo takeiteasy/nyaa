@@ -4,9 +4,11 @@
 ;;; harness's declared state (checkpoint.lisp, ~takeiteasy/nyaa#11).
 ;;;
 ;;; :trust :operator: writing and reverting the harness's own state is not
-;;; something the default :agent trust level should reach. #12's gated
-;;; self-modification tools are the intended caller of :save before a write,
-;;; layered on top of this tool rather than reimplementing it.
+;;; something the default :agent trust level should reach. tool-self
+;;; (~takeiteasy/nyaa#12) takes a checkpoint before every write it makes,
+;;; through the CHECKPOINT function this tool also wraps, rather than
+;;; through this tool -- so it works whether or not TOOL-CHECKPOINT is
+;;; mounted alongside it.
 
 (define-tool :tool-checkpoint
     (:trust :operator

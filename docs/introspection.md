@@ -10,8 +10,8 @@ Two `:agent`-trusted, always-on, read-only tools over the running image:
 ```
 
 Neither ever returns a value or a slot — flags and shapes only. That holds
-even for a bound special: `tool-eval` and `tool-repl`, both `:operator`, stay
-the way to see one.
+even for a bound special: `tool-eval`, `tool-repl` and `tool-self`, all
+`:operator`, stay the way to see one.
 
 ## `tool-image`
 

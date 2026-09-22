@@ -28,7 +28,7 @@ consulted.")
           :documentation "A protocol or provider service name.")
    (tools-spec :initarg :tools :initform :default :reader agent-tools-spec
                :documentation ":DEFAULT is the discovered :TRUST :AGENT
-tools; nothing is that trust level today, so the safe default is none.
+tools -- tool-fs, tool-plan, tool-image and tool-services today.
 Otherwise a list of tool names.")
    (system :initarg :system :initform nil :reader agent-system)
    (max-turns :initarg :max-turns :initform 16 :reader agent-max-turns)

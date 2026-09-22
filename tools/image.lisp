@@ -12,7 +12,7 @@
 ;;; (provider.lisp), and PROVIDER.LISP:93 keeps it out of published
 ;;; metadata for exactly that reason -- this tool must hold the same line,
 ;;; so every op below reports flags and shapes, never SYMBOL-VALUE. Seeing
-;;; a value stays TOOL-EVAL's job, at :operator.
+;;; a value stays TOOL-EVAL, TOOL-REPL or TOOL-SELF's job, at :operator.
 ;;;
 ;;; Symbols are looked up with FIND-SYMBOL, never READ-FROM-STRING or
 ;;; INTERN: a lookup must not be able to grow the image.

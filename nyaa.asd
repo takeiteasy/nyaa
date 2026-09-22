@@ -3,7 +3,7 @@
   :author "George Watson"
   :license "GPLv3"
   :version "0.1.0"
-  :depends-on ("meow" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
+  :depends-on ("meow" "meow/logger" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
                "usocket" "bordeaux-threads" "uiop" "puri" "chunga" "cl+ssl")
   :serial t
   :components ((:file "package")
@@ -34,7 +34,8 @@
                              (:file "plan")
                              (:file "image")
                              (:file "services")
-                             (:file "checkpoint")))
+                             (:file "checkpoint")
+                             (:file "self")))
                (:module "protocols"
                 :components ((:file "openai")
                              (:file "ollama")))
@@ -71,7 +72,8 @@
                (:file "tools")
                (:file "plan")
                (:file "introspect")
-               (:file "checkpoint"))
+               (:file "checkpoint")
+               (:file "self"))
   :perform (test-op (o c)
              (unless (symbol-call :fiveam :run! :nyaa)
                (error "nyaa tests failed"))))

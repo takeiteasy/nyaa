@@ -7,7 +7,7 @@ An agent harness in Common Lisp, built on
 agent loop are meow services under one root context, so they mount in any
 order, restart under supervision, and are discovered through the registry.
 
-Runs on SBCL and ECL.
+Runs on SBCL, ECL and CCL.
 
 ## Docs
 
@@ -20,6 +20,7 @@ Runs on SBCL and ECL.
 - [The agent loop](docs/agent.md)
 - [Parameter schemas](docs/schema.md)
 - [Checkpoints and rollback](docs/checkpoints.md)
+- [Self-modification](docs/self.md)
 
 ## License
 
