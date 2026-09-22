@@ -11,28 +11,18 @@
 ;;; drive the socket directly so the deadline can close it. Tracked in
 ;;; ~takeiteasy/nyaa#17.
 
-(m:defservice tool-http () ()
-  (:name :tool-http))
-
-(defmethod m:metadata ((service tool-http))
-  (list :kind :tool
-        :name :tool-http
-        :trust :operator
-        :summary "Perform a single-shot HTTP request"
-        :params `((:url string :required t :doc "target URL, http or https")
-                  (:method (member :get :post :put :patch :delete :head :options)
-                   :default :get :doc "HTTP verb")
-                  (:headers (map-of string) :doc "extra request headers")
-                  (:body string :doc "request payload")
-                  (:timeout (integer 1) :default ,+default-tool-timeout+
-                   :doc "whole-exchange deadline in milliseconds"))))
-
-(define-tool-handler tool-http (service args)
-  (perform-request (getf args :url)
-                   (getf args :method)
-                   (header-alist (getf args :headers))
-                   (getf args :body)
-                   (getf args :timeout)))
+(define-tool :tool-http
+    (:trust :operator
+     :summary "Perform a single-shot HTTP request"
+     :params ((:url string :required t :doc "target URL, http or https")
+              (:method (member :get :post :put :patch :delete :head :options)
+               :default :get :doc "HTTP verb")
+              (:headers (map-of string) :doc "extra request headers")
+              (:body string :doc "request payload")
+              (:timeout (integer 1) :default +default-tool-timeout+
+               :doc "whole-exchange deadline in milliseconds")))
+  (:invoke (url method headers body timeout)
+    (perform-request url method (header-alist headers) body timeout)))
 
 (defun header-alist (headers)
   "HEADERS, a coerced plist of names and values, as a lower-cased alist."

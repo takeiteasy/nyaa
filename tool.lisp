@@ -96,3 +96,61 @@ tool must not use those heads."
                         (bad-request "~a" ,problem)
                         (progn ,@body))))
          (t (bad-request "unknown message ~s" (first message)))))))
+
+;;; --- define-tool -------------------------------------------------------
+
+;;; One form in place of the three above: DEFSERVICE, a METADATA method and
+;;; DEFINE-TOOL-HANDLER. The name is given once, as the leading keyword, so it
+;;; cannot drift from the class or the registration -- unlike DEFSERVICE alone,
+;;; which defaults :NAME to the class symbol.
+
+(defun %tool-class-name (name)
+  "NAME, a keyword such as :TOOL-SHELL, as the class symbol TOOL-SHELL, in
+NYAA. A tool defined outside this package must still name a symbol reachable
+from here, since DEFINE-TOOL always expands in the current package."
+  (intern (symbol-name name)))
+
+(defmacro define-tool (name (&key trust summary params slots) &body invoke)
+  "Define the tool NAME, a keyword: a service class, its METADATA and its
+:INVOKE handler, in one form. NAME is used once, for the class, the
+registration and the metadata, and cannot drift between them.
+
+PARAMS is a literal schema, checked by VALIDATE-SCHEMA at macroexpansion --
+a bad specifier is a compile-time error. SLOTS is passed through to
+DEFSERVICE, as for TOOL-FS's sandbox root.
+
+INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
+(getf args :name), already coerced against PARAMS; SERVICE is bound
+anaphorically, as TOOL-FS and TOOL-REPL both need. A tool needing another
+HANDLE clause -- %UPDATE-CONFIG and friends stay off limits regardless --
+falls back to DEFSERVICE and DEFINE-TOOL-HANDLER directly."
+  (validate-schema params)
+  (destructuring-bind (head arg-names &body body) (first invoke)
+    (unless (eq head :invoke)
+      (error "DEFINE-TOOL's body must be one (:invoke (arg...) . body) clause, got ~s."
+             head))
+    (let ((class (%tool-class-name name)))
+      `(progn
+         (m:defservice ,class () ,slots
+           (:name ,name))
+         (defmethod m:metadata ((service ,class))
+           (list :kind :tool
+                 :name ,name
+                 :trust ,trust
+                 :summary ,summary
+                 :params (list ,@(mapcar #'%param-form params))))
+         (define-tool-handler ,class (service args)
+           (let (,@(mapcar (lambda (arg-name)
+                              `(,arg-name (getf args ,(a:make-keyword arg-name))))
+                            arg-names))
+             ,@body))))))
+
+(defun %param-form (param)
+  "PARAM, a literal schema entry, as a form that rebuilds it: the specifier
+and option keys are quoted, since PARAMS is checked at macroexpansion, but
+option values -- a :default naming a constant such as
++DEFAULT-TOOL-TIMEOUT+ -- are left to evaluate."
+  `(list* ,(param-name param) ',(param-type param)
+          (list ,@(loop for (key value) on (param-options param) by #'cddr
+                        collect `',key
+                        collect value))))

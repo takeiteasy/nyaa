@@ -9,6 +9,7 @@
    ;; tool convention
    #:tools #:describe-tool #:invoke-tool
    #:tool-error #:tool-error-p #:tool-trust #:tool-schema
+   #:define-tool
    ;; protocol convention
    #:protocols #:describe-protocol #:complete #:check-request
    #:define-protocol-handler #:backend-error

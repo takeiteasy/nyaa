@@ -9,20 +9,14 @@
 ;;; descendant outlives it. Upgrade path: start the command in its own
 ;;; process group and signal the group. Tracked in ~takeiteasy/nyaa#16.
 
-(m:defservice tool-shell () ()
-  (:name :tool-shell))
-
-(defmethod m:metadata ((service tool-shell))
-  (list :kind :tool
-        :name :tool-shell
-        :trust :operator
-        :summary "Run a shell command (sh -c) and capture merged output"
-        :params `((:cmd string :required t :doc "command string to run")
-                  (:timeout (integer 1) :default ,+default-tool-timeout+
-                   :doc "kill the command after this many milliseconds"))))
-
-(define-tool-handler tool-shell (service args)
-  (run-command (getf args :cmd) (getf args :timeout)))
+(define-tool :tool-shell
+    (:trust :operator
+     :summary "Run a shell command (sh -c) and capture merged output"
+     :params ((:cmd string :required t :doc "command string to run")
+              (:timeout (integer 1) :default +default-tool-timeout+
+               :doc "kill the command after this many milliseconds")))
+  (:invoke (cmd timeout)
+    (run-command cmd timeout)))
 
 (defun run-command (cmd timeout-ms)
   (let* ((process (uiop:launch-program (list "/bin/sh" "-c" cmd)

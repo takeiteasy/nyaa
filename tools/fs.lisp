@@ -7,33 +7,26 @@
 ;;; result against the root, keeping the lexical check as the first gate.
 ;;; Tracked in ~takeiteasy/nyaa#15.
 
-(m:defservice tool-fs ()
-  ((root :initarg :root :reader fs-root :type string))
-  (:name :tool-fs))
+(define-tool :tool-fs
+    (:trust :agent
+     :summary "Read, write, list and delete files inside the sandboxed root"
+     :slots ((root :initarg :root :reader fs-root :type string))
+     :params ((:op (member :read :write :list :mkdir :delete) :required t
+               :doc "operation to perform")
+              (:path string :required t
+               :doc "path relative to the sandbox root")
+              (:data string :doc "file contents, for write")))
+  (:invoke (op path data)
+    (let ((resolved (normalize-path (join-path (fs-root service) path))))
+      (if (under-root (fs-root service) resolved)
+          (apply-fs-op op resolved data)
+          (fail (list :forbidden "path escapes sandbox root"))))))
 
 (defmethod initialize-instance :after ((service tool-fs) &key)
   ;; Normalise once, without a trailing slash, so UNDER-ROOT's boundary
   ;; check stays a single character comparison.
   (setf (slot-value service 'root)
         (normalize-path (native-absolute (fs-root service)))))
-
-(defmethod m:metadata ((service tool-fs))
-  (list :kind :tool
-        :name :tool-fs
-        :trust :agent
-        :summary "Read, write, list and delete files inside the sandboxed root"
-        :params '((:op (member :read :write :list :mkdir :delete) :required t
-                   :doc "operation to perform")
-                  (:path string :required t
-                   :doc "path relative to the sandbox root")
-                  (:data string :doc "file contents, for write"))))
-
-(define-tool-handler tool-fs (service args)
-  (let ((resolved (normalize-path (join-path (fs-root service)
-                                             (getf args :path)))))
-    (if (under-root (fs-root service) resolved)
-        (apply-fs-op (getf args :op) resolved args)
-        (fail (list :forbidden "path escapes sandbox root")))))
 
 ;;; --- the sandbox -----------------------------------------------------
 
@@ -74,21 +67,20 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
 
 ;;; --- operations ------------------------------------------------------
 
-(defun apply-fs-op (op path args)
+(defun apply-fs-op (op path data)
   (handler-case
       (case op
         (:read (ok :data (a:read-file-into-string path)))
         ;; :data is required for write alone, which the schema cannot say.
         ;; Tracked in ~takeiteasy/nyaa#30.
-        (:write (let ((data (getf args :data)))
-                  (if (null data)
-                      (bad-request "data required for write, a string")
-                      (progn
-                        (ensure-directories-exist path)
-                        (a:write-string-into-file data path
-                                                  :if-exists :supersede
-                                                  :if-does-not-exist :create)
-                        (ok)))))
+        (:write (if (null data)
+                    (bad-request "data required for write, a string")
+                    (progn
+                      (ensure-directories-exist path)
+                      (a:write-string-into-file data path
+                                                :if-exists :supersede
+                                                :if-does-not-exist :create)
+                      (ok))))
         (:list (ok :files (sort (mapcar #'entry-name
                                         (append (uiop:subdirectories path)
                                                 (uiop:directory-files path)))

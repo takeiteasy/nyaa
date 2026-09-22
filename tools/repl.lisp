@@ -12,31 +12,23 @@
 ;;; give each id its own process and delegate to it.
 ;;; Tracked in ~takeiteasy/nyaa#27.
 
-(m:defservice tool-repl ()
-  ((workers :initform (make-hash-table :test #'equal) :reader repl-workers))
-  (:name :tool-repl))
-
-(defmethod m:metadata ((service tool-repl))
-  (list :kind :tool
-        :name :tool-repl
-        :trust :operator
-        :summary "Evaluate a Lisp form in a persistent worker, one per id"
-        :params `((:id string :default "default" :doc "session id")
-                  (:form string :required t :doc "source text of one form")
-                  (:pristine boolean :default nil
-                   :doc "restart the session's worker first")
-                  (:timeout (integer 1) :default ,+default-tool-timeout+
-                   :doc "kill the worker after this many milliseconds"))))
-
-(define-tool-handler tool-repl (service args)
-  (let ((id (getf args :id)))
-    (when (getf args :pristine)
+(define-tool :tool-repl
+    (:trust :operator
+     :summary "Evaluate a Lisp form in a persistent worker, one per id"
+     :slots ((workers :initform (make-hash-table :test #'equal) :reader repl-workers))
+     :params ((:id string :default "default" :doc "session id")
+              (:form string :required t :doc "source text of one form")
+              (:pristine boolean :default nil
+               :doc "restart the session's worker first")
+              (:timeout (integer 1) :default +default-tool-timeout+
+               :doc "kill the worker after this many milliseconds")))
+  (:invoke (id form pristine timeout)
+    (when pristine
       (drop-repl-worker service id))
     (let ((worker (repl-worker service id)))
       (if (null worker)
           (fail :unavailable)
-          (let ((result (worker-eval worker (getf args :form)
-                                     (getf args :timeout))))
+          (let ((result (worker-eval worker form timeout)))
             ;; A worker that missed its deadline was killed; forget it so the
             ;; id starts empty rather than answering :unavailable for ever.
             (unless (worker-alive-p worker)

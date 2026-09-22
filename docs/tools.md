@@ -7,37 +7,43 @@ describe and invoke every tool the same way.
 ## The convention
 
 A tool registers under `:tool-<name>`, and its `metadata` plist carries
-`:kind :tool`, a `:summary`, its `:params` and its `:trust` level:
+`:kind :tool`, a `:summary`, its `:params` and its `:trust` level.
+`define-tool` declares all of this in one form:
 
 ```lisp
-(m:defservice tool-shell () ()
-  (:name :tool-shell))
-
-(defmethod m:metadata ((service tool-shell))
-  (list :kind :tool
-        :name :tool-shell
-        :trust :operator
-        :summary "Run a shell command (sh -c) and capture merged output"
-        :params `((:cmd string :required t :doc "command string to run")
-                  (:timeout (integer 1) :default ,+default-tool-timeout+
-                   :doc "kill the command after this many milliseconds"))))
+(define-tool :tool-shell
+    (:trust :operator
+     :summary "Run a shell command (sh -c) and capture merged output"
+     :params ((:cmd string :required t :doc "command string to run")
+              (:timeout (integer 1) :default +default-tool-timeout+
+               :doc "kill the command after this many milliseconds")))
+  (:invoke (cmd timeout)
+    (run-command cmd timeout)))
 ```
 
-`:params` is a typed [schema](schema.md). It drives coercion and validation, so
-a tool reads its arguments with plain `getf`, and it renders to the JSON Schema
-a model needs for tool calling. `tool-schema` reads it out of the metadata.
+`NAME` is given once, as the leading keyword, and is used for the class, the
+registration and the metadata — it cannot drift between them the way it could
+when `defservice`, a `metadata` method and a handler were three separate forms
+each naming the tool.
+
+`:params` is a typed [schema](schema.md), checked at macroexpansion: a bad
+specifier is a compile-time error. It drives coercion and validation, so a
+tool's `:invoke` clause reads its arguments already coerced — `(:invoke (cmd
+timeout) ...)` binds `cmd` and `timeout` from the plist, in their declared
+types — and it renders to the JSON Schema a model needs for tool calling.
+`tool-schema` reads it out of the metadata. `:slots` passes extra slots
+through to the generated class, as `tool-fs`'s sandbox root does; the
+anaphoric `service` is bound inside `:invoke` for a tool that needs it.
 
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
 for metadata that names none. The [agent loop](agent.md)'s default allow-list
-is exactly the `:agent`-trusted tools — none of the standard tools below are,
-so granting one of them to a model is explicit at the agent's mount site.
+is exactly the `:agent`-trusted tools — `tool-fs` is the only standard tool at
+that level, so granting the others to a model is explicit at the mount site.
 
-Use an explicit keyword for the name. `defservice` otherwise defaults to the
-class symbol, and names compare with `equal`, so `foo::tool-shell` and
-`bar::tool-shell` would be different tools.
-
-It answers two messages, through `define-tool-handler`:
+A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
+back to `defservice` and the lower-level `define-tool-handler` directly. It
+answers two messages either way:
 
 - `(:describe)` — replies with the metadata plist
 - `(:invoke . plist)` — coerces the plist against the schema, then performs the
