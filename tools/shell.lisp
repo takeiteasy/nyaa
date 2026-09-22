@@ -26,8 +26,16 @@
     (bt:make-thread
      (lambda ()
        (unwind-protect
-            (setf output (uiop:slurp-stream-string
-                          (uiop:process-info-output process)))
+            ;; A timeout's TERMINATE-PROCESS-GROUP reaps the process from
+            ;; the main thread, which can close this stream while a read
+            ;; here is still blocked on it -- a race, not an EOF, and it
+            ;; surfaces as a stream error rather than a clean end of file.
+            ;; Losing the last fragment of output to it is fine: the call
+            ;; is about to fail with :TIMEOUT anyway.
+            (setf output (handler-case
+                             (uiop:slurp-stream-string
+                              (uiop:process-info-output process))
+                           (stream-error () output)))
          (bt:signal-semaphore done)))
      :name "nyaa-shell-drain")
     (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
