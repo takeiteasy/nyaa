@@ -184,7 +184,10 @@ why an evaluation gets a fresh process instead of a pooled one.
 
 A worker leads its own process group, the same as a `tool-shell` command (see
 the standard tools table above), so a process a form backgrounds is killed
-along with it rather than outliving the deadline.
+along with it rather than outliving the deadline. Containment picks the best
+mechanism the host offers, in order: a process group set natively by the
+launch itself, one set by a `perl` or `setsid` wrapper, or — with none of
+those available — walking and killing the descendant process tree by hand.
 
 ## Trust posture
 
@@ -194,9 +197,13 @@ the host, `tool-eval` and `tool-repl` evaluate arbitrary forms, and
 five are trusted-operator surfaces, marked `:trust :operator` at the
 definition site. `tool-fs` is confined to its sandbox root: a lexical check
 first, so a path outside the root is rejected before anything touches the
-filesystem, then every symlink along the path resolved and re-checked, so one
-inside the root pointing out of it does not admit an open that lands
-elsewhere.
+filesystem, then an fd-based walk from the root, opening each component with
+`O_NOFOLLOW` and stepping into it — a symlink anywhere below the root is
+refused outright rather than resolved, and the final component is operated on
+relative to that same directory, so the check and the operation share one file
+descriptor with no window between them for a swap to land in. Available on
+SBCL, ECL and CCL; `tool-fs` answers `:unavailable` elsewhere, since a
+path-based re-check would be racy the same way.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.
@@ -209,15 +216,6 @@ cannot surface through either. Seeing a value stays `tool-eval`'s job. See
 
 ## Limitations
 
-- A symlink swapped into place between `tool-fs`'s check and the operation
-  that follows it is not caught — the two are not atomic
-  ([#52](https://todo.sr.ht/~takeiteasy/nyaa/52)).
-- `tool-fs`'s dangling-symlink check has no implementation outside SBCL and
-  ECL, so there a dangling link is indistinguishable from a plain file
-  ([#53](https://todo.sr.ht/~takeiteasy/nyaa/53)).
-- The process-group kill `tool-shell` and workers use falls back to a
-  leader-only kill with no perl on PATH, the same gap as before
-  ([#54](https://todo.sr.ht/~takeiteasy/nyaa/54)).
 - A value too large to print is truncated silently, and the caller cannot ask
   for the rest ([#26](https://todo.sr.ht/~takeiteasy/nyaa/26)).
 - `tool-repl` handles one message at a time, so its sessions are isolated but

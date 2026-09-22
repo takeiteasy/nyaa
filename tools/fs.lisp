@@ -1,7 +1,5 @@
 (in-package #:nyaa)
 
-#+sbcl (eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-posix))
-
 ;;; Filesystem tool, sandboxed to a root given at mount time.
 
 (define-tool :tool-fs
@@ -17,35 +15,37 @@
     (let ((lexical (normalize-path (join-path (fs-root service) path))))
       (if (not (under-root (fs-root service) lexical))
           (fail (list :forbidden "path escapes sandbox root"))
-          ;; A symlink swapped into place between this check and
-          ;; APPLY-FS-OP's actual open is not caught -- the two are not
-          ;; atomic. Tracked in ~takeiteasy/nyaa#52.
-          (let ((resolved (resolve-path lexical)))
-            (if (and resolved (under-root (fs-root service) resolved))
-                (apply-fs-op op resolved data)
-                (fail (list :forbidden "path escapes sandbox root"))))))))
+          (apply-fs-op op (fs-root service) lexical data)))))
 
 (defmethod initialize-instance :after ((service tool-fs) &key)
   ;; Normalise once, without a trailing slash, so UNDER-ROOT's boundary
   ;; check stays a single character comparison. Truenamed when the root
-  ;; already exists, so it compares like with like against a RESOLVE-PATH
-  ;; result -- /tmp is itself a symlink to /private/tmp on macOS, and a
-  ;; lexical-only root would reject every path inside it once resolved.
+  ;; already exists, so it compares like with like against a lexically
+  ;; normalised path -- /tmp is itself a symlink to /private/tmp on macOS,
+  ;; and a lexical-only root would reject every path inside it once
+  ;; resolved.
   ;; A root given before it exists keeps the lexical form; nothing can
   ;; escape through it before then, since nothing under it exists either.
   (let ((lexical (normalize-path (native-absolute (fs-root service)))))
     (setf (slot-value service 'root)
-          (or (resolve-path lexical) lexical))))
+          (or (ignore-errors
+               (string-right-trim "/" (uiop:native-namestring (uiop:truename* lexical))))
+              lexical))))
 
 ;;; --- the sandbox -----------------------------------------------------
 
-;;; Two gates, in order: a lexical check first, so a path outside the root
-;;; is rejected before anything touches the filesystem, and a resolved
-;;; check behind it, so a symlink inside the root pointing out of it does
-;;; not admit an open that lands elsewhere (~takeiteasy/nyaa#15). Neither
-;;; gate alone is enough: the lexical check alone follows a symlink, and a
-;;; resolved check alone would let ".." reach a sibling before the root is
-;;; known to exist.
+;;; A lexical check first, so a path outside the root is rejected before
+;;; anything touches the filesystem, then an fd walk from the root (see
+;;; tools/fs-posix.lisp): each component is opened with O_NOFOLLOW and
+;;; stepped into, refusing every symlink below the root rather than
+;;; resolving it. The final component is operated on relative to that
+;;; directory, so the symlink check and the operation share one file
+;;; descriptor -- there is no window between them for a swap to land in
+;;; (~takeiteasy/nyaa#52).
+;;;
+;;; Unavailable outside SBCL, ECL and CCL: without the walk, a path
+;;; re-check is racy the same way, so TOOL-FS answers :UNAVAILABLE rather
+;;; than fall back to one (~takeiteasy/nyaa#53).
 
 (defun native-absolute (path)
   (if (and (plusp (length path)) (char= (char path 0) #\/))
@@ -78,76 +78,110 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
          (or (= (length path) n)
              (char= (char path n) #\/)))))
 
-(defun leaf-link-p (path)
-  "True when PATH's own final component is a symlink, dangling or not.
-Only the leaf: an ancestor is checked when PATH recurses onto it as its
-own leaf, in RESOLVE-PATH below.
+;;; --- operations --------------------------------------------------------
 
-Always NIL on an implementation other than SBCL or ECL: a dangling
-symlink is then indistinguishable from a plain file, and RESOLVE-PATH
-admits it. Tracked in ~takeiteasy/nyaa#53."
-  #+sbcl (and (ignore-errors (sb-posix:readlink path)) t)
-  #+ecl (eq :link (ignore-errors (ext:file-kind path nil)))
-  #-(or sbcl ecl) nil)
+(defun path-components (root lexical)
+  "LEXICAL's segments below ROOT, as a list of path components."
+  (let ((tail (subseq lexical (length root))))
+    (remove "" (uiop:split-string tail :separator "/") :test #'string=)))
 
-(defun resolve-path (path)
-  "PATH, absolute and lexically normalised, with every symlink along it
-followed -- or NIL when it runs through a dangling one. TRUENAME* cannot
-tell a dangling symlink from a plain file by itself: for one, it reports
-the link's own path back unresolved, the same shape as an ordinary file
-that exists. LEAF-LINK-P checks the leaf directly to tell them apart.
+(defun errno-result (errno &optional (not-found-message "no such file"))
+  (case errno
+    ((:eloop :enotdir) (fail (list :forbidden "path escapes sandbox root")))
+    (:enoent (fail (list :error not-found-message)))
+    (:unavailable (fail :unavailable))
+    (t (fail (list :error (string-downcase errno))))))
 
-A path that does not exist yet -- a :write or :mkdir target -- resolves
-through its deepest existing prefix instead, with the missing tail kept
-literal, so a symlinked ancestor directory is still caught."
-  (let ((truename (uiop:truename* path)))
-    (cond
-      ((and truename (leaf-link-p path)
-            (equal (string-right-trim "/" (uiop:native-namestring truename))
-                   (string-right-trim "/" path)))
-       nil)
-      (truename (string-right-trim "/" (uiop:native-namestring truename)))
-      ((string= path "/") "/")
-      (t (let* ((slash (position #\/ path :from-end t))
-                (parent (if (and slash (plusp slash)) (subseq path 0 slash) "/"))
-                (leaf (subseq path (1+ (or slash -1))))
-                (resolved-parent (resolve-path parent)))
-           (and resolved-parent
-                (concatenate 'string resolved-parent
-                            (if (string= resolved-parent "/") "" "/")
-                            leaf)))))))
+(defun apply-fs-op (op root lexical data)
+  #-(or sbcl ecl ccl) (declare (ignore op root lexical data))
+  #-(or sbcl ecl ccl) (fail :unavailable)
+  #+(or sbcl ecl ccl)
+  (bt:with-lock-held (*fs-lock*)
+    (with-fs-cwd-saved
+      (let* ((components (path-components root lexical))
+             (dirs (butlast components))
+             (leaf (car (last components))))
+        (multiple-value-bind (ok errno)
+            (fs-walk root dirs :create (member op '(:write :mkdir)))
+          (if (not ok)
+              (errno-result errno)
+              (case op
+                (:list (fs-op-list leaf))
+                (:read (fs-op-read leaf))
+                (:write (fs-op-write leaf data))
+                (:mkdir (fs-op-mkdir leaf))
+                (:delete (fs-op-delete leaf))
+                (t (bad-request "unknown op ~s" op)))))))))
 
-;;; --- operations ------------------------------------------------------
+(defun fs-op-list (leaf)
+  (if (null leaf)
+      (ok :files (fs-list-names))
+      (multiple-value-bind (fd errno) (fs-open-dir-component leaf)
+        (if (not fd)
+            (errno-result errno "no such directory")
+            (progn
+              (unwind-protect
+                   (if (fs-fchdir fd)
+                       (ok :files (fs-list-names))
+                       (fail (list :error "cannot enter directory")))
+                (fs-close fd)))))))
 
-(defun apply-fs-op (op path data)
-  (handler-case
-      (case op
-        (:read (ok :data (a:read-file-into-string path)))
-        ;; :data is required for write alone, which the schema cannot say.
-        ;; Tracked in ~takeiteasy/nyaa#30.
-        (:write (if (null data)
-                    (bad-request "data required for write, a string")
-                    (progn
-                      (ensure-directories-exist path)
-                      (a:write-string-into-file data path
-                                                :if-exists :supersede
-                                                :if-does-not-exist :create)
-                      (ok))))
-        (:list (ok :files (sort (mapcar #'entry-name
-                                        (append (uiop:subdirectories path)
-                                                (uiop:directory-files path)))
-                                #'string<)))
-        (:mkdir (ensure-directories-exist (concatenate 'string path "/"))
-                (ok))
-        ;; Directories are refused and recursive delete is not offered: a
-        ;; tool this easy to call should not be able to rm -rf.
-        (:delete (if (uiop:directory-exists-p path)
-                     (bad-request "delete refuses directories")
-                     (progn (delete-file path) (ok))))
-        (t (bad-request "unknown op ~s" op)))
-    (file-error (e) (fail (list :error (princ-to-string e))))))
+(defun fs-op-read (leaf)
+  (if (null leaf)
+      (fail (list :error "is a directory"))
+      (multiple-value-bind (fd errno) (fs-open-leaf leaf '(:rdonly) 0)
+        (if (not fd)
+            (errno-result errno)
+            (unwind-protect (ok :data (fs-slurp-fd fd))
+              (fs-close fd))))))
 
-(defun entry-name (pathname)
-  (if (uiop:directory-pathname-p pathname)
-      (car (last (pathname-directory pathname)))
-      (file-namestring pathname)))
+(defun fs-op-write (leaf data)
+  (cond
+    ((null leaf) (fail (list :error "is a directory")))
+    ;; :data is required for write alone, which the schema cannot say.
+    ;; Tracked in ~takeiteasy/nyaa#30.
+    ((null data) (bad-request "data required for write, a string"))
+    (t (multiple-value-bind (fd errno)
+           (fs-open-leaf leaf '(:wronly :creat :trunc) #o644)
+         (if (not fd)
+             (errno-result errno)
+             (unwind-protect (progn (fs-spit-fd fd data) (ok))
+               (fs-close fd)))))))
+
+(defun fs-op-mkdir (leaf)
+  (if (null leaf)
+      (ok) ; the root itself always exists as a directory
+      (multiple-value-bind (success errno) (fs-mkdir-leaf leaf #o755)
+        (cond (success (ok))
+              ((and (eq errno :eexist) (not (fs-symlink-leaf-p leaf))) (ok))
+              ((eq errno :eexist) (fail (list :forbidden "path escapes sandbox root")))
+              (t (errno-result errno))))))
+
+(defun fs-op-delete (leaf)
+  (cond
+    ((null leaf) (bad-request "delete refuses directories"))
+    ((fs-symlink-leaf-p leaf) (fail (list :forbidden "path escapes sandbox root")))
+    (t (multiple-value-bind (success errno) (fs-unlink-leaf leaf)
+         (cond (success (ok))
+               ;; Directories are refused and recursive delete is not
+               ;; offered: a tool this easy to call should not be able to
+               ;; rm -rf. EPERM covers macOS's unlink(2) on a directory;
+               ;; Linux reports EISDIR for the same attempt.
+               ((member errno '(:eisdir :eperm)) (bad-request "delete refuses directories"))
+               (t (errno-result errno)))))))
+
+(defun fs-slurp-fd (fd)
+  #+sbcl (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))
+           (uiop:slurp-stream-string s))
+  #+ecl (with-open-stream (s (ext:make-stream-from-fd fd :input :element-type 'character))
+          (uiop:slurp-stream-string s))
+  #+ccl (with-open-stream (s (ccl::make-fd-stream fd :direction :input :element-type 'character))
+          (uiop:slurp-stream-string s)))
+
+(defun fs-spit-fd (fd data)
+  #+sbcl (with-open-stream (s (sb-sys:make-fd-stream fd :output t :element-type 'character))
+           (write-string data s))
+  #+ecl (with-open-stream (s (ext:make-stream-from-fd fd :output :element-type 'character))
+          (write-string data s))
+  #+ccl (with-open-stream (s (ccl::make-fd-stream fd :direction :output :element-type 'character))
+          (write-string data s)))

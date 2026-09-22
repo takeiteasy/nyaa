@@ -23,7 +23,10 @@
                (:file "worker")
                (:static-file "worker-program.lisp")
                (:module "tools"
-                :components ((:file "fs")
+                :components (;; Ahead of "fs": the atomic sandbox walk it
+                             ;; uses is declared here.
+                             (:file "fs-posix")
+                             (:file "fs")
                              (:file "shell")
                              (:file "http")
                              (:file "eval")
