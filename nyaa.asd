@@ -30,7 +30,11 @@
                ;; live in protocol.lisp, ahead of either.
                (:file "provider")
                (:module "providers"
-                :components ((:file "ollama"))))
+                :components ((:file "ollama")))
+               ;; After providers: the loop reaches a model by name through
+               ;; COMPLETE, and defaults its tool allow-list from the
+               ;; discovered tools, so both must already be defined.
+               (:file "agent"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
@@ -46,6 +50,7 @@
                (:file "protocol-openai")
                (:file "protocol-ollama")
                (:file "provider")
+               (:file "agent")
                (:file "worker")
                (:file "tools"))
   :perform (test-op (o c)

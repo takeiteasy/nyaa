@@ -15,6 +15,7 @@ Runs on SBCL and ECL.
 - [Tools](docs/tools.md)
 - [Protocols](docs/protocols.md)
 - [Providers](docs/providers.md)
+- [The agent loop](docs/agent.md)
 - [Parameter schemas](docs/schema.md)
 
 ## License

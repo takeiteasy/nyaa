@@ -11,11 +11,7 @@
 
 (defun protocols (&key (registry m:*registry*))
   "Every registered protocol name, sorted."
-  (sort (loop for name in (m:names :registry registry)
-              for props = (nth-value 1 (m:lookup name :registry registry))
-              when (eq (getf props :kind) :protocol)
-                collect name)
-        #'string< :key #'string))
+  (%registered-of-kind :protocol :registry registry))
 
 (defun %protocol-process (name &key (registry m:*registry*))
   "NAME's process and its registration props. A provider answers the same

@@ -4,14 +4,19 @@
 ;;; METADATA carries :KIND :TOOL, and which answers (:describe) and
 ;;; (:invoke . plist). See docs/tools.md.
 
-(defun tools (&key (registry m:*registry*))
-  "Every registered tool name, sorted. Discovery is a scan of registration
-props: meow has no props-filtered lookup."
+(defun %registered-of-kind (kind &key (registry m:*registry*))
+  "Every name registered under KIND, sorted. Discovery is a scan of
+registration props: meow has no props-filtered lookup. Shared by TOOLS,
+PROTOCOLS, PROVIDERS and AGENTS, one per :KIND."
   (sort (loop for name in (m:names :registry registry)
               for props = (nth-value 1 (m:lookup name :registry registry))
-              when (eq (getf props :kind) :tool)
+              when (eq (getf props :kind) kind)
                 collect name)
         #'string< :key #'string))
+
+(defun tools (&key (registry m:*registry*))
+  "Every registered tool name, sorted."
+  (%registered-of-kind :tool :registry registry))
 
 (defun %tool-process (name &key (registry m:*registry*))
   "NAME's process and its registration props, which carry the metadata."

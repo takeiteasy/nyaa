@@ -29,7 +29,9 @@ a model needs for tool calling. `tool-schema` reads it out of the metadata.
 
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
-for metadata that names none.
+for metadata that names none. The [agent loop](agent.md)'s default allow-list
+is exactly the `:agent`-trusted tools — none of the standard tools below are,
+so granting one of them to a model is explicit at the agent's mount site.
 
 Use an explicit keyword for the name. `defservice` otherwise defaults to the
 class symbol, and names compare with `equal`, so `foo::tool-shell` and

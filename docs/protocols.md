@@ -109,6 +109,11 @@ A tool call's `:arguments` arrive as text split across deltas; the consumer
 reassembles them. The `(:ok ...)` reply carries the whole turn regardless, so a
 caller may ignore the sink entirely.
 
+The [agent loop](agent.md) is this vocabulary's main consumer: it hands its
+own `:sink` down into each request unchanged, so these events pass straight
+through to whatever is watching the run, alongside the loop's own `:turn`,
+`:tool-call`, `:tool-result` and `:run-done` events.
+
 ## Errors
 
 The [tool error vocabulary](tools.md#results) applies, plus one shape protocols

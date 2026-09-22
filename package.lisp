@@ -16,6 +16,9 @@
    #:text-delta #:tool-call-delta #:done #:emit-event
    ;; provider convention
    #:define-provider #:providers #:describe-provider #:provider
+   ;; agent convention
+   #:agent #:agents #:describe-agent #:run-agent
+   #:turn-event #:tool-call-event #:tool-result-event #:run-done-event
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema

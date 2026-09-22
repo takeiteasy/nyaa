@@ -55,6 +55,13 @@ A [provider](providers.md) carries that backend for you:
 (nyaa:complete :provider-ollama :messages '((:role :user :content "hello")))
 ```
 
+An [agent](agent.md) runs a turn cycle over a model and its tools:
+
+```lisp
+(nyaa:run-agent *tools* :model :provider-ollama :tools '(:tool-shell)
+                :messages '((:role :user :content "list the files")))
+```
+
 Runs on SBCL and ECL.
 
 ## Tests
