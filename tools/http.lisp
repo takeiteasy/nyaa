@@ -91,14 +91,15 @@ closes its socket."
   (handler-case
       (let* ((uri (puri:parse-uri url))
              (securep (eq (puri:uri-scheme uri) :https))
-             (socket (usocket:socket-connect
-                      (puri:uri-host uri) (or (puri:uri-port uri) (if securep 443 80))
-                      :element-type '(unsigned-byte 8)
-                      ;; Bounds the connect phase alone, ahead of the whole-
-                      ;; exchange deadline above -- a bound drakma does not
-                      ;; offer on ECL, where :connection-timeout is a no-op.
-                      :timeout (max 1 (ceiling timeout-ms 1000))
-                      :nodelay :if-supported)))
+             (socket (with-immediate-connect-refusal
+                      (usocket:socket-connect
+                       (puri:uri-host uri) (or (puri:uri-port uri) (if securep 443 80))
+                       :element-type '(unsigned-byte 8)
+                       ;; Bounds the connect phase alone, ahead of the whole-
+                       ;; exchange deadline above -- a bound drakma does not
+                       ;; offer on ECL, where :connection-timeout is a no-op.
+                       :timeout (max 1 (ceiling timeout-ms 1000))
+                       :nodelay :if-supported))))
         (setf (car socket-box) socket)
         ;; Drakma returns 4xx and 5xx as values rather than signalling, which
         ;; is what lets statuses pass through with no translation layer.

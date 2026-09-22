@@ -340,6 +340,7 @@ needs and a user message."
              (nyaa:complete :protocol-openai
                             :base-url "http://127.0.0.1:1/v1"
                             :model "test-model"
+                            :timeout 5000
                             :messages '((:role :user :content "hello"))))))))
 
 ;;; --- live -------------------------------------------------------------

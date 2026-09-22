@@ -217,6 +217,7 @@
              (nyaa:complete :protocol-ollama
                             :base-url "http://127.0.0.1:1"
                             :model "test-model"
+                            :timeout 5000
                             :messages '((:role :user :content "hello"))))))))
 
 ;;; --- live -------------------------------------------------------------

@@ -24,6 +24,27 @@ messages, so both reach a backend through here."
   "NAME's metadata plist."
   (m:call (%protocol-process name :registry registry) '(:describe)))
 
+;;; --- connect refusal ---------------------------------------------------
+
+;;; usocket's SBCL :timeout connect path does a non-blocking connect, then
+;;; polls GETPEERNAME to detect success. On Linux, a refused connect leaves
+;;; GETPEERNAME reporting ENOTCONN indefinitely rather than surfacing
+;;; SO_ERROR, so a refusal spins until the whole connect timeout elapses
+;;; instead of failing immediately.
+;;;
+;;; TODO: this binds an unexported usocket symbol to fall back to its
+;;; legacy blocking connect, which does fail a refusal immediately (an
+;;; unreachable host is still bounded by :timeout). Drop it once usocket's
+;;; new connect loop checks SO_ERROR itself. Tracked in
+;;; ~takeiteasy/nyaa#61.
+(defmacro with-immediate-connect-refusal (&body body)
+  "Run BODY -- which must make its USOCKET:SOCKET-CONNECT call directly,
+inside the same thread -- so a refused connection fails at once rather
+than waiting out the connect timeout. #-sbcl is unaffected: usocket's
+:timeout is a no-op on ECL and CCL does not take the SBCL polling path."
+  `(let (#+sbcl (usocket::*socket-connect-nonblock-wait* nil))
+     ,@body))
+
 ;;; --- content ----------------------------------------------------------
 
 (defun text-block (text) (list :type :text :text text))
@@ -305,7 +326,8 @@ stream status) and answers the reply."
   ;; failure, and everything after the status is the backend misbehaving.
   (let (stream status)
     (handler-case
-        (multiple-value-setq (stream status) (funcall opener request))
+        (with-immediate-connect-refusal
+          (multiple-value-setq (stream status) (funcall opener request)))
       ;; Nothing was read, so there is no backend answer to report on: a
       ;; refused connection and a peer that hangs up before the status line
       ;; are the same failure to the caller.

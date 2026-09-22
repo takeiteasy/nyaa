@@ -296,7 +296,7 @@ err
   ;; ~takeiteasy/nyaa#16: the deadline used to signal the direct `sh` child
   ;; only, so a backgrounded grandchild outlived it.
   (if (not (process-group-containment-available-p))
-      (skip "no process-group containment on this host; falls back to a leader-only kill")
+      (skip "no process-group mechanism on this host")
       (with-tools
         (let ((pidfile (format nil "~a/nyaa-shell-pgid-test.pid"
                                (uiop:native-namestring (uiop:temporary-directory)))))
@@ -443,7 +443,8 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
            (url (fake-http-url server)))
       (stop-fake-http server)
       (is (eq :unavailable
-              (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url))))))))
+              (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url)
+                                                :timeout 5000)))))))
 
 (test http-timeout-does-not-leak-its-worker-thread
   ;; An abandoned request used to keep its worker thread -- and, on
@@ -572,7 +573,7 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   ;; process must be signalled along with the worker at kill time, which
   ;; needs the worker itself to lead its own group.
   (if (not (process-group-containment-available-p))
-      (skip "no process-group containment on this host; workers fall back to a leader-only kill")
+      (skip "no process-group mechanism on this host")
       (with-tools
         (let ((pid (parse-integer
                     (result-value (tool :tool-repl :id "g" :form +getpid-form+) :value))))
