@@ -32,4 +32,5 @@
    ;; providers
    #:provider-ollama
    ;; tools
-   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan))
+   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan
+   #:tool-image #:tool-services))

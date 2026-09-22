@@ -38,9 +38,9 @@ anaphoric `service` is bound inside `:invoke` for a tool that needs it.
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
 for metadata that names none. The [agent loop](agent.md)'s default allow-list
-is exactly the `:agent`-trusted tools — `tool-fs` and `tool-plan` are the only
-standard tools at that level, so granting the others to a model is explicit
-at the mount site.
+is exactly the `:agent`-trusted tools — `tool-fs`, `tool-plan`, `tool-image`
+and `tool-services` are the standard tools at that level, so granting the
+others to a model is explicit at the mount site.
 
 A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
 back to `defservice` and the lower-level `define-tool-handler` directly. It
@@ -109,10 +109,13 @@ kept running.
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
+| `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
+| `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
 
-`:timeout` is in milliseconds and defaults to 30000. `tool-fs` bounds no work
-of its own, so it declares none and refuses one. Each tool's exact types are in
-its `:params`; see [schemas](schema.md) for the vocabulary.
+`:timeout` is in milliseconds and defaults to 30000. `tool-fs`, `tool-image`
+and `tool-services` bound no work of their own, so they declare no `:timeout`
+and refuse one. Each tool's exact types are in its `:params`; see
+[schemas](schema.md) for the vocabulary.
 
 ```lisp
 (m:mount context 'nyaa:tool-fs :root "/srv/workspace")
@@ -121,6 +124,8 @@ its `:params`; see [schemas](schema.md) for the vocabulary.
 (m:mount context 'nyaa:tool-eval)
 (m:mount context 'nyaa:tool-repl)
 (m:mount context 'nyaa:tool-plan :allow '(:tool-fs))
+(m:mount context 'nyaa:tool-image)
+(m:mount context 'nyaa:tool-services)
 ```
 
 `tool-fs` refuses to delete directories, and offers no recursive delete: a tool
@@ -171,6 +176,12 @@ trusted-operator surfaces, marked `:trust :operator` at the definition site.
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.
 
+`tool-image` and `tool-services` are `:agent`-trusted and read-only: neither
+ever returns a value or a slot, only flags and shapes, so a provider's
+`:api-key` (kept out of published metadata; see [providers](providers.md))
+cannot surface through either. Seeing a value stays `tool-eval`'s job. See
+[introspection](introspection.md).
+
 ## Limitations
 
 - The `tool-fs` sandbox is path-based. Paths are confined lexically, without
@@ -191,3 +202,9 @@ and only tools that are themselves `:agent`-trusted — see
   not concurrent ([#27](https://todo.sr.ht/~takeiteasy/nyaa/27)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
+- `tool-image` has no source location for an interpreted definition on SBCL,
+  or anything not loaded from a compiled file on ECL
+  ([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
+- `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
+  richer lifecycle `service-status` tracks
+  ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).

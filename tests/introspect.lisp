@@ -1,0 +1,116 @@
+(in-package #:nyaa/tests)
+(in-suite :nyaa)
+
+;;; TOOL-IMAGE and TOOL-SERVICES (~takeiteasy/nyaa#10). Both mount already,
+;;; via WITH-TOOLS (tests/tools.lisp).
+
+;;; --- tool-image ----------------------------------------------------
+
+(test image-describe-a-known-function
+  (with-tools
+    (let ((result (tool :tool-image :op :describe :symbol "complete" :package "nyaa")))
+      (is (eq :ok (first result)))
+      (is (eq :function (result-value result :kind)))
+      (is (eq t (result-value result :fboundp)))
+      (is (stringp (result-value result :lambda-list)))
+      (is (stringp (result-value result :documentation))))))
+
+(defvar *introspect-secret* "sk-secret"
+  "A bound special IMAGE-NEVER-RETURNS-A-BOUND-VALUES-VALUE checks never
+travels in a TOOL-IMAGE reply.")
+
+(test image-never-returns-a-bound-values-value
+  ;; The invariant tests/provider.lisp guards for PROVIDER.LISP's :api-key:
+  ;; a bound special's value must never travel, whatever op is asked.
+  (with-tools
+    (let ((result (tool :tool-image :op :describe :symbol "*introspect-secret*"
+                                    :package "nyaa/tests")))
+      (is (eq t (result-value result :boundp)))
+      (is (null (search "sk-secret" (format nil "~s" result)))))))
+
+(test image-describe-an-unknown-symbol-is-a-bad-request
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error
+                       (tool :tool-image :op :describe
+                                        :symbol "totally-unknown-symbol-xyz"
+                                        :package "nyaa")))))))
+
+(test image-describe-requires-symbol
+  (with-tools
+    (is (equal :bad-request (first (nyaa:tool-error (tool :tool-image :op :describe)))))))
+
+(test image-apropos-finds-and-caps-results
+  (with-tools
+    (let ((result (tool :tool-image :op :apropos :pattern "TOOL" :package "nyaa"
+                                    :external-only nil :limit 2)))
+      (is (eq :ok (first result)))
+      (is (<= (length (result-value result :symbols)) 2))
+      (is (integerp (result-value result :total)))
+      (when (> (result-value result :total) 2)
+        (is (eq t (result-value result :truncated)))))))
+
+(test image-apropos-requires-pattern
+  (with-tools
+    (is (equal :bad-request (first (nyaa:tool-error (tool :tool-image :op :apropos)))))))
+
+(test image-documentation-reads-a-docstring
+  (with-tools
+    (is (stringp (result-value (tool :tool-image :op :documentation
+                                                 :symbol "complete" :package "nyaa")
+                               :documentation)))))
+
+(test image-source-locates-a-loaded-function
+  (with-tools
+    (let ((result (tool :tool-image :op :source :symbol "complete" :package "nyaa")))
+      (is (eq :ok (first result)))
+      ;; Well-formed either way: a location on SBCL/ECL, or a plain miss.
+      (if (result-value result :available)
+          (is (stringp (result-value result :file)))
+          (is (eq nil (result-value result :available)))))))
+
+(test image-packages-lists-the-loaded-image
+  (with-tools
+    (is (member "NYAA" (mapcar (lambda (p) (getf p :name))
+                               (result-value (tool :tool-image :op :packages) :packages))
+                :test #'string=))))
+
+;;; --- tool-services ---------------------------------------------------
+
+(test services-registry-lists-mounted-tools
+  (with-tools
+    (let ((names (mapcar (lambda (e) (getf e :name))
+                         (result-value (tool :tool-services :op :registry) :entries))))
+      (is (member :tool-fs names))
+      (is (member :tool-image names))
+      (is (member :tool-services names)))))
+
+(test services-registry-filters-by-kind
+  (with-tools
+    (let ((entries (result-value (tool :tool-services :op :registry :kind :tool) :entries)))
+      (is (every (lambda (e) (eq :tool (getf (getf e :props) :kind))) entries)))))
+
+(test services-children-reports-running-tools
+  (with-tools
+    (let ((children (result-value (tool :tool-services :op :children) :children)))
+      (is (find :tool-image children :key (lambda (c) (getf c :name))))
+      (is (eq :running
+              (getf (find :tool-image children :key (lambda (c) (getf c :name))) :state))))))
+
+(test services-describe-an-unregistered-name-is-a-bad-request
+  (with-tools
+    (is (equal :bad-request
+               (first (nyaa:tool-error
+                       (tool :tool-services :op :describe :name "does-not-exist")))))))
+
+(test services-describe-requires-name
+  (with-tools
+    (is (equal :bad-request (first (nyaa:tool-error (tool :tool-services :op :describe)))))))
+
+(test services-describe-reports-props-and-effects
+  (with-tools
+    (let ((result (tool :tool-services :op :describe :name "tool-fs")))
+      (is (eq :ok (first result)))
+      (is (eq :tool (getf (result-value result :props) :kind)))
+      (is (eq t (result-value result :alive)))
+      (is (listp (result-value result :effects))))))

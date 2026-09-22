@@ -13,6 +13,7 @@ Runs on SBCL and ECL.
 
 - [Getting started](docs/getting-started.md)
 - [Tools](docs/tools.md)
+- [Introspection](docs/introspection.md)
 - [The plan gate](docs/plan.md)
 - [Protocols](docs/protocols.md)
 - [Providers](docs/providers.md)

@@ -60,10 +60,9 @@ the previous result's `:messages` back in as the next `:run`'s. Mount with
 ## The allow-list and trust
 
 `:tools` defaults to every discovered tool whose [`:trust`](tools.md) is
-`:agent`. Nothing shipped is that trust level today — `tool-fs`, `tool-shell`,
-`tool-http`, `tool-eval` and `tool-repl` are all `:operator` — so the safe
-default is an agent with no tools, and granting one of them is explicit at
-the mount site:
+`:agent` — `tool-fs`, `tool-plan`, `tool-image` and `tool-services` today;
+`tool-shell`, `tool-http`, `tool-eval` and `tool-repl` are all `:operator`
+and only reach the model when the mount site names them explicitly:
 
 ```lisp
 (m:mount *ctx* 'nyaa:agent :model :provider-ollama :tools '(:tool-shell))
