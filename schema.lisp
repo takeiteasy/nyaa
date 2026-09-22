@@ -70,6 +70,8 @@ A specifier outside it is a definition error, not a silent pass-through."
      (validate-specifier (second spec)))
     ((spec-is spec "OBJECT")
      (validate-schema (rest spec)))
+    ((spec-is spec "ANY")
+     (when (consp spec) (error "~s takes no arguments." (spec-head spec))))
     (t (error "Unknown specifier ~s." spec))))
 
 ;;; --- coercion ---------------------------------------------------------
@@ -127,7 +129,8 @@ NIL and a message naming the parameter at fault."
      (if (and (listp value) (evenp (length value)))
          (multiple-value-bind (plist problem) (coerce-args (rest spec) value)
            (values plist (not problem)))
-         (values nil nil)))))
+         (values nil nil)))
+    ((spec-is spec "ANY") (values value t))))
 
 (defun as-text (value)
   "VALUE as a string: strings pass through and symbols give their name, in
@@ -215,6 +218,7 @@ has an even length too, and must not pass as one empty entry."
     ((spec-is spec "ARRAY-OF") (format nil "a list of ~a" (describe-specifier (second spec))))
     ((spec-is spec "MAP-OF") (format nil "a plist of ~a" (describe-specifier (second spec))))
     ((spec-is spec "OBJECT") "a plist")
+    ((spec-is spec "ANY") "any value")
     ((and (spec-is spec "INTEGER") (consp spec))
      (format nil "an integer in ~{~a~^..~}" (rest spec)))
     (t (format nil "a ~(~a~)" (spec-head spec)))))
@@ -279,7 +283,8 @@ their lower-cased name rather than as a symbol."
     ((spec-is spec "MAP-OF")
      (json-object "type" "object"
                   "additionalProperties" (specifier->json (second spec))))
-    ((spec-is spec "OBJECT") (schema->json-schema (rest spec)))))
+    ((spec-is spec "OBJECT") (schema->json-schema (rest spec)))
+    ((spec-is spec "ANY") (json-object))))
 
 (defun json-schema->schema (json)
   "A JSON Schema object, as jzon parses one, as a parameter list."
@@ -323,6 +328,7 @@ their lower-cased name rather than as a symbol."
 
 (defun json-type->specifier (type property)
   (cond
+    ((null type) 'any)
     ((equal type "string")
      (a:if-let ((enum (gethash "enum" property)))
        (list* 'member (map 'list (lambda (value) (a:make-keyword (string-upcase value)))

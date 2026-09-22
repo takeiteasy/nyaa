@@ -105,6 +105,7 @@ single-text-block case."
                       (value->json entry (second spec))))
        json))
     ((spec-is spec "OBJECT") (arguments->json value (rest spec)))
+    ((spec-is spec "ANY") (untyped->json value))
     (t (json-value value))))
 
 ;;; TODO: without a schema, a plist of keywords is an object and any other
@@ -148,6 +149,7 @@ is what COERCE-ARGS matches a schema on."
      (loop for key being the hash-keys of value using (hash-value entry)
            collect key collect (json->value entry (second spec))))
     ((spec-is spec "OBJECT") (json->arguments value (rest spec)))
+    ((spec-is spec "ANY") (untyped->lisp value))
     ;; A member arrives as its name and an integer as digits; COERCE-ARGS
     ;; takes both, so a scalar passes through untouched.
     (t value)))

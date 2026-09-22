@@ -23,7 +23,7 @@
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
-   #:array-of #:object #:map-of
+   #:array-of #:object #:map-of #:any
    ;; workers
    #:*worker-command*
    ;; protocols
@@ -32,4 +32,4 @@
    ;; providers
    #:provider-ollama
    ;; tools
-   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl))
+   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan))

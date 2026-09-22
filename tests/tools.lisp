@@ -24,6 +24,7 @@
            (m:mount context 'nyaa:tool-http)
            (m:mount context 'nyaa:tool-eval)
            (m:mount context 'nyaa:tool-repl)
+           (m:mount context 'nyaa:tool-plan :allow '(:tool-fs))
            (funcall body))
       (m:stop context)
       (uiop:delete-directory-tree (uiop:ensure-directory-pathname root)
@@ -53,13 +54,14 @@
   (with-tools
     ;; kind=tool in the registration props, found through names + lookup:
     ;; the context and meow's own entries must not appear.
-    (is (equal '(:tool-eval :tool-fs :tool-http :tool-repl :tool-shell)
+    (is (equal '(:tool-eval :tool-fs :tool-http :tool-plan :tool-repl :tool-shell)
                (nyaa:tools)))))
 
 (test metadata-carries-a-trust-level
   (with-tools
     (is (eq :operator (nyaa:tool-trust (nyaa:describe-tool :tool-shell))))
     (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-fs))))
+    (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-plan))))
     ;; A tool that names none is an agent tool.
     (is (eq :agent (nyaa:tool-trust '(:kind :tool))))))
 

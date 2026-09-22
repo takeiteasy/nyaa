@@ -45,7 +45,8 @@ implementation."
     (:note (or null string))
     (:tags (nyaa:array-of string))
     (:headers (nyaa:map-of string))
-    (:where (nyaa:object (:city string :required t) (:zip string)))))
+    (:where (nyaa:object (:city string :required t) (:zip string)))
+    (:extra nyaa:any :doc "anything at all")))
 
 ;;; --- coercion ---------------------------------------------------------
 
@@ -136,7 +137,13 @@ implementation."
                    "{\"type\":\"object\",
                      \"properties\":{\"city\":{\"type\":\"string\"}},
                      \"required\":[\"city\"],
-                     \"additionalProperties\":false}"))))
+                     \"additionalProperties\":false}"))
+    (is (same-json (rendered 'nyaa:any) "{}"))))
+
+(test any-coerces-whatever-it-is-given
+  (is (equal '(:x 7) (coerced '((:x nyaa:any)) '(:x 7))))
+  (is (equal '(:x "s") (coerced '((:x nyaa:any)) '(:x "s"))))
+  (is (equal '(:x (:a 1)) (coerced '((:x nyaa:any)) '(:x (:a 1))))))
 
 (defun sorted-schema (schema)
   "SCHEMA by parameter name: a JSON object carries no order to preserve."

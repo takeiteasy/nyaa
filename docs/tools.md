@@ -38,8 +38,9 @@ anaphoric `service` is bound inside `:invoke` for a tool that needs it.
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
 for metadata that names none. The [agent loop](agent.md)'s default allow-list
-is exactly the `:agent`-trusted tools — `tool-fs` is the only standard tool at
-that level, so granting the others to a model is explicit at the mount site.
+is exactly the `:agent`-trusted tools — `tool-fs` and `tool-plan` are the only
+standard tools at that level, so granting the others to a model is explicit
+at the mount site.
 
 A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
 back to `defservice` and the lower-level `define-tool-handler` directly. It
@@ -107,6 +108,7 @@ kept running.
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
+| `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
 
 `:timeout` is in milliseconds and defaults to 30000. `tool-fs` bounds no work
 of its own, so it declares none and refuses one. Each tool's exact types are in
@@ -118,6 +120,7 @@ its `:params`; see [schemas](schema.md) for the vocabulary.
 (m:mount context 'nyaa:tool-http)
 (m:mount context 'nyaa:tool-eval)
 (m:mount context 'nyaa:tool-repl)
+(m:mount context 'nyaa:tool-plan :allow '(:tool-fs))
 ```
 
 `tool-fs` refuses to delete directories, and offers no recursive delete: a tool
@@ -164,6 +167,9 @@ why an evaluation gets a fresh process instead of a pooled one.
 the host, and `tool-eval` and `tool-repl` evaluate arbitrary forms. All four are
 trusted-operator surfaces, marked `:trust :operator` at the definition site.
 `tool-fs` is confined to its sandbox root, subject to the limitation below.
+`tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
+and only tools that are themselves `:agent`-trusted — see
+[the plan gate](plan.md) for what that buys and what it does not.
 
 ## Limitations
 
@@ -183,3 +189,5 @@ trusted-operator surfaces, marked `:trust :operator` at the definition site.
   for the rest ([#26](https://todo.sr.ht/~takeiteasy/nyaa/26)).
 - `tool-repl` handles one message at a time, so its sessions are isolated but
   not concurrent ([#27](https://todo.sr.ht/~takeiteasy/nyaa/27)).
+- `tool-plan`'s `:timeout` is checked only between steps, so one long step
+  can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).

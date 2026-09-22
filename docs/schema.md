@@ -27,13 +27,17 @@ Each parameter is `(:name specifier . options)`. The options are `:doc`,
 | `(array-of X)` | `{"type":"array","items":X}` |
 | `(object (:k X ...) ...)` | an object schema, as at the top level |
 | `(map-of X)` | `{"type":"object","additionalProperties":X}` |
+| `any` | `{}` — matches anything, coerces nothing |
 
 The set is closed: a specifier outside it is a definition error, not a silent
 pass-through. Specifiers are compared by symbol name, so a schema written in
 any package reads the same.
 
-`array-of`, `object` and `map-of` are defined here — CL has no equivalent.
-`object` names its fields; `map-of` is for dynamic keys, such as HTTP headers.
+`array-of`, `object`, `map-of` and `any` are defined here — CL has no
+equivalent. `object` names its fields; `map-of` is for dynamic keys, such as
+HTTP headers; `any` is for a value whose shape depends on something the
+schema itself cannot name, such as a plan step's `:args` — see
+[the plan gate](plan.md).
 
 ## Coercion
 
@@ -50,6 +54,7 @@ in-image callers pass keywords. `coerce-args` takes both:
 | `(array-of X)` | a list or vector, coerced elementwise |
 | `(map-of X)` | a plist whose names are strings or symbols |
 | `(object ...)` | a plist, coerced as a nested schema |
+| `any` | anything; passed through unchanged |
 
 Coercion then fills in a `:default` for an absent parameter, and rejects:
 
