@@ -108,7 +108,7 @@ kept running.
 | Tool | Parameters | Notes |
 |---|---|---|
 | `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. |
-| `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c`; merged stdout and stderr, plus the exit status. |
+| `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
@@ -172,6 +172,10 @@ A worker runs the host implementation, resolved from the running binary.
 SBCL and 41 ms on ECL, and an exchange with a running one about 0.2 ms, which is
 why an evaluation gets a fresh process instead of a pooled one.
 
+A worker leads its own process group, the same as a `tool-shell` command (see
+the standard tools table above), so a process a form backgrounds is killed
+along with it rather than outliving the deadline.
+
 ## Trust posture
 
 `tool-shell` runs any command, `tool-http` makes arbitrary network requests from
@@ -201,14 +205,12 @@ cannot surface through either. Seeing a value stays `tool-eval`'s job. See
 - `tool-fs`'s dangling-symlink check has no implementation outside SBCL and
   ECL, so there a dangling link is indistinguishable from a plain file
   ([#53](https://todo.sr.ht/~takeiteasy/nyaa/53)).
-- `tool-shell`'s deadline signals the `sh` child only, so a backgrounded
-  descendant outlives it ([#16](https://todo.sr.ht/~takeiteasy/nyaa/16)).
+- The process-group kill `tool-shell` and workers use falls back to a
+  leader-only kill with no perl on PATH, the same gap as before
+  ([#54](https://todo.sr.ht/~takeiteasy/nyaa/54)).
 - A `tool-http` request abandoned at its deadline leaves its worker thread
   running until the server answers
   ([#17](https://todo.sr.ht/~takeiteasy/nyaa/17)).
-- A worker's deadline kills the worker itself, so a process it backgrounded
-  outlives it, as with `tool-shell`
-  ([#16](https://todo.sr.ht/~takeiteasy/nyaa/16)).
 - A value too large to print is truncated silently, and the caller cannot ask
   for the rest ([#26](https://todo.sr.ht/~takeiteasy/nyaa/26)).
 - `tool-repl` handles one message at a time, so its sessions are isolated but

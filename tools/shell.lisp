@@ -1,13 +1,10 @@
 (in-package #:nyaa)
 
 ;;; Shell tool: one command through `sh -c`, merged output, bounded by a
-;;; caller deadline.
+;;; caller deadline. The deadline kills the command's whole process group
+;;; (see process.lisp), so a backgrounded descendant is signalled too.
 ;;;
 ;;; Trust posture: arbitrary command execution. Trusted operator only.
-;;;
-;;; TODO: the deadline kills the direct `sh` child only, so a backgrounded
-;;; descendant outlives it. Upgrade path: start the command in its own
-;;; process group and signal the group. Tracked in ~takeiteasy/nyaa#16.
 
 (define-tool :tool-shell
     (:trust :operator
@@ -19,9 +16,9 @@
     (run-command cmd timeout)))
 
 (defun run-command (cmd timeout-ms)
-  (let* ((process (uiop:launch-program (list "/bin/sh" "-c" cmd)
-                                       :output :stream
-                                       :error-output :output))
+  (let* ((process (launch-in-process-group (list "/bin/sh" "-c" cmd)
+                                           :output :stream
+                                           :error-output :output))
          (done (bt:make-semaphore))
          (output nil))
     ;; Drain concurrently: a command that outruns the pipe buffer would
@@ -36,8 +33,8 @@
     (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
         (ok :exit (uiop:wait-process process) :out (or output ""))
         (progn
-          ;; Killing the child closes the pipe, which ends the drain
-          ;; thread on its own.
-          (uiop:terminate-process process :urgent t)
-          (uiop:wait-process process)
+          ;; Killing the whole group closes the pipe, which ends the drain
+          ;; thread on its own -- true even when a backgrounded descendant
+          ;; held the write end open, since it dies with the group too.
+          (terminate-process-group process)
           (fail :timeout)))))

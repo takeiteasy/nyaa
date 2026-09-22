@@ -20,9 +20,9 @@
 ;;; holds nothing but keywords and strings, so source that does not read
 ;;; costs one reply instead of desynchronising the stream.
 ;;;
-;;; TODO: the deadline kills the child only, so a process it backgrounded
-;;; outlives it. Upgrade path: start the child in its own process group and
-;;; signal the group. Tracked in ~takeiteasy/nyaa#16.
+;;; A worker leads its own process group (see process.lisp), so a form that
+;;; backgrounds a process is signalled along with the worker at kill time,
+;;; the same as tools/shell.lisp's commands.
 
 (defmacro worker-program ()
   "The child's loop, read from worker-program.lisp as text when this file is
@@ -62,12 +62,12 @@ another implementation than the one hosting them.")
   "A running worker, or NIL if the child never answered its handshake."
   (let ((worker (ignore-errors
                  (%make-worker
-                  (uiop:launch-program (append (worker-argv) (list *worker-program*))
-                                       :input :stream :output :stream
-                                       ;; Diagnostics are reported in band;
-                                       ;; anything else the child writes to
-                                       ;; stderr would corrupt the protocol.
-                                       :error-output nil)))))
+                  (launch-in-process-group
+                   (append (worker-argv) (list *worker-program*))
+                   :input :stream :output :stream
+                   ;; Diagnostics are reported in band; anything else the
+                   ;; child writes to stderr would corrupt the protocol.
+                   :error-output nil)))))
     (when worker
       (if (equal '(:ready) (read-reply worker +worker-start-timeout+))
           worker
@@ -78,9 +78,7 @@ another implementation than the one hosting them.")
 
 (defun kill-worker (worker)
   (when worker
-    (let ((process (worker-process worker)))
-      (ignore-errors (uiop:terminate-process process :urgent t))
-      (ignore-errors (uiop:wait-process process))))
+    (terminate-process-group (worker-process worker)))
   nil)
 
 (defun worker-eval (worker source timeout-ms)

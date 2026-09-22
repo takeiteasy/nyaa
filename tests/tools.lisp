@@ -51,6 +51,36 @@
 (defun result-value (result key)
   (getf (second result) key))
 
+(defparameter +getpid-form+
+  ;; A worker runs the host implementation, so the bare image it starts has
+  ;; exactly the internals this one does.
+  #+sbcl "(sb-unix:unix-getpid)"
+  #+ecl "(si:getpid)"
+  #+ccl "(ccl::getpid)")
+
+(defun unix-process-alive-p (pid)
+  (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
+                                        :ignore-error-status t))))
+
+(defun wait-for-exit (pid &optional (deadline 2.0))
+  "True once PID is gone. A kill is not documented to block until the
+process has actually exited, so the check polls rather than assume."
+  (loop repeat (ceiling deadline 0.05)
+        while (unix-process-alive-p pid)
+        do (sleep 0.05))
+  (not (unix-process-alive-p pid)))
+
+(defun unix-pgid (pid)
+  "PID's process group id, or NIL if it is already gone."
+  (let ((out (with-output-to-string (s)
+              (uiop:run-program (list "ps" "-o" "pgid=" "-p" (princ-to-string pid))
+                                :output s :ignore-error-status t))))
+    (parse-integer out :junk-allowed t)))
+
+(defun perl-available-p ()
+  (zerop (nth-value 2 (uiop:run-program (list "command" "-v" "perl")
+                                        :ignore-error-status t))))
+
 ;;; --- the convention --------------------------------------------------
 
 (test tools-are-discoverable-via-props
@@ -243,6 +273,25 @@ err
     (is (eql 0 (result-value (tool :tool-shell :cmd "sleep 8" :timeout 15000)
                              :exit)))))
 
+(test shell-kills-a-backgrounded-descendant-on-timeout
+  ;; ~takeiteasy/nyaa#16: the deadline used to signal the direct `sh` child
+  ;; only, so a backgrounded grandchild outlived it.
+  (if (not (perl-available-p))
+      (skip "perl not on PATH; the process-group wrapper falls back to a leader-only kill")
+      (with-tools
+        (let ((pidfile (format nil "~a/nyaa-shell-pgid-test.pid"
+                               (uiop:native-namestring (uiop:temporary-directory)))))
+          (unwind-protect
+               (progn
+                 (is (eq :timeout
+                        (nyaa:tool-error
+                         (tool :tool-shell
+                               :cmd (format nil "sleep 30 & echo $! > ~a; wait" pidfile)
+                               :timeout 500))))
+                 (let ((grandchild (with-open-file (s pidfile) (parse-integer (read-line s)))))
+                   (is (wait-for-exit grandchild))))
+            (ignore-errors (delete-file pidfile)))))))
+
 ;;; --- http ---------------------------------------------------------------
 
 (defun echo-handler (&key method path headers body)
@@ -427,25 +476,6 @@ err
     (is (eq :error (first (nyaa:tool-error
                            (tool :tool-repl :id "a" :form "*x*")))))))
 
-(defparameter +getpid-form+
-  ;; A worker runs the host implementation, so the bare image it starts has
-  ;; exactly the internals this one does.
-  #+sbcl "(sb-unix:unix-getpid)"
-  #+ecl "(si:getpid)"
-  #+ccl "(ccl::getpid)")
-
-(defun unix-process-alive-p (pid)
-  (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
-                                        :ignore-error-status t))))
-
-(defun wait-for-exit (pid &optional (deadline 2.0))
-  "True once PID is gone. Stopping a service is not documented to block
-until its effects have unwound, so the check polls rather than assume."
-  (loop repeat (ceiling deadline 0.05)
-        while (unix-process-alive-p pid)
-        do (sleep 0.05))
-  (not (unix-process-alive-p pid)))
-
 (test repl-workers-die-with-the-service
   (let ((pids '()))
     (with-tools
@@ -458,6 +488,17 @@ until its effects have unwound, so the check polls rather than assume."
     ;; each worker.
     (dolist (pid pids)
       (is (wait-for-exit pid)))))
+
+(test worker-leads-its-own-process-group
+  ;; ~takeiteasy/nyaa#16 also covers workers: a form that backgrounds a
+  ;; process must be signalled along with the worker at kill time, which
+  ;; needs the worker itself to lead its own group.
+  (if (not (perl-available-p))
+      (skip "perl not on PATH; workers fall back to a leader-only kill")
+      (with-tools
+        (let ((pid (parse-integer
+                    (result-value (tool :tool-repl :id "g" :form +getpid-form+) :value))))
+          (is (eql pid (unix-pgid pid)))))))
 
 (test repl-requires-a-form
   (with-tools

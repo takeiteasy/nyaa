@@ -8,6 +8,9 @@
   :serial t
   :components ((:file "package")
                (:file "nyaa")
+               ;; Ahead of worker.lisp and tools/shell.lisp: both launch and
+               ;; kill through the process-group helpers declared here.
+               (:file "process")
                (:file "schema")
                (:file "tool")
                ;; Right after tool.lisp: CHECKPOINT and ROLLBACK need only
