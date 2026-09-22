@@ -178,8 +178,11 @@ why an evaluation gets a fresh process instead of a pooled one.
 the host, `tool-eval` and `tool-repl` evaluate arbitrary forms, and
 `tool-checkpoint` writes and reverts the harness's own declared state. All
 five are trusted-operator surfaces, marked `:trust :operator` at the
-definition site. `tool-fs` is confined to its sandbox root, subject to the
-limitation below.
+definition site. `tool-fs` is confined to its sandbox root: a lexical check
+first, so a path outside the root is rejected before anything touches the
+filesystem, then every symlink along the path resolved and re-checked, so one
+inside the root pointing out of it does not admit an open that lands
+elsewhere.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.
@@ -192,10 +195,12 @@ cannot surface through either. Seeing a value stays `tool-eval`'s job. See
 
 ## Limitations
 
-- The `tool-fs` sandbox is path-based. Paths are confined lexically, without
-  touching the filesystem, which is what makes the check sound against `../`
-  tricks — but a symlink inside the root pointing outside it is followed
-  ([#15](https://todo.sr.ht/~takeiteasy/nyaa/15)).
+- A symlink swapped into place between `tool-fs`'s check and the operation
+  that follows it is not caught — the two are not atomic
+  ([#52](https://todo.sr.ht/~takeiteasy/nyaa/52)).
+- `tool-fs`'s dangling-symlink check has no implementation outside SBCL and
+  ECL, so there a dangling link is indistinguishable from a plain file
+  ([#53](https://todo.sr.ht/~takeiteasy/nyaa/53)).
 - `tool-shell`'s deadline signals the `sh` child only, so a backgrounded
   descendant outlives it ([#16](https://todo.sr.ht/~takeiteasy/nyaa/16)).
 - A `tool-http` request abandoned at its deadline leaves its worker thread

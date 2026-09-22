@@ -40,9 +40,10 @@
                       (namestring (uiop:temporary-directory))
                       (random (expt 2 64) (make-random-state t)))))
     (ensure-directories-exist (concatenate 'string path "/"))
-    ;; The tool normalises its root the same way; match it so assertions
-    ;; about escaping compare like with like.
-    (string-right-trim "/" path)))
+    ;; The tool truenames its root the same way (/tmp is itself a symlink
+    ;; on macOS); match it so assertions about escaping compare like with
+    ;; like.
+    (string-right-trim "/" (uiop:native-namestring (uiop:truename* path)))))
 
 (defun tool (name &rest args)
   (apply #'nyaa:invoke-tool name args))
@@ -155,6 +156,57 @@
   (with-tools
     (is (equal :bad-request
                (first (nyaa:tool-error (tool :tool-fs :op :read)))))))
+
+;;; --- fs: symlinks (~takeiteasy/nyaa#15) --------------------------------
+
+(defun make-symlink (target link)
+  (uiop:run-program (list "ln" "-s" target link) :output nil :error-output nil))
+
+(defun write-file (path contents)
+  (with-open-file (s path :direction :output :if-exists :supersede
+                          :if-does-not-exist :create)
+    (write-string contents s)))
+
+(test fs-refuses-a-symlink-to-a-file-outside-the-root
+  (with-tools
+    (let ((outside (format nil "~a-outside.txt" *sandbox*)))
+      (write-file outside "secret")
+      (unwind-protect
+           (progn
+             (make-symlink outside (concatenate 'string *sandbox* "/link.txt"))
+             (is (equal '(:forbidden "path escapes sandbox root")
+                        (nyaa:tool-error (tool :tool-fs :op :read :path "link.txt")))))
+        (delete-file outside)))))
+
+(test fs-refuses-traversal-through-a-symlinked-directory
+  (with-tools
+    (let ((outside (format nil "~a-outside" *sandbox*)))
+      (ensure-directories-exist (concatenate 'string outside "/"))
+      (write-file (concatenate 'string outside "/x.txt") "secret")
+      (unwind-protect
+           (progn
+             (make-symlink outside (concatenate 'string *sandbox* "/linkdir"))
+             (is (equal '(:forbidden "path escapes sandbox root")
+                        (nyaa:tool-error (tool :tool-fs :op :read :path "linkdir/x.txt")))))
+        (uiop:delete-directory-tree (uiop:ensure-directory-pathname outside)
+                                    :validate t :if-does-not-exist :ignore)))))
+
+(test fs-refuses-a-dangling-symlink
+  ;; TRUENAME* alone would admit this: it reports a dangling link unresolved,
+  ;; indistinguishable by pathname from a plain file that exists.
+  (with-tools
+    (let ((target (format nil "~a-created-by-attack.txt" *sandbox*)))
+      (make-symlink target (concatenate 'string *sandbox* "/dangle"))
+      (is (equal '(:forbidden "path escapes sandbox root")
+                 (nyaa:tool-error (tool :tool-fs :op :write :path "dangle" :data "x"))))
+      (is (not (uiop:file-exists-p target))))))
+
+(test fs-permits-a-symlink-that-stays-inside-the-root
+  (with-tools
+    (tool :tool-fs :op :write :path "real.txt" :data "hello")
+    (make-symlink (concatenate 'string *sandbox* "/real.txt")
+                  (concatenate 'string *sandbox* "/alias.txt"))
+    (is (equal "hello" (result-value (tool :tool-fs :op :read :path "alias.txt") :data)))))
 
 ;;; --- shell -------------------------------------------------------------
 

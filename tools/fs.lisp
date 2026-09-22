@@ -1,11 +1,8 @@
 (in-package #:nyaa)
 
+#+sbcl (eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-posix))
+
 ;;; Filesystem tool, sandboxed to a root given at mount time.
-;;;
-;;; TODO: the sandbox is path-based, so a symlink inside the root pointing
-;;; out of it is followed. Upgrade path: resolve each path and re-check the
-;;; result against the root, keeping the lexical check as the first gate.
-;;; Tracked in ~takeiteasy/nyaa#15.
 
 (define-tool :tool-fs
     (:trust :agent
@@ -17,22 +14,38 @@
                :doc "path relative to the sandbox root")
               (:data string :doc "file contents, for write")))
   (:invoke (op path data)
-    (let ((resolved (normalize-path (join-path (fs-root service) path))))
-      (if (under-root (fs-root service) resolved)
-          (apply-fs-op op resolved data)
-          (fail (list :forbidden "path escapes sandbox root"))))))
+    (let ((lexical (normalize-path (join-path (fs-root service) path))))
+      (if (not (under-root (fs-root service) lexical))
+          (fail (list :forbidden "path escapes sandbox root"))
+          ;; A symlink swapped into place between this check and
+          ;; APPLY-FS-OP's actual open is not caught -- the two are not
+          ;; atomic. Tracked in ~takeiteasy/nyaa#52.
+          (let ((resolved (resolve-path lexical)))
+            (if (and resolved (under-root (fs-root service) resolved))
+                (apply-fs-op op resolved data)
+                (fail (list :forbidden "path escapes sandbox root"))))))))
 
 (defmethod initialize-instance :after ((service tool-fs) &key)
   ;; Normalise once, without a trailing slash, so UNDER-ROOT's boundary
-  ;; check stays a single character comparison.
-  (setf (slot-value service 'root)
-        (normalize-path (native-absolute (fs-root service)))))
+  ;; check stays a single character comparison. Truenamed when the root
+  ;; already exists, so it compares like with like against a RESOLVE-PATH
+  ;; result -- /tmp is itself a symlink to /private/tmp on macOS, and a
+  ;; lexical-only root would reject every path inside it once resolved.
+  ;; A root given before it exists keeps the lexical form; nothing can
+  ;; escape through it before then, since nothing under it exists either.
+  (let ((lexical (normalize-path (native-absolute (fs-root service)))))
+    (setf (slot-value service 'root)
+          (or (resolve-path lexical) lexical))))
 
 ;;; --- the sandbox -----------------------------------------------------
 
-;;; The check is lexical and must stay lexical: resolving symlinks here
-;;; would break the guarantee that a normalised path outside the root is
-;;; rejected before anything touches the filesystem.
+;;; Two gates, in order: a lexical check first, so a path outside the root
+;;; is rejected before anything touches the filesystem, and a resolved
+;;; check behind it, so a symlink inside the root pointing out of it does
+;;; not admit an open that lands elsewhere (~takeiteasy/nyaa#15). Neither
+;;; gate alone is enough: the lexical check alone follows a symlink, and a
+;;; resolved check alone would let ".." reach a sibling before the root is
+;;; known to exist.
 
 (defun native-absolute (path)
   (if (and (plusp (length path)) (char= (char path 0) #\/))
@@ -64,6 +77,45 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
          (string= root path :end2 n)
          (or (= (length path) n)
              (char= (char path n) #\/)))))
+
+(defun leaf-link-p (path)
+  "True when PATH's own final component is a symlink, dangling or not.
+Only the leaf: an ancestor is checked when PATH recurses onto it as its
+own leaf, in RESOLVE-PATH below.
+
+Always NIL on an implementation other than SBCL or ECL: a dangling
+symlink is then indistinguishable from a plain file, and RESOLVE-PATH
+admits it. Tracked in ~takeiteasy/nyaa#53."
+  #+sbcl (and (ignore-errors (sb-posix:readlink path)) t)
+  #+ecl (eq :link (ignore-errors (ext:file-kind path nil)))
+  #-(or sbcl ecl) nil)
+
+(defun resolve-path (path)
+  "PATH, absolute and lexically normalised, with every symlink along it
+followed -- or NIL when it runs through a dangling one. TRUENAME* cannot
+tell a dangling symlink from a plain file by itself: for one, it reports
+the link's own path back unresolved, the same shape as an ordinary file
+that exists. LEAF-LINK-P checks the leaf directly to tell them apart.
+
+A path that does not exist yet -- a :write or :mkdir target -- resolves
+through its deepest existing prefix instead, with the missing tail kept
+literal, so a symlinked ancestor directory is still caught."
+  (let ((truename (uiop:truename* path)))
+    (cond
+      ((and truename (leaf-link-p path)
+            (equal (string-right-trim "/" (uiop:native-namestring truename))
+                   (string-right-trim "/" path)))
+       nil)
+      (truename (string-right-trim "/" (uiop:native-namestring truename)))
+      ((string= path "/") "/")
+      (t (let* ((slash (position #\/ path :from-end t))
+                (parent (if (and slash (plusp slash)) (subseq path 0 slash) "/"))
+                (leaf (subseq path (1+ (or slash -1))))
+                (resolved-parent (resolve-path parent)))
+           (and resolved-parent
+                (concatenate 'string resolved-parent
+                            (if (string= resolved-parent "/") "" "/")
+                            leaf)))))))
 
 ;;; --- operations ------------------------------------------------------
 
