@@ -10,6 +10,12 @@
                (:file "nyaa")
                (:file "schema")
                (:file "tool")
+               ;; Right after tool.lisp: CHECKPOINT and ROLLBACK need only
+               ;; the SNAPSHOT/RESTORE convention it declares, and every
+               ;; tool, protocol and provider file below can then use them
+               ;; without a forward reference. The agent's own SNAPSHOT
+               ;; method lives in agent.lisp instead, where its slots are.
+               (:file "checkpoint")
                (:file "protocol")
                (:file "worker")
                (:static-file "worker-program.lisp")
@@ -21,7 +27,8 @@
                              (:file "repl")
                              (:file "plan")
                              (:file "image")
-                             (:file "services")))
+                             (:file "services")
+                             (:file "checkpoint")))
                (:module "protocols"
                 :components ((:file "openai")
                              (:file "ollama")))
@@ -57,7 +64,8 @@
                (:file "worker")
                (:file "tools")
                (:file "plan")
-               (:file "introspect"))
+               (:file "introspect")
+               (:file "checkpoint"))
   :perform (test-op (o c)
              (unless (symbol-call :fiveam :run! :nyaa)
                (error "nyaa tests failed"))))

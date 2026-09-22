@@ -169,6 +169,8 @@ appending the provider's keys after the caller's is what lets the caller win."
                  (if problem
                      (bad-request "~a" problem)
                      (provider-complete service request))))
+    (:snapshot (snapshot service))
+    (:restore (restore service (second message)))
     (t (bad-request "unknown message ~s" (first message)))))
 
 (defun provider-complete (service request)

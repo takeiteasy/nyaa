@@ -75,6 +75,25 @@ through, each of which needs that margin over the one it waits on."
 that only a trusted operator may reach."
   (getf metadata :trust :agent))
 
+;;; --- checkpoints (~takeiteasy/nyaa#11) --------------------------------
+
+;;; Declared here, ahead of DEFINE-TOOL-HANDLER below, which every tool's
+;;; :SNAPSHOT/:RESTORE case calls. See checkpoint.lisp for the generation
+;;; file format and the CHECKPOINT/ROLLBACK API built on these.
+
+(defgeneric snapshot (service)
+  (:documentation "SERVICE's own declared state, a plain value fit to print
+and read back -- no process, no closure. NIL by default: most services hold
+nothing worth carrying across a restart.")
+  (:method ((service m:service)) nil))
+
+(defgeneric restore (service state)
+  (:documentation "Apply STATE, as SNAPSHOT last returned it, onto SERVICE.
+NIL by default.")
+  (:method ((service m:service) state)
+    (declare (ignore state))
+    nil))
+
 ;;; --- the handler -----------------------------------------------------
 
 (defmacro define-tool-handler (class (service args) &body body)
@@ -95,6 +114,11 @@ tool must not use those heads."
                     (if ,problem
                         (bad-request "~a" ,problem)
                         (progn ,@body))))
+         ;; Checkpoints (~takeiteasy/nyaa#11): every tool answers these
+         ;; through SNAPSHOT/RESTORE, which default to NIL, so a tool that
+         ;; holds no state worth carrying needs no method of its own.
+         (:snapshot (snapshot ,service))
+         (:restore (restore ,service (second message)))
          (t (bad-request "unknown message ~s" (first message)))))))
 
 ;;; --- define-tool -------------------------------------------------------

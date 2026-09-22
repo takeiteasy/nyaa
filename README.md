@@ -19,6 +19,7 @@ Runs on SBCL and ECL.
 - [Providers](docs/providers.md)
 - [The agent loop](docs/agent.md)
 - [Parameter schemas](docs/schema.md)
+- [Checkpoints and rollback](docs/checkpoints.md)
 
 ## License
 

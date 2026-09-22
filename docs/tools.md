@@ -50,6 +50,10 @@ answers two messages either way:
 - `(:invoke . plist)` — coerces the plist against the schema, then performs the
   operation
 
+Every tool also answers `(:snapshot)` and `(:restore state)`, backed by the
+`snapshot`/`restore` generic functions a tool may specialise; both default to
+nil. See [checkpoints](checkpoints.md).
+
 Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 `handle`, so a tool must not use them.
 
@@ -111,6 +115,7 @@ kept running.
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
 | `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
 | `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
+| `:tool-checkpoint` | `:op`, `:label`, `:keep`, `:path` | Save, list and roll back generations of the harness's declared state. See [checkpoints](checkpoints.md). |
 
 `:timeout` is in milliseconds and defaults to 30000. `tool-fs`, `tool-image`
 and `tool-services` bound no work of their own, so they declare no `:timeout`
@@ -126,6 +131,7 @@ and refuse one. Each tool's exact types are in its `:params`; see
 (m:mount context 'nyaa:tool-plan :allow '(:tool-fs))
 (m:mount context 'nyaa:tool-image)
 (m:mount context 'nyaa:tool-services)
+(m:mount context 'nyaa:tool-checkpoint)
 ```
 
 `tool-fs` refuses to delete directories, and offers no recursive delete: a tool
@@ -169,9 +175,11 @@ why an evaluation gets a fresh process instead of a pooled one.
 ## Trust posture
 
 `tool-shell` runs any command, `tool-http` makes arbitrary network requests from
-the host, and `tool-eval` and `tool-repl` evaluate arbitrary forms. All four are
-trusted-operator surfaces, marked `:trust :operator` at the definition site.
-`tool-fs` is confined to its sandbox root, subject to the limitation below.
+the host, `tool-eval` and `tool-repl` evaluate arbitrary forms, and
+`tool-checkpoint` writes and reverts the harness's own declared state. All
+five are trusted-operator surfaces, marked `:trust :operator` at the
+definition site. `tool-fs` is confined to its sandbox root, subject to the
+limitation below.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.

@@ -91,6 +91,8 @@ to COMPLETE, e.g. :TEMPERATURE.")
     ;; for ~takeiteasy/meow#59.
     (:agent-done (sub-agent-done service (second message) (fourth message)))
     (:agent-down (sub-agent-down service (second message) (third message)))
+    (:snapshot (snapshot service))
+    (:restore (restore service (second message)))
     (t (bad-request "unknown message ~s" (first message)))))
 
 (defun start-run (service args)
@@ -353,3 +355,32 @@ here but not assumed of the caller's own services)."
             ((not received) (fail :timeout))
             ((eq (first message) :agent-done) (fourth message))
             (t (fail (list :error (third message))))))))))
+
+;;; --- checkpoints (~takeiteasy/nyaa#11) ----------------------------------
+
+;;; %PENDING, %PENDING-ORDER, %STEP-REF and %CANCEL-TIMER all reference
+;;; spawned processes that will not exist after a restore, so none of them
+;;; is recorded: a snapshot taken mid-run keeps the conversation and drops
+;;; the turn in flight, and RESTORE always lands a not-running agent. This
+;;; is deliberate rather than a gap -- #12 checkpoints *during* a run, so
+;;; refusing a busy agent would make the feature useless there -- and is
+;;; tracked as ~takeiteasy/nyaa#50: the dropped turn's tool calls are simply
+;;; gone, never retried or reported.
+
+(defmethod snapshot ((service agent))
+  (list :messages (%messages service) :turns (%turns service)))
+
+(defmethod restore ((service agent) state)
+  (cancel-deadline service)
+  (setf (%messages service) (getf state :messages)
+        (%turns service) (getf state :turns)
+        (%pending service) nil
+        (%pending-order service) nil
+        (%steer-queue service) nil
+        (%running-p service) nil)
+  ;; As FINISH-RUN does: a turn or tool call already in flight has this
+  ;; agent's process as its :cast target, not a call RESTORE can cancel, so
+  ;; its late reply is made unmatchable instead -- TURN-REPLY and TOOL-REPLY
+  ;; both check the ref/id they were issued against.
+  (incf (%step-ref service))
+  t)

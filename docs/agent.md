@@ -137,6 +137,13 @@ Which models and tool sets a child may be given beyond inheriting the
 parent's is [`~takeiteasy/nyaa#22`](https://todo.sr.ht/~takeiteasy/nyaa/22)'s
 policy (the orchestrator DSL), not this loop's.
 
+## Checkpoints
+
+An agent's `snapshot` keeps `:messages` and `:turns`, not the turn or tool
+calls in flight — see [checkpoints](checkpoints.md). A checkpoint taken
+mid-run keeps the conversation and drops the abandoned turn; `restore`
+always lands a not-running agent, ready for another `:run`.
+
 ## Limitations
 
 - Conversation growth is unbounded: there is no context-window accounting or

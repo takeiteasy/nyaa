@@ -20,6 +20,9 @@
    ;; agent convention
    #:agent #:agents #:describe-agent #:run-agent
    #:turn-event #:tool-call-event #:tool-result-event #:run-done-event
+   ;; checkpoints
+   #:snapshot #:restore #:checkpoint #:rollback #:generations
+   #:*generations-directory*
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
@@ -33,4 +36,4 @@
    #:provider-ollama
    ;; tools
    #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan
-   #:tool-image #:tool-services))
+   #:tool-image #:tool-services #:tool-checkpoint))
