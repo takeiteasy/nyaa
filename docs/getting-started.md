@@ -63,7 +63,7 @@ An [agent](agent.md) runs a turn cycle over a model and its tools:
                 :messages '((:role :user :content "list the files")))
 ```
 
-Runs on SBCL and ECL.
+Runs on SBCL, ECL and CCL.
 
 ## Tests
 

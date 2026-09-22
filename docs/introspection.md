@@ -46,10 +46,12 @@ cutting silently.
 
 Lambda lists and source locations are implementation-specific:
 `sb-introspect` on SBCL, `ext:compiled-function-file` and
-`si::function-lambda-list` on ECL. Absent on either — an interpreted
-definition on SBCL, anything not loaded from a compiled file on ECL — reports
+`si::function-lambda-list` on ECL, `ccl:arglist` for a lambda list on CCL.
+Absent — an interpreted definition on SBCL, anything not loaded from a
+compiled file on ECL, any source location at all on CCL — reports
 `:available nil` rather than erroring
-([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
+([#47](https://todo.sr.ht/~takeiteasy/nyaa/47),
+[#62](https://todo.sr.ht/~takeiteasy/nyaa/62)).
 
 ## `tool-services`
 
