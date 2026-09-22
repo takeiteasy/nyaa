@@ -113,7 +113,8 @@ the implementation cannot say."
 (defun function-lambda-list (symbol)
   (or #+sbcl (sb-introspect:function-lambda-list symbol)
       #+ecl (si::function-lambda-list symbol)
-      #-(or sbcl ecl) nil))
+      #+ccl (ccl:arglist symbol)
+      #-(or sbcl ecl ccl) nil))
 
 ;;; --- :apropos --------------------------------------------------------
 

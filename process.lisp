@@ -26,10 +26,6 @@
 ;;; just :TREE. That walk is not atomic -- a child forked between it and
 ;;; the kill can still escape -- so the group kill above it still matters
 ;;; where one is available; the tree walk is insurance underneath it.
-;;;
-;;; Before this ticket, no grouping mechanism at all meant a leader-only
-;;; kill, which a backgrounded grandchild could outlive. Closes
-;;; ~takeiteasy/nyaa#54.
 
 (defun unix-pgid-of (pid)
   "PID's process group id, or NIL if it cannot be read."
@@ -79,9 +75,17 @@ none (:NATIVE) or none is available to wrap with (:TREE)."
 
 (defun launch-in-process-group (argv &rest keys &key &allow-other-keys)
   "UIOP:LAUNCH-PROGRAM on ARGV, prefixed with PROCESS-GROUP-WRAPPER when
-one applies, so the child leads its own process group."
+one applies, so the child leads its own process group.
+
+#+ccl: a launched process's streams are otherwise private to whichever
+thread first reads or writes them -- any other thread's access errors out.
+:SHARING :LOCK shares them properly instead, at the cost of a lock per
+operation. Every caller here hands a stream to a thread other than the one
+that launched it (WORKER-EVAL's reader thread, tools/shell.lisp's drain
+thread), so this is not optional on CCL."
   (apply #'uiop:launch-program
          (append (process-group-wrapper) argv)
+         #+ccl :sharing #+ccl :lock
          keys))
 
 (defun descendant-pids (pid)
