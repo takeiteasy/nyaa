@@ -46,8 +46,8 @@
 ;;; --- the harness ------------------------------------------------------
 
 (defun call-with-providers (answer mounts body)
-  "Run BODY with the OpenAI protocol and MOUNTS up against a fake backend.
-Each mount is (class . initargs), with :base-url filled in."
+  "Run BODY with both protocols and MOUNTS up against a fake backend. Each
+mount is (class . initargs), with :base-url filled in."
   (let* ((registry (make-instance 'm:registry))
          (m:*registry* registry)
          (context (m:start-service (make-instance 'm:context :name :providers)
@@ -59,6 +59,7 @@ Each mount is (class . initargs), with :base-url filled in."
     (unwind-protect
          (progn
            (m:mount context 'nyaa:protocol-openai)
+           (m:mount context 'nyaa:protocol-ollama)
            (dolist (mount mounts)
              (apply #'m:mount context (first mount)
                     :base-url (fake-http-url server) (rest mount)))
@@ -264,12 +265,14 @@ is the one MAKE-INSTANCE takes."
 
 ;;; --- the ollama provider ----------------------------------------------
 
-(test ollama-declares-a-keyless-openai-backend
-  (with-providers ((json-response +hello-reply+)
+(test ollama-declares-a-keyless-native-backend
+  (with-providers ((json-response
+                     "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},
+                       \"done\":true,\"done_reason\":\"stop\"}")
                    (list 'nyaa:provider-ollama :model "llama3.2"))
     (let ((metadata (nyaa:describe-provider :provider-ollama)))
       (is (eq :provider (getf metadata :kind)))
-      (is (eq :protocol-openai (getf metadata :protocol)))
+      (is (eq :protocol-ollama (getf metadata :protocol)))
       (is (eq :none (getf (getf metadata :auth) :kind)))
       (is (eq :ready (getf metadata :status)))
       (is (member "llama3.2" (getf metadata :models) :test #'equal)))
@@ -279,8 +282,10 @@ is the one MAKE-INSTANCE takes."
 
 (test ollama-pins-the-local-endpoint-by-default
   ;; Read from the declaration rather than a mount, so the default cannot
-  ;; drift without this failing.
-  (is (equal "http://127.0.0.1:11434/v1"
+  ;; drift without this failing. The OpenAI-compatible /v1 route stays
+  ;; reachable with no provider of its own -- :protocol-openai takes
+  ;; :base-url per request.
+  (is (equal "http://127.0.0.1:11434"
              (getf (nyaa::provider-declaration
                     (make-instance 'nyaa:provider-ollama))
                    :base-url))))
@@ -288,18 +293,20 @@ is the one MAKE-INSTANCE takes."
 ;;; --- live -------------------------------------------------------------
 
 (test ollama-live-completion-through-the-provider
-  ;; Off by default: CI must not depend on a model being installed.
-  (let ((base-url (uiop:getenv "NYAA_OLLAMA_URL"))
+  ;; Off by default: CI must not depend on a model being installed. A
+  ;; separate variable from NYAA_OLLAMA_URL, which the OpenAI protocol's live
+  ;; tests point at the /v1 route.
+  (let ((base-url (uiop:getenv "NYAA_OLLAMA_NATIVE_URL"))
         (model (or (uiop:getenv "NYAA_OLLAMA_MODEL") "llama3.2")))
     (if (null base-url)
-        (skip "set NYAA_OLLAMA_URL to run live Ollama tests")
+        (skip "set NYAA_OLLAMA_NATIVE_URL to run live Ollama tests")
         (let* ((registry (make-instance 'm:registry))
                (m:*registry* registry)
                (context (m:start-service (make-instance 'm:context :name :live)
                                          :registry registry)))
           (unwind-protect
                (progn
-                 (m:mount context 'nyaa:protocol-openai)
+                 (m:mount context 'nyaa:protocol-ollama)
                  (m:mount context 'nyaa:provider-ollama
                           :base-url base-url :model model)
                  (let ((result (nyaa:complete

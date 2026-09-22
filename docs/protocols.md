@@ -172,15 +172,69 @@ repeats them, so a consumer of the sink alone needs no arrival order. The turn
 ends on `data: [DONE]` or on a `finish_reason`; a stream that stops before
 either is `(:backend-error ...)`.
 
-`:provider-ollama` binds this protocol to a local backend with no key, so it is
-testable end to end locally — see [providers](providers.md). The offline tests
-run against the fake HTTP server; set `NYAA_OLLAMA_URL` (and optionally
-`NYAA_OLLAMA_MODEL`) to run the live ones too.
+Ollama serves this API at `/v1` alongside its native one, so it is testable
+end to end against a local backend with no key — see
+[providers](providers.md). The offline tests run against the fake HTTP
+server; set `NYAA_OLLAMA_URL` (and optionally `NYAA_OLLAMA_MODEL`) to run the
+live ones too.
+
+## The Ollama protocol
+
+`:protocol-ollama` speaks Ollama's native chat endpoint: `POST
+<base-url>/api/chat`, with NDJSON streaming when the request carries a
+`:stream` sink. Distinct from `:protocol-openai` because the wire shape
+differs, not just the base URL — this is what carries the usage counters and
+generation options the OpenAI-compatible `/v1` route drops.
+
+```lisp
+(nyaa:complete :protocol-ollama
+  :base-url "http://127.0.0.1:11434"
+  :model "llama3.2"
+  :messages '((:role :user :content "hello"))
+  :num-ctx 8192
+  :temperature 0.2)
+```
+
+| Key | Meaning |
+|---|---|
+| `:num-ctx` | context window in tokens |
+| `:num-predict` | cap on generated tokens |
+| `:mirostat` | mirostat sampling mode |
+| `:format` | response format: `json`, or a JSON schema |
+| `:keep-alive` | how long to hold the model resident |
+
+`:temperature`, `:top-p`, `:top-k`, `:stop` and `:seed` are the same sampling
+knobs `:protocol-openai` advertises. On the wire, the sampling parameters nest
+under an `"options"` object; `:format` and `:keep-alive` stay top-level, as
+the native API has them.
+
+`:meta` carries `:finish-reason` (from `done_reason`) and `:usage` — but
+unlike OpenAI's single `usage` object, the native reply's counters
+(`prompt_eval_count`, `eval_count`, `total_duration`, `load_duration`,
+`prompt_eval_duration`, `eval_duration`) sit at the top level, and `:usage`
+collects them the same way.
+
+Streaming is newline-delimited JSON, not SSE: one bare object per line, no
+`data:` prefix and no `[DONE]`. The turn ends on a line carrying `"done":
+true`, which is also where the counters arrive — a stream cut before it is
+`(:backend-error ...)`. A `tool_calls` array reaches the wire whole per
+chunk rather than split into fragments, so there is no reassembly on the
+receiving end. Native tool calls carry no id; one is synthesised per reply
+(`call_0`, `call_1`, ...) so `:tool-calls` still satisfies the contract's own
+`:id` requirement.
+
+Tool schemas render into the `tools` array through the same renderer
+`:protocol-openai` uses. A tool call's `arguments` travel as a JSON object in
+both directions here, rather than the stringified form OpenAI's wire uses.
+
+`:provider-ollama` binds this protocol to a local backend with no key — see
+[providers](providers.md). Set `NYAA_OLLAMA_NATIVE_URL` (and optionally
+`NYAA_OLLAMA_MODEL`) to run its live tests.
 
 ## Discovery
 
 ```lisp
-(nyaa:protocols)                       ; => (:protocol-openai)
+(nyaa:protocols)                       ; => (:protocol-ollama :protocol-openai)
 (nyaa:describe-protocol :protocol-openai)
 ```
 
@@ -196,14 +250,12 @@ the same way, since a provider answers the same messages.
   ([#31](https://todo.sr.ht/~takeiteasy/nyaa/31)).
 - A completion in flight can only be abandoned at its deadline; there is no
   cancel message ([#32](https://todo.sr.ht/~takeiteasy/nyaa/32)).
-- Rendering `:tools` onto a wire is each protocol's own work. A shared renderer
-  waits until two protocols want the same one
-  ([#33](https://todo.sr.ht/~takeiteasy/nyaa/33)).
 - A completion abandoned at its deadline leaves its reader thread blocked until
   the backend answers or the connection drops
   ([#34](https://todo.sr.ht/~takeiteasy/nyaa/34)).
 - A protocol service handles one completion at a time: meow's service loop runs
-  one message to completion before the next, so concurrent turns queue
+  one message to completion before the next, so concurrent turns queue. This
+  now applies to both protocol services and to a provider layered on either
   ([#35](https://todo.sr.ht/~takeiteasy/nyaa/35)).
 - A tool call naming a tool absent from the request's `:tools` has no schema to
   render its arguments by, and falls back to a heuristic

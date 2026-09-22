@@ -7,18 +7,18 @@ so a new backend is a few lines rather than a new adapter.
 
 ```lisp
 (nyaa:define-provider :ollama
-  :protocol :protocol-openai
-  :base-url "http://127.0.0.1:11434/v1"
+  :protocol :protocol-ollama
+  :base-url "http://127.0.0.1:11434"
   :auth :none
   :models '("llama3.2" "qwen2.5-coder" "gemma3")
-  :summary "Local Ollama, OpenAI-compatible endpoint")
+  :summary "Local Ollama, native chat endpoint")
 ```
 
 This defines the service class `provider-ollama`, registered under
 `:provider-ollama` with `:kind :provider` metadata. Mounting binds it to a model:
 
 ```lisp
-(meow:mount *context* 'nyaa:protocol-openai)
+(meow:mount *context* 'nyaa:protocol-ollama)
 (meow:mount *context* 'nyaa:provider-ollama :model "llama3.2")
 (nyaa:complete :provider-ollama :messages '((:role :user :content "hello")))
 ```
@@ -116,19 +116,19 @@ protocol describes.
 
 ## Ollama
 
-`:provider-ollama` is `http://127.0.0.1:11434/v1` with no key. Ollama serves the
-OpenAI-compatible API alongside its native one, so it needs no adapter of its
-own — which makes it the backend a development machine can run end to end.
+`:provider-ollama` is `http://127.0.0.1:11434` with no key, speaking
+[`:protocol-ollama`](protocols.md#the-ollama-protocol) — which makes it the
+backend a development machine can run end to end, counters and options
+included. The OpenAI-compatible `/v1` route stays reachable with no provider
+of its own: `:protocol-openai` takes `:base-url` per request, so one mounted
+service already answers for it.
 
-Set `NYAA_OLLAMA_URL` to run the live tests, and `NYAA_OLLAMA_MODEL` to name the
-model.
+Set `NYAA_OLLAMA_NATIVE_URL` to run the live tests for this provider, and
+`NYAA_OLLAMA_MODEL` to name the model. (`NYAA_OLLAMA_URL` is the `/v1` URL the
+OpenAI protocol's own live tests use.)
 
 ## Limitations
 
-- The `/v1` endpoint drops the native Ollama endpoint's usage counters
-  (`eval_count`, `total_duration`) and its options (`num_ctx`, `format`,
-  `keep_alive`); whatever `/v1` returns lands in `:meta`. A native protocol is
-  [#38](https://todo.sr.ht/~takeiteasy/nyaa/38).
 - `:defaults` keys the protocol does not advertise are dropped on the wire
   rather than refused, since a protocol takes only what it knows.
 - Auth is BYOK. OAuth and other interactive flows are

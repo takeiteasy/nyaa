@@ -50,6 +50,7 @@ request:
 A [provider](providers.md) carries that backend for you:
 
 ```lisp
+(meow:mount *tools* 'nyaa:protocol-ollama)
 (meow:mount *tools* 'nyaa:provider-ollama :model "llama3.2")
 (nyaa:complete :provider-ollama :messages '((:role :user :content "hello")))
 ```
@@ -72,11 +73,13 @@ tests/test.sh ecl
 ```
 
 Tests that make real network requests are skipped unless `NYAA_LIVE_HTTP` is
-set, and the live protocol tests unless `NYAA_OLLAMA_URL` is:
+set, and the live protocol tests unless `NYAA_OLLAMA_URL` (the `/v1` route) or
+`NYAA_OLLAMA_NATIVE_URL` (native `/api/chat`) is:
 
 ```sh
 NYAA_LIVE_HTTP=1 tests/test.sh
-NYAA_OLLAMA_URL=http://127.0.0.1:11434/v1 tests/test.sh
+NYAA_OLLAMA_URL=http://127.0.0.1:11434/v1 \
+NYAA_OLLAMA_NATIVE_URL=http://127.0.0.1:11434 tests/test.sh
 ```
 
 `NYAA_OLLAMA_MODEL` names the model, and defaults to `llama3.2`. A backend that

@@ -143,3 +143,14 @@
   "An answer a fake handler returns: 200, text/event-stream, PAYLOADS."
   (list 200 '("Content-Type" "text/event-stream")
         (apply #'sse-body payloads)))
+
+;;; --- newline-delimited JSON --------------------------------------------
+
+(defun ndjson-body (&rest payloads)
+  "PAYLOADS, each a JSON chunk, as one object per line."
+  (format nil "~{~a~%~}" payloads))
+
+(defun ndjson-response (&rest payloads)
+  "An answer a fake handler returns: 200, application/x-ndjson, PAYLOADS."
+  (list 200 '("Content-Type" "application/x-ndjson")
+        (apply #'ndjson-body payloads)))

@@ -24,6 +24,7 @@
    #:*worker-command*
    ;; protocols
    #:protocol-openai
+   #:protocol-ollama
    ;; providers
    #:provider-ollama
    ;; tools

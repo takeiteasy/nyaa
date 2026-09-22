@@ -20,10 +20,14 @@
                              (:file "eval")
                              (:file "repl")))
                (:module "protocols"
-                :components ((:file "openai")))
+                :components ((:file "openai")
+                             (:file "ollama")))
                ;; After the protocols: a provider layers its data onto one,
                ;; and DEFINE-PROVIDER is a macro, so :serial order is what
-               ;; makes both available to a definition.
+               ;; makes both available to a definition. The shared helpers
+               ;; both protocols use -- name/key conversion, JSON value
+               ;; coercion, the tools array, the deadline-bounded exchange --
+               ;; live in protocol.lisp, ahead of either.
                (:file "provider")
                (:module "providers"
                 :components ((:file "ollama"))))
@@ -40,6 +44,7 @@
                (:file "protocol")
                (:file "fake-http")
                (:file "protocol-openai")
+               (:file "protocol-ollama")
                (:file "provider")
                (:file "worker")
                (:file "tools"))

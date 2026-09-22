@@ -47,6 +47,141 @@ single-text-block case."
       (when (eq (getf block :type) :text)
         (write-string (getf block :text "") out)))))
 
+;;; --- names and keys -----------------------------------------------------
+
+;;; Shared by every protocol that speaks JSON over HTTP: what OpenAI and
+;;; Ollama's native endpoint both need, so the second protocol to want it
+;;; found it already here rather than duplicated (~takeiteasy/nyaa#33).
+
+(defun named-p (value)
+  (and (stringp value) (plusp (length value))))
+
+(defun http-url-p (url)
+  ;; Checked here so that everything past it failing before a status line is
+  ;; a transport failure and nothing else.
+  (some (lambda (scheme)
+          (and (>= (length url) (length scheme))
+               (string-equal scheme url :end2 (length scheme))))
+        '("http://" "https://")))
+
+(defun wire-key (name)
+  "NAME as a JSON property name: :MAX-TOKENS is max_tokens."
+  (substitute #\_ #\- (string-downcase (symbol-name name))))
+
+(defun lisp-key (key)
+  (a:make-keyword (string-upcase (substitute #\- #\_ key))))
+
+(defun wire-tool-name (name)
+  (string-downcase (symbol-name name)))
+
+(defun lisp-tool-name (name)
+  (a:make-keyword (string-upcase name)))
+
+;;; --- values -------------------------------------------------------------
+
+;;; Tool arguments are a plist in the contract and a JSON object on the wire.
+;;; The tool's own schema names each value's type, so a map and an object stay
+;;; distinguishable where a plist alone leaves them ambiguous.
+
+(defun call-schema (name tools)
+  "The schema of the tool NAME names among TOOLS, a list of tool metadata."
+  (a:when-let ((metadata (find name tools :key (lambda (m) (getf m :name)))))
+    (tool-schema metadata)))
+
+(defun arguments->json (arguments schema)
+  (let ((json (json-object)))
+    (loop for (name value) on arguments by #'cddr
+          for param = (find name schema :key #'param-name)
+          do (setf (gethash (wire-key name) json)
+                   (value->json value (and param (param-type param)))))
+    json))
+
+(defun value->json (value spec)
+  (cond
+    ((null spec) (untyped->json value))
+    ((spec-is spec "OR") (if (null value) 'null (value->json value (third spec))))
+    ((spec-is spec "ARRAY-OF")
+     (map 'vector (lambda (element) (value->json element (second spec))) value))
+    ((spec-is spec "MAP-OF")
+     (let ((json (json-object)))
+       (loop for (key entry) on value by #'cddr
+             do (setf (gethash (as-text key) json)
+                      (value->json entry (second spec))))
+       json))
+    ((spec-is spec "OBJECT") (arguments->json value (rest spec)))
+    (t (json-value value))))
+
+;;; TODO: without a schema, a plist of keywords is an object and any other
+;;; list an array -- a map whose keys coerced to strings renders as an array.
+;;; Upgrade path: carry the schema on the call. Tracked in
+;;; ~takeiteasy/nyaa#36.
+
+(defun untyped->json (value)
+  (cond
+    ((null value) nil)
+    ((keywordp value) (json-value value))
+    ((not (consp value)) value)
+    ((and (evenp (length value))
+          (loop for (name) on value by #'cddr always (keywordp name)))
+     (let ((json (json-object)))
+       (loop for (name entry) on value by #'cddr
+             do (setf (gethash (wire-key name) json) (untyped->json entry)))
+       json))
+    (t (map 'vector #'untyped->json value))))
+
+(defun json->arguments (json schema)
+  "JSON, a parsed object, as an argument plist. Names become keywords, which
+is what COERCE-ARGS matches a schema on."
+  (let ((plist '()))
+    (maphash (lambda (key value)
+               (let* ((name (lisp-key key))
+                      (param (find name schema :key #'param-name)))
+                 (push name plist)
+                 (push (json->value value (and param (param-type param))) plist)))
+             json)
+    (nreverse plist)))
+
+(defun json->value (value spec)
+  (cond
+    ((eq value 'null) nil)
+    ((null spec) (untyped->lisp value))
+    ((spec-is spec "OR") (json->value value (third spec)))
+    ((spec-is spec "ARRAY-OF")
+     (map 'list (lambda (element) (json->value element (second spec))) value))
+    ((spec-is spec "MAP-OF")
+     (loop for key being the hash-keys of value using (hash-value entry)
+           collect key collect (json->value entry (second spec))))
+    ((spec-is spec "OBJECT") (json->arguments value (rest spec)))
+    ;; A member arrives as its name and an integer as digits; COERCE-ARGS
+    ;; takes both, so a scalar passes through untouched.
+    (t value)))
+
+(defun untyped->lisp (value)
+  (cond
+    ((eq value 'null) nil)
+    ((hash-table-p value) (json->arguments value nil))
+    ((and (vectorp value) (not (stringp value)))
+     (map 'list #'untyped->lisp value))
+    (t value)))
+
+;;; --- the tools array ------------------------------------------------------
+
+;;; Each tool's schema renders straight through SCHEMA->JSON-SCHEMA, in the
+;;; shape both OpenAI and Ollama's native endpoint use:
+;;; {"type":"function","function":{name,description,parameters}}.
+
+(defun tools->json (tools)
+  (map 'vector
+       (lambda (metadata)
+         (let ((function (json-object
+                          "name" (wire-tool-name (getf metadata :name))
+                          "parameters" (schema->json-schema
+                                        (tool-schema metadata)))))
+           (a:when-let ((summary (getf metadata :summary)))
+             (setf (gethash "description" function) summary))
+           (json-object "type" "function" "function" function)))
+       tools))
+
 ;;; --- requests ---------------------------------------------------------
 
 ;;; COERCE-ARGS is deliberately not used here: it rejects a key its schema
@@ -137,6 +272,78 @@ across deltas."
   "The backend was reached and the exchange broke down: a non-OK STATUS, a
 malformed payload, a stream cut short."
   (fail (list :backend-error status detail)))
+
+;;; --- the exchange -------------------------------------------------------
+
+;;; Shared by every protocol that talks to a backend over a socket: the
+;;; deadline-bounded worker thread, and the reply and transport shapes a
+;;; JSON-over-HTTP protocol needs regardless of wire dialect.
+;;;
+;;; TODO: a completion abandoned at its deadline leaves its reader thread
+;;; blocked on a socket that may never close, holding a stream rather than a
+;;; single response. Upgrade path: drive the socket directly so the deadline
+;;; can close it. Tracked in ~takeiteasy/nyaa#34.
+
+(defun perform-completion (request opener reader)
+  "Run the exchange on a worker thread bounded by the caller's deadline, as
+TOOL-HTTP does: a wedged backend costs a timeout, not a wedged service. OPENER
+takes REQUEST and answers (values stream status); READER takes (request
+stream status) and answers the reply."
+  (let ((result nil)
+        (done (bt:make-semaphore)))
+    (bt:make-thread
+     (lambda ()
+       (unwind-protect
+            (setf result (attempt-completion request opener reader))
+         (bt:signal-semaphore done)))
+     :name "nyaa-completion")
+    (if (bt:wait-on-semaphore
+         done :timeout (/ (getf request :timeout +default-tool-timeout+) 1000))
+        result
+        (fail :timeout))))
+
+(defun attempt-completion (request opener reader)
+  ;; The two failure regions are kept apart: nothing read yet is a transport
+  ;; failure, and everything after the status is the backend misbehaving.
+  (let (stream status)
+    (handler-case
+        (multiple-value-setq (stream status) (funcall opener request))
+      ;; Nothing was read, so there is no backend answer to report on: a
+      ;; refused connection and a peer that hangs up before the status line
+      ;; are the same failure to the caller.
+      (error () (return-from attempt-completion (fail :unavailable))))
+    (unwind-protect
+         (handler-case
+             (if (<= 200 status 299)
+                 (funcall reader request stream status)
+                 (backend-error status (read-detail stream)))
+           (error (e) (backend-error status (princ-to-string e))))
+      (ignore-errors (close stream)))))
+
+(defun character-stream (stream)
+  "STREAM as characters. Drakma decodes a content type it knows to be textual
+and leaves the rest as octets."
+  (if (subtypep (stream-element-type stream) 'character)
+      stream
+      (flexi-streams:make-flexi-stream stream :external-format :utf-8)))
+
+(defun read-detail (stream)
+  "An error response's body, for the detail of a (:backend-error ...)."
+  (or (ignore-errors (uiop:slurp-stream-string stream)) ""))
+
+(defun make-reply (text calls reason meta)
+  (list :ok (list :role :assistant
+                  :content (when (plusp (length text)) (normalize-content text))
+                  :tool-calls calls
+                  :done t
+                  :meta (list* :finish-reason reason meta))))
+
+(defun finish-reason (value)
+  "A wire finish/done reason as a keyword: tool_calls is :TOOL-CALLS."
+  (when (stringp value) (lisp-key value)))
+
+(defun text-of (value)
+  (if (stringp value) value ""))
 
 ;;; --- the handler ------------------------------------------------------
 
