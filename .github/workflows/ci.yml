@@ -12,12 +12,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lisp: [sbcl, ecl]
+        lisp: [sbcl, ecl, ccl]
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Lisp
-        run: sudo apt-get update && sudo apt-get install -y sbcl ${{ matrix.lisp }}
+        # SBCL is always installed: it bootstraps Quicklisp below regardless
+        # of which implementation the tests run under. CCL has no apt
+        # package -- it is installed from its upstream release below.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl ${{ matrix.lisp != 'ccl' && matrix.lisp || '' }}
+
+      - name: Install CCL
+        if: matrix.lisp == 'ccl'
+        run: |
+          curl -sSfL https://github.com/Clozure/ccl/releases/download/v1.13/ccl-1.13-linuxx86.tar.gz \
+              | sudo tar xz -C /opt
+          printf '#!/bin/sh\nexec /opt/ccl/lx86cl64 "$@"\n' | sudo tee /usr/local/bin/ccl >/dev/null
+          sudo chmod +x /usr/local/bin/ccl
 
       - name: Install Quicklisp
         run: |
