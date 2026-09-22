@@ -18,14 +18,18 @@
 ;;;              It refuses to fork a new session when the caller is
 ;;;              already a group leader, which is not this launch path, so
 ;;;              the wrapped pid stays the group id.
-;;;   :tree   -- no grouping mechanism at all: the whole descendant tree is
-;;;              found by walking `ps`'s ppid column and killed alongside
-;;;              the leader. Not atomic -- a child forked between the walk
-;;;              and the kill can still escape -- so it is the last resort.
+;;;   :tree   -- no grouping mechanism at all.
 ;;;
-;;; Without any of the first three, launch and kill fall back to :TREE.
-;;; Before this ticket, that fallback was a leader-only kill instead, which
-;;; a backgrounded grandchild could still outlive. Closes ~takeiteasy/nyaa#54.
+;;; TERMINATE-PROCESS-GROUP does not trust a grouping mechanism to have
+;;; reached every descendant on its own: it always ALSO walks `ps`'s ppid
+;;; column and kills the descendant tree by hand, on every strategy, not
+;;; just :TREE. That walk is not atomic -- a child forked between it and
+;;; the kill can still escape -- so the group kill above it still matters
+;;; where one is available; the tree walk is insurance underneath it.
+;;;
+;;; Before this ticket, no grouping mechanism at all meant a leader-only
+;;; kill, which a backgrounded grandchild could outlive. Closes
+;;; ~takeiteasy/nyaa#54.
 
 (defun unix-pgid-of (pid)
   "PID's process group id, or NIL if it cannot be read."
@@ -103,21 +107,26 @@ let a still-live child reparent and escape the walk entirely."
         seen))))
 
 (defun terminate-process-group (process)
-  "Signal PROCESS's whole process group (or, under :TREE, its whole
-descendant tree) ahead of the existing leader-only TERMINATE-PROCESS,
-then reap the leader. The group/tree kill is best-effort and ignored on
-failure, since the leader-only kill below always follows it."
-  (let ((pid (uiop:process-info-pid process)))
-    (case *process-group-strategy*
-      ((:native :perl :setsid)
-       (ignore-errors
-        (uiop:run-program (list "/bin/kill" "-9" (format nil "-~d" pid))
-                          :ignore-error-status t)))
-      (:tree
-       (let ((descendants (descendant-pids pid)))
-         (dolist (d descendants)
-           (ignore-errors
-            (uiop:run-program (list "/bin/kill" "-9" (princ-to-string d))
-                              :ignore-error-status t)))))))
+  "Signal PROCESS's whole process group, walk and kill its descendant tree
+by hand, and only then reap the leader with the existing leader-only
+TERMINATE-PROCESS. Both the group kill and the tree walk are best-effort
+and run unconditionally rather than picking one by *PROCESS-GROUP-
+STRATEGY*: a grouping mechanism can fail to reach every descendant in
+ways this code cannot always tell apart from the host's own quirks (a
+`setsid` that forks instead of exec'ing in place, a container's PID
+namespace, ...), so the tree walk is cheap insurance underneath it
+rather than a fallback reserved for hosts with no grouping mechanism at
+all. Descendants are collected before any kill: killing the leader first
+would let a still-live child reparent and escape the walk."
+  (let* ((pid (uiop:process-info-pid process))
+         (descendants (descendant-pids pid)))
+    (unless (eq *process-group-strategy* :tree)
+      (ignore-errors
+       (uiop:run-program (list "/bin/kill" "-9" (format nil "-~d" pid))
+                         :ignore-error-status t)))
+    (dolist (d descendants)
+      (ignore-errors
+       (uiop:run-program (list "/bin/kill" "-9" (princ-to-string d))
+                         :ignore-error-status t))))
   (ignore-errors (uiop:terminate-process process :urgent t))
   (ignore-errors (uiop:wait-process process)))
