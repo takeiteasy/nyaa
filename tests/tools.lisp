@@ -77,9 +77,10 @@ process has actually exited, so the check polls rather than assume."
                                 :output s :ignore-error-status t))))
     (parse-integer out :junk-allowed t)))
 
-(defun perl-available-p ()
-  (zerop (nth-value 2 (uiop:run-program (list "command" "-v" "perl")
-                                        :ignore-error-status t))))
+(defun process-group-containment-available-p ()
+  "True unless the host has fallen all the way back to :TREE -- the racy
+last resort with no dedicated OS mechanism behind it."
+  (not (eq nyaa::*process-group-strategy* :tree)))
 
 (defun poll-until (predicate &optional (deadline 5.0) (interval 0.1))
   "True once PREDICATE is false, polled rather than assumed instant."
@@ -229,8 +230,6 @@ process has actually exited, so the check polls rather than assume."
                                     :validate t :if-does-not-exist :ignore)))))
 
 (test fs-refuses-a-dangling-symlink
-  ;; TRUENAME* alone would admit this: it reports a dangling link unresolved,
-  ;; indistinguishable by pathname from a plain file that exists.
   (with-tools
     (let ((target (format nil "~a-created-by-attack.txt" *sandbox*)))
       (make-symlink target (concatenate 'string *sandbox* "/dangle"))
@@ -238,12 +237,25 @@ process has actually exited, so the check polls rather than assume."
                  (nyaa:tool-error (tool :tool-fs :op :write :path "dangle" :data "x"))))
       (is (not (uiop:file-exists-p target))))))
 
-(test fs-permits-a-symlink-that-stays-inside-the-root
+(test fs-refuses-any-symlink-below-the-root
+  ;; ~takeiteasy/nyaa#52: the atomic walk refuses every symlink below the
+  ;; root outright, rather than resolving an in-root one and re-checking
+  ;; it -- there is no path-based re-check left to race.
   (with-tools
     (tool :tool-fs :op :write :path "real.txt" :data "hello")
     (make-symlink (concatenate 'string *sandbox* "/real.txt")
                   (concatenate 'string *sandbox* "/alias.txt"))
-    (is (equal "hello" (result-value (tool :tool-fs :op :read :path "alias.txt") :data)))))
+    (is (equal '(:forbidden "path escapes sandbox root")
+               (nyaa:tool-error (tool :tool-fs :op :read :path "alias.txt"))))))
+
+(test fs-refuses-to-delete-a-symlink-leaf
+  (with-tools
+    (tool :tool-fs :op :write :path "real.txt" :data "hello")
+    (make-symlink (concatenate 'string *sandbox* "/real.txt")
+                  (concatenate 'string *sandbox* "/alias.txt"))
+    (is (equal '(:forbidden "path escapes sandbox root")
+               (nyaa:tool-error (tool :tool-fs :op :delete :path "alias.txt"))))
+    (is (equal "hello" (result-value (tool :tool-fs :op :read :path "real.txt") :data)))))
 
 ;;; --- shell -------------------------------------------------------------
 
@@ -283,8 +295,8 @@ err
 (test shell-kills-a-backgrounded-descendant-on-timeout
   ;; ~takeiteasy/nyaa#16: the deadline used to signal the direct `sh` child
   ;; only, so a backgrounded grandchild outlived it.
-  (if (not (perl-available-p))
-      (skip "perl not on PATH; the process-group wrapper falls back to a leader-only kill")
+  (if (not (process-group-containment-available-p))
+      (skip "no process-group containment on this host; falls back to a leader-only kill")
       (with-tools
         (let ((pidfile (format nil "~a/nyaa-shell-pgid-test.pid"
                                (uiop:native-namestring (uiop:temporary-directory)))))
@@ -298,6 +310,24 @@ err
                  (let ((grandchild (with-open-file (s pidfile) (parse-integer (read-line s)))))
                    (is (wait-for-exit grandchild))))
             (ignore-errors (delete-file pidfile)))))))
+
+(test shell-kills-a-backgrounded-descendant-under-the-tree-fallback
+  ;; ~takeiteasy/nyaa#54: with no OS grouping mechanism at all, containment
+  ;; falls back to walking and killing the descendant tree by hand.
+  (let ((nyaa::*process-group-strategy* :tree))
+    (with-tools
+      (let ((pidfile (format nil "~a/nyaa-shell-tree-test.pid"
+                             (uiop:native-namestring (uiop:temporary-directory)))))
+        (unwind-protect
+             (progn
+               (is (eq :timeout
+                      (nyaa:tool-error
+                       (tool :tool-shell
+                             :cmd (format nil "sleep 30 & echo $! > ~a; wait" pidfile)
+                             :timeout 500))))
+               (let ((grandchild (with-open-file (s pidfile) (parse-integer (read-line s)))))
+                 (is (wait-for-exit grandchild))))
+          (ignore-errors (delete-file pidfile)))))))
 
 ;;; --- http ---------------------------------------------------------------
 
@@ -541,8 +571,8 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   ;; ~takeiteasy/nyaa#16 also covers workers: a form that backgrounds a
   ;; process must be signalled along with the worker at kill time, which
   ;; needs the worker itself to lead its own group.
-  (if (not (perl-available-p))
-      (skip "perl not on PATH; workers fall back to a leader-only kill")
+  (if (not (process-group-containment-available-p))
+      (skip "no process-group containment on this host; workers fall back to a leader-only kill")
       (with-tools
         (let ((pid (parse-integer
                     (result-value (tool :tool-repl :id "g" :form +getpid-form+) :value))))
