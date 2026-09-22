@@ -416,26 +416,29 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
               (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url))))))))
 
 (test http-timeout-does-not-leak-its-worker-thread
-  ;; ~takeiteasy/nyaa#17: an abandoned request used to keep its worker
-  ;; thread alive until the server answered. *STALL* holds the fake
-  ;; server's response so the test controls exactly when that happens --
-  ;; SETF rather than LET, since the handler runs on the fake server's own
-  ;; thread, which does not see a dynamic binding made on this one.
+  ;; An abandoned request used to keep its worker thread -- and, on
+  ;; non-ECL, the separate thread that closes its socket -- alive until
+  ;; the server answered. *STALL* holds the fake server's response so the
+  ;; test controls exactly when that happens -- SETF rather than LET,
+  ;; since the handler runs on the fake server's own thread, which does
+  ;; not see a dynamic binding made on this one.
   (with-tools
     (with-fake-http (url)
       (setf *stall* t)
       (unwind-protect
-           (is (eq :timeout
-                  (nyaa:tool-error (tool :tool-http :url (format nil "~a/stall" url)
-                                                    :timeout 300))))
-        ;; Releasing the handler lets the server close its side too, which
-        ;; is what actually frees a worker still blocked reading on ECL:
-        ;; closing our own socket from another thread does not interrupt
-        ;; that read there the way it does on SBCL (tools/http.lisp).
-        (setf *stall* nil))
-      (is (poll-until (lambda ()
-                        (find "nyaa-http-request" (bt:all-threads)
-                              :key #'bt:thread-name :test #'equal)))))))
+           (progn
+             (is (eq :timeout
+                    (nyaa:tool-error (tool :tool-http :url (format nil "~a/stall" url)
+                                                      :timeout 300))))
+             ;; *STALL* is still held here, so the fake server has not
+             ;; answered -- the worker and any close thread can only be
+             ;; gone because the deadline reclaimed them.
+             (is (poll-until (lambda ()
+                              (or (find "nyaa-http-request" (bt:all-threads)
+                                        :key #'bt:thread-name :test #'equal)
+                                  (find "nyaa-http-close" (bt:all-threads)
+                                        :key #'bt:thread-name :test #'equal))))))
+        (setf *stall* nil)))))
 
 (test http-https-round-trip
   ;; Off by default: CI must not depend on the network. Exercises the
