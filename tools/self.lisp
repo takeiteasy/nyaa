@@ -166,7 +166,11 @@ exist is a problem, never created on the operator's behalf."
                    (previous (self-write-previous-source op parsed)))
               (setf *self-dirty* t)
               (log-self-entry service :intent op parsed label checkpoint-path previous)
-              (let ((result (perform-self-write service op parsed timeout)))
+              (let ((result (perform-self-write
+                             service op parsed timeout
+                             (lambda (late-result)
+                               (log-self-outcome service op parsed late-result
+                                                 :kind :late-outcome :checkpoint checkpoint-path)))))
                 (log-self-outcome service op parsed result)
                 result))
           (file-error (e) (fail (list :error (princ-to-string e))))))))
@@ -182,9 +186,9 @@ immediately before the write."
   (when (and (eq op :define) (second parsed) (symbolp (second parsed)))
     (symbol-source (second parsed))))
 
-(defun perform-self-write (service op parsed timeout)
+(defun perform-self-write (service op parsed timeout on-late)
   (ecase op
-    ((:eval :define) (run-in-host parsed timeout))
+    ((:eval :define) (run-in-host parsed timeout :on-late on-late))
     (:reload (op-self-reload service parsed timeout))))
 
 (defun op-self-reload (service name timeout)
@@ -200,8 +204,8 @@ immediately before the write."
 ;;;
 ;;; SBCL's own PCL/DEFSTRUCT loaders are hooked to say exactly when a
 ;;; form's evaluation reaches its actual CLOS mutation, so :DEFINE only
-;;; abandons cooperatively past that point instead of across the whole
-;;; form (#64, #68).
+;;; lets a lapsed deadline wait for the form past that point instead of
+;;; across the whole of it (#64, #68).
 ;;;
 ;;; *CLOS-MUTATION-LATCH*, bound fresh by RUN-IN-HOST for each evaluation,
 ;;; starts nil: an interrupt still lands pre-emptively, so a wedged form
@@ -278,20 +282,25 @@ pre-emptive-only."
 ;;; interrupt so it only ever throws to a catch tag that is actually there.
 ;;;
 ;;; A deadline's interrupt lands pre-emptively (THROW straight to
-;;; SELF-ABANDONED) until *CLOS-MUTATION-LATCH* is set, then abandons
-;;; cooperatively instead -- the worker checks the ABANDON flag itself,
-;;; from its own thread, right after EVAL-IN-HOST returns, and throws only
-;;; then, so a deadline landing inside SBCL's own CLOS mutation always
-;;; waits for it to finish rather than risking a torn redefinition.
+;;; SELF-ABANDONED) until *CLOS-MUTATION-LATCH* is set. Once it is, the
+;;; interrupt does nothing: the form is left to finish, so a deadline
+;;; landing inside SBCL's own CLOS mutation never tears it. The caller has
+;;; already been told :TIMEOUT by then, so the worker reports the form's
+;;; real result through ON-LATE when it completes.
+;;;
+;;; STATE is the hand-off between the two threads: whichever of the worker
+;;; (:DONE) and the caller (:TIMED-OUT) claims it first by
+;;; COMPARE-AND-SWAP decides who reports the result.
 
-(defun run-in-host (form timeout-ms)
-  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS -- or,
-once evaluation reaches SBCL's own CLOS/DEFSTRUCT machinery (see above),
-abandoned cooperatively so a lapsed deadline waits for the mutation to
-finish instead of tearing it."
+(defun run-in-host (form timeout-ms &key on-late)
+  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS. Once
+evaluation reaches SBCL's own CLOS/DEFSTRUCT machinery (see above) the
+interrupt no longer kills it: the form finishes, and ON-LATE, if given, is
+called with its result on that thread after the caller has already
+received :TIMEOUT."
   (let* ((result nil)
          (in-region (list nil))
-         (abandon (list nil))
+         (state (list :running))
          (latch (list nil))
          (done (bt:make-semaphore))
          (registry m:*registry*)
@@ -300,29 +309,29 @@ finish instead of tearing it."
                     (let ((m:*registry* registry)
                           (*clos-mutation-latch* latch))
                       (unwind-protect
-                           (setf result
-                                 (catch 'self-abandoned
-                                   (setf (car in-region) t)
-                                   (unwind-protect
-                                        (prog1 (eval-in-host form)
-                                          (when (car abandon)
-                                            (throw 'self-abandoned nil)))
-                                     (setf (car in-region) nil))))
+                           (progn
+                             (setf result
+                                   (catch 'self-abandoned
+                                     (setf (car in-region) t)
+                                     (unwind-protect (eval-in-host form)
+                                       (setf (car in-region) nil))))
+                             (when (and (not (eq :running (sb-ext:compare-and-swap (car state) :running :done)))
+                                        result on-late)
+                               (ignore-errors (funcall on-late result))))
                         (bt:signal-semaphore done))))
                   :name "nyaa-self-eval")))
-    (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
+    (if (or (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
+            (not (eq :running (sb-ext:compare-and-swap (car state) :running :timed-out))))
         result
-        (progn (abandon-self-eval worker in-region abandon latch) (fail :timeout)))))
+        (progn (abandon-self-eval worker in-region latch) (fail :timeout)))))
 
-(defun abandon-self-eval (worker in-region abandon latch)
+(defun abandon-self-eval (worker in-region latch)
   (ignore-errors
    (when (bt:thread-alive-p worker)
      (bt:interrupt-thread
       worker (lambda ()
-               (when (car in-region)
-                 (if (car latch)
-                     (setf (car abandon) t)
-                     (throw 'self-abandoned nil))))))))
+               (when (and (car in-region) (not (car latch)))
+                 (throw 'self-abandoned nil)))))))
 
 (defun eval-in-host (form)
   (let ((out (make-string-output-stream)))
@@ -351,14 +360,19 @@ could ~takeiteasy/nyaa#26 already tracks for the worker side."
     (%append-log (self-log-file service) entry)
     (m:log-info service "tool-self ~(~a~) ~(~a~), checkpoint ~a" kind op checkpoint-path)))
 
-(defun log-self-outcome (service op parsed result)
-  (let ((entry (list :at (%now-iso8601) :kind :outcome :op op
+(defun log-self-outcome (service op parsed result &key (kind :outcome) checkpoint)
+  "KIND :LATE-OUTCOME, with the write's CHECKPOINT to tie it to its intent
+entry, records a write that finished after its caller was told :TIMEOUT."
+  (let ((entry (list :at (%now-iso8601) :kind kind :op op
                      :name (and (eq op :reload) parsed)
+                     :checkpoint checkpoint
                      :outcome (if (tool-error-p result) (list :error (tool-error result)) :ok))))
     (%append-log (self-log-file service) entry)
-    (if (tool-error-p result)
-        (m:log-warn service "tool-self ~(~a~) failed: ~s" op (tool-error result))
-        (m:log-info service "tool-self ~(~a~) ok" op))))
+    (cond ((eq kind :late-outcome)
+           (m:log-warn service "tool-self ~(~a~) finished after its timeout: ~s" op (getf entry :outcome)))
+          ((tool-error-p result)
+           (m:log-warn service "tool-self ~(~a~) failed: ~s" op (tool-error result)))
+          (t (m:log-info service "tool-self ~(~a~) ok" op)))))
 
 (defun op-self-log (path limit)
   (let ((entries (%read-log path)))

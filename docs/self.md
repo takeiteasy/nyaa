@@ -66,13 +66,11 @@ under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 A lapsed `:timeout` interrupts pre-emptively until evaluation reaches
 SBCL's own class, method, generic-function or struct loader -- past an
 `:eql` specializer's own form and a method's compile, the parts a wedged
-or slow form could still be caught in -- then abandons cooperatively
-instead: the worker checks an abandon flag itself, from its own thread,
-right after `eval` returns, so the interrupt waits for that mutation to
-finish rather than tearing it. The caller still gets `:timeout`; a
-`:define` that reached its mutation can still have landed. A form that
-wedges before that point -- a wedged `:eql` specializer, a slow compile --
-is still killed, not leaked
+or slow form could still be caught in. From there the interrupt does
+nothing: the form finishes, so the deadline never tears a mutation. The
+caller still gets `:timeout`; a write that lands afterwards is logged as a
+`:late-outcome` entry. A form that wedges before that point -- a wedged
+`:eql` specializer, a slow compile -- is killed, not leaked
 ([#79](https://todo.sr.ht/~takeiteasy/nyaa/79)).
 
 ## Checkpoint and log
@@ -87,6 +85,10 @@ points at what to roll back to -- and an outcome entry after:
  :previous-source nil)
 (:at "2026-09-23T10:00:00Z" :kind :outcome :op :eval :outcome :ok)
 ```
+
+A write that finishes after its caller received `:timeout` adds a third
+entry, `(:kind :late-outcome ... :checkpoint "..." :outcome :ok)`, whose
+`:checkpoint` matches its intent entry's.
 
 `:previous-source` is `:define`'s defined name's `symbol-source`
 ([introspection](introspection.md)) as it stood before the write --
@@ -151,10 +153,7 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
 - A form that wedges *after* reaching its own CLOS mutation -- a second,
   later `defmethod` in the same `:eval` whose `:eql` specializer hangs --
   still leaks its thread, the same way the whole-form deferral did before
-  it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)). The outcome log also
-  still records `(:error :timeout)` even when a cooperatively-abandoned
-  write went on to complete
-  ([#69](https://todo.sr.ht/~takeiteasy/nyaa/69)).
+  it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)).
 - The checkpoint taken before a write shares checkpoint.lisp's own
   ceilings: it is not bounded by `:timeout`
   ([#51](https://todo.sr.ht/~takeiteasy/nyaa/51)), and issued mid-run, the

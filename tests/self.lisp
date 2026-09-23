@@ -179,6 +179,26 @@ interrupt still has to land and unwind."
     (is-true (find-class (find-symbol "SELF-TEST-LATCHED-A" "NYAA-SELF-TEST") nil))
     (is-true (find-class (find-symbol "SELF-TEST-LATCHED-B" "NYAA-SELF-TEST") nil))))
 
+(defun late-outcome-entry ()
+  (find :late-outcome (getf (second (self :log)) :entries) :key (lambda (e) (getf e :kind))))
+
+(test self-write-landing-after-its-timeout-logs-a-late-outcome
+  (with-self ()
+    (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                :form "(progn (defclass self-test-late-a () ()) (sleep 0.3))")
+    (is-true (eventually #'late-outcome-entry))
+    (let* ((entries (getf (second (self :log)) :entries))
+           (late (late-outcome-entry))
+           (intent (find :intent entries :key (lambda (e) (getf e :kind)) :from-end t)))
+      (is (eq :ok (getf late :outcome)))
+      (is (equal (getf intent :checkpoint) (getf late :checkpoint))))))
+
+(test self-write-killed-at-its-timeout-logs-no-late-outcome
+  (with-self ()
+    (self :eval :timeout 50 :form "(sleep 1)")
+    (sleep 0.3)
+    (is (null (late-outcome-entry)))))
+
 ;;; --- :reload ---------------------------------------------------------
 
 (test self-reload-restarts-a-named-child
