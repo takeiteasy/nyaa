@@ -189,9 +189,11 @@
             (nyaa:self-define ctx "(defun greet () :hi)" :package "NYAA-SELF-DEFINE-TEST")
           (declare (ignore result))
           (is (eq :hi (funcall (find-symbol "GREET" "NYAA-SELF-DEFINE-TEST"))))
-          ;; SELF-DEFINE leaves the image clean for :REQUIRE-IMAGE afterwards
           (is (equal image-path nyaa::*last-image*))
-          (is-false nyaa::*self-dirty*)
+          ;; the eval SELF-DEFINE just did is itself a write the image it
+          ;; took doesn't cover -- :REQUIRE-IMAGE must see the image as
+          ;; stale again, not as still covering this redefinition
+          (is-true nyaa::*self-dirty*)
           (is-true (probe-file image-path))
           (is (search "self-define"
                       (getf (first (nyaa:generations :dir dir)) :label))))))))

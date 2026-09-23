@@ -65,11 +65,13 @@ under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 
 A `:define` whose head mutates CLOS across several sub-forms -- `defclass`,
 `defmethod`, `defgeneric`, `defstruct`, `m:defservice` or
-`nyaa:define-tool` -- runs with interrupts deferred across the whole form,
-so a lapsed `:timeout` there waits for the definition to finish rather than
-tearing it. The caller still gets `:timeout`; the definition can still have
-landed. `defun`, `defmacro`, `defparameter` and `defvar` each end in one
-store, so they stay interruptible as before.
+`nyaa:define-tool` -- abandons cooperatively rather than pre-emptively: the
+worker checks an abandon flag itself, from its own thread, right after
+`eval` returns, so a lapsed `:timeout` there waits for the definition to
+finish rather than tearing it. The caller still gets `:timeout`; the
+definition can still have landed. `defun`, `defmacro`, `defparameter` and
+`defvar` each end in one store, so they stay pre-emptively interruptible as
+before.
 
 ## Checkpoint and log
 
@@ -144,10 +146,11 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   way back; `self-define`'s image generation is the code-exact one, but
   only tracks tool-self's own writes -- code loaded any other way is not
   reflected in `:require-image`'s staleness check.
-- A deferred CLOS `:define` ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64))
-  closes the tearing window by deferring interrupts across the whole form,
-  not just its CLOS mutation: a wedged `:eql` specializer form or a slow
-  compile inside one now leaks its thread instead of being killed
+- A cooperatively-abandoned CLOS `:define`
+  ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64)) closes the tearing window
+  over the whole form, not just its CLOS mutation: a wedged `:eql`
+  specializer form or a slow compile inside one now leaks its thread
+  instead of being killed
   ([#68](https://todo.sr.ht/~takeiteasy/nyaa/68)). The outcome log also
   still records `(:error :timeout)` even when the deferred form went on to
   complete ([#69](https://todo.sr.ht/~takeiteasy/nyaa/69)).

@@ -26,20 +26,23 @@
     (error "SAVE-IMAGE must run on the main thread, not ~a." (sb-thread:thread-name sb-thread:*current-thread*)))
   #-sbcl (image-generations-unsupported))
 
-(defun %credentialed-provider (context)
-  "The first entry under CONTEXT whose service is a PROVIDER holding an
-:API-KEY, or nil. A core file is a copy of the whole heap -- keeping a
-credential out of it is the same line providers.md and tool-image both
-hold for published state and metadata, extended here to what SAVE-IMAGE
-would otherwise write to disk."
-  (find-if (lambda (entry)
-             (let ((service (ignore-errors (m:service-of (getf entry :process)))))
-               (and (typep service 'provider) (provider-api-key service))))
-           (%context-entries context)))
-
 (defun %require-no-credentials (context)
-  (a:when-let ((entry (%credentialed-provider context)))
-    (error "~(~a~) is mounted with :api-key; SAVE-IMAGE refuses to write a credential to disk. Unmount it, or mount from the environment variable instead." (getf entry :name))))
+  "Refuses if any entry under CONTEXT is a PROVIDER holding an :API-KEY --
+a core file is a copy of the whole heap, the same line providers.md and
+tool-image already hold for published state and metadata -- or if an
+entry can't be inspected at all. A provider M:SERVICE-OF can't reach
+before its call times out is exactly the case that must not be assumed
+credential-free: failing open here would be the one place this refusal
+doesn't actually hold."
+  (dolist (entry (%context-entries context))
+    (multiple-value-bind (service problem) (ignore-errors (m:service-of (getf entry :process)))
+      (cond
+        (problem
+         (error "could not check ~(~a~) for an :api-key before taking an image (~a); refusing rather than risk writing one to disk"
+                (getf entry :name) problem))
+        ((and (typep service 'provider) (provider-api-key service))
+         (error "~(~a~) is mounted with :api-key; SAVE-IMAGE refuses to write a credential to disk. Unmount it, or mount from the environment variable instead."
+                (getf entry :name)))))))
 
 ;;; --- saving ---------------------------------------------------------------
 
@@ -155,6 +158,12 @@ reports through tool-self."
               (save-image context :label (or label (format nil "self-define ~(~a~)" (first parsed))))
             (%log-self-define-entry log :intent parsed label checkpoint-path previous image-path)
             (let ((result (eval-in-host parsed)))
+              ;; SAVE-IMAGE cleared *SELF-DIRTY* for the image it just
+              ;; took, before this write -- the write itself still counts,
+              ;; the same as any other tool-self write, so :REQUIRE-IMAGE
+              ;; never treats an image as covering a redefinition that
+              ;; happened after it.
+              (setf *self-dirty* t)
               (%log-self-define-entry log :outcome parsed label checkpoint-path previous image-path result)
               (values result image-path)))))))
 
