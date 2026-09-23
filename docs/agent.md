@@ -56,6 +56,7 @@ the previous result's `:messages` back in as the next `:run`'s. Mount with
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:sink` | nil | a stream sink, as `complete` takes |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
+| `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
 
 ## The allow-list and trust
 
@@ -80,8 +81,14 @@ end a plain `complete` turn early inside a working conversation.
 |---|---|
 | `(:describe)` | the metadata plist |
 | `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys |
-| `(:steer :content text)` | queue a `:user` message, folded in before the next turn |
+| `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
+
+`:steer` takes an optional `:vault-id`, naming an entry already in the
+[vault](vault.md) -- `tool-vault`'s `:restore` redelivers a steer this way
+rather than recording a second entry for the same one. A caller queueing a
+fresh steer never needs to pass it; when `:vault` is on, it is recorded and
+consumed automatically.
 
 The rest — `:step`, `:turn-reply`, `:tool-reply`, `:deadline` — are internal,
 driving the machine between spawned work and the agent's own mailbox.
@@ -124,9 +131,11 @@ handed down in the request unchanged; the loop adds:
 
 With `:sub-agents t`, the model gets a reserved tool, `agent-task`, taking one
 `:task` string. Calling it delegates a child agent — under meow's own agent
-supervisor, via `m:delegate` — with this agent's model and allow-list, runs
-it to completion, and returns its final answer as the tool result. A child
-does not itself get `:sub-agents`, so delegation does not nest by default.
+supervisor, via `m:delegate` — with this agent's model, allow-list and
+`:vault`, runs it to completion, and returns its final answer as the tool
+result. A child does not itself get `:sub-agents`, so delegation does not
+nest by default, and it is never registered under a name, so a steer
+recorded against it carries no `:agent` (see [the vault](vault.md)).
 
 Reaching the parent's `handle` from a delegated child needs
 [`~takeiteasy/meow#59`](https://todo.sr.ht/~takeiteasy/meow/59): meow's

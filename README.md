@@ -21,6 +21,7 @@ Runs on SBCL, ECL and CCL.
 - [Parameter schemas](docs/schema.md)
 - [Checkpoints and rollback](docs/checkpoints.md)
 - [Self-modification](docs/self.md)
+- [The vault](docs/vault.md)
 
 ## License
 

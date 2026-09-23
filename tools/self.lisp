@@ -226,37 +226,18 @@ could ~takeiteasy/nyaa#26 already tracks for the worker side."
                      :form (and (member op '(:eval :define)) (prin1-to-string parsed))
                      :name (and (eq op :reload) parsed)
                      :label label :checkpoint checkpoint-path :previous-source previous)))
-    (%append-self-log (self-log-file service) entry)
+    (%append-log (self-log-file service) entry)
     (m:log-info service "tool-self ~(~a~) ~(~a~), checkpoint ~a" kind op checkpoint-path)))
 
 (defun log-self-outcome (service op parsed result)
   (let ((entry (list :at (%now-iso8601) :kind :outcome :op op
                      :name (and (eq op :reload) parsed)
                      :outcome (if (tool-error-p result) (list :error (tool-error result)) :ok))))
-    (%append-self-log (self-log-file service) entry)
+    (%append-log (self-log-file service) entry)
     (if (tool-error-p result)
         (m:log-warn service "tool-self ~(~a~) failed: ~s" op (tool-error result))
         (m:log-info service "tool-self ~(~a~) ok" op))))
 
-(defun %append-self-log (path entry)
-  (ensure-directories-exist path)
-  (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
-    (with-open-file (stream path :direction :output :if-exists :append :if-does-not-exist :create)
-      (prin1 entry stream)
-      (terpri stream))))
-
-(defun %read-self-log (path)
-  "Every entry in PATH, oldest first, read with *READ-EVAL* nil -- the same
-guard %READ-GENERATION applies -- so a log can never run code merely by
-being read back. A malformed line is skipped rather than failing the read."
-  (if (not (probe-file path))
-      nil
-      (let ((*read-eval* nil) (*package* (find-package "KEYWORD")))
-        (with-open-file (stream path)
-          (loop for form = (handler-case (read stream nil :eof) (error () :eof))
-                until (eq form :eof)
-                collect form)))))
-
 (defun op-self-log (path limit)
-  (let ((entries (%read-self-log path)))
+  (let ((entries (%read-log path)))
     (ok :entries (last entries limit) :total (length entries))))

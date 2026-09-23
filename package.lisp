@@ -23,6 +23,8 @@
    ;; checkpoints
    #:snapshot #:restore #:checkpoint #:rollback #:generations
    #:*generations-directory*
+   ;; vault
+   #:vault-record #:vault-consume #:vault-entries #:*vault-log*
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
@@ -36,4 +38,4 @@
    #:provider-ollama
    ;; tools
    #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan
-   #:tool-image #:tool-services #:tool-checkpoint #:tool-self))
+   #:tool-image #:tool-services #:tool-checkpoint #:tool-self #:tool-vault))

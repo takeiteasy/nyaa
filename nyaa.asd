@@ -19,6 +19,10 @@
                ;; without a forward reference. The agent's own SNAPSHOT
                ;; method lives in agent.lisp instead, where its slots are.
                (:file "checkpoint")
+               ;; After checkpoint.lisp: the vault's log uses its shared
+               ;; %APPEND-LOG/%READ-LOG. Ahead of agent.lisp, which records
+               ;; and folds a steer through it.
+               (:file "vault")
                (:file "protocol")
                (:file "worker")
                (:static-file "worker-program.lisp")
@@ -35,7 +39,8 @@
                              (:file "image")
                              (:file "services")
                              (:file "checkpoint")
-                             (:file "self")))
+                             (:file "self")
+                             (:file "vault")))
                (:module "protocols"
                 :components ((:file "openai")
                              (:file "ollama")))
@@ -73,7 +78,8 @@
                (:file "plan")
                (:file "introspect")
                (:file "checkpoint")
-               (:file "self"))
+               (:file "self")
+               (:file "vault"))
   :perform (test-op (o c)
              (unless (symbol-call :fiveam :run! :nyaa)
                (error "nyaa tests failed"))))

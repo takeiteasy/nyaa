@@ -83,6 +83,46 @@ worker applies to a submitted form."
     (with-input-from-string (stream (a:read-file-into-string path))
       (read stream))))
 
+;;; --- shared append-only logs --------------------------------------------
+
+;;; TOOL-SELF's log (tools/self.lisp) and the vault (vault.lisp,
+;;; ~takeiteasy/nyaa#14) are both one append-only s-expression file, read
+;;; back the same guarded way a generation is. Shared here rather than
+;;; duplicated.
+;;;
+;;; TODO: one lock across every log path, so an append to the self log
+;;; blocks behind an append to the vault and vice versa -- a corner cut on
+;;; purpose. Upgrade path: a lock per path, keyed by its truename, if
+;;; concurrent logs ever make that queue matter. Tracked in
+;;; ~takeiteasy/nyaa#65.
+
+(defvar *log-lock* (bt:make-lock :name "nyaa-log")
+  "Serialises every %APPEND-LOG across every log path (~takeiteasy/nyaa#65).")
+
+(defun %append-log (path entry)
+  "Append ENTRY, a plist, to PATH as one printed form per line. *PRINT-CASE*
+downcase and the keyword package, so the file reads back the same way
+regardless of the caller's own *PACKAGE*."
+  (ensure-directories-exist path)
+  (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+    (bt:with-lock-held (*log-lock*)
+      (with-open-file (stream path :direction :output :if-exists :append
+                                    :if-does-not-exist :create)
+        (prin1 entry stream)
+        (terpri stream)))))
+
+(defun %read-log (path)
+  "Every entry in PATH, oldest first, read with *READ-EVAL* nil -- the same
+guard %READ-GENERATION applies -- so a log can never run code merely by
+being read back. A malformed line is skipped rather than failing the read."
+  (if (not (probe-file path))
+      nil
+      (let ((*read-eval* nil) (*package* (find-package "KEYWORD")))
+        (with-open-file (stream path)
+          (loop for form = (handler-case (read stream nil :eof) (error () :eof))
+                until (eq form :eof)
+                collect form)))))
+
 ;;; --- the API -------------------------------------------------------------
 
 ;; TODO: entries are snapshotted one M:CALL at a time, in mount order, so a

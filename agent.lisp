@@ -41,6 +41,10 @@ Otherwise a list of tool names.")
    (sampling :initarg :sampling :initform nil :reader agent-sampling
              :documentation "A plist of sampling parameters passed through
 to COMPLETE, e.g. :TEMPERATURE.")
+   (vault :initarg :vault :initform nil :reader agent-vault
+          :documentation "NIL (the default): steering is in-memory only. T:
+record to the default vault log (~takeiteasy/nyaa#14). A string or
+pathname: record there instead.")
    ;; Run state, reset by START-RUN.
    (messages :initform nil :accessor %messages)
    (turns :initform 0 :accessor %turns)
@@ -60,7 +64,8 @@ to COMPLETE, e.g. :TEMPERATURE.")
         :model (agent-model service)
         :tools (agent-tools-spec service)
         :sub-agents (agent-sub-agents service)
-        :max-turns (agent-max-turns service)))
+        :max-turns (agent-max-turns service)
+        :vault (agent-vault service)))
 
 (defun agents (&key (registry m:*registry*))
   "Every registered agent name, sorted."
@@ -106,7 +111,10 @@ to COMPLETE, e.g. :TEMPERATURE.")
               (%turns service) 0
               (%pending service) nil
               (%pending-order service) nil
-              (%steer-queue service) nil
+              ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
+              ;; a vault :restore) sent while the agent was idle waits in
+              ;; the queue rather than being dropped, and folds in on the
+              ;; first turn below, after the seed messages.
               (%allow-list service) (resolve-tools service)
               (%running-p service) t)
         (arm-deadline service)
@@ -126,7 +134,17 @@ whose :TRUST is :AGENT."
         spec)))
 
 (defun queue-steer (service args)
-  (push (list :role :user :content (getf args :content)) (%steer-queue service))
+  "Queue a :USER message from ARGS' :CONTENT. When the vault is on
+(AGENT-VAULT) and ARGS names no :VAULT-ID, this is a fresh steer and gets
+recorded there first; a :VAULT-ID names an entry already in the vault --
+TOOL-VAULT's :RESTORE redelivers one this way rather than double-recording
+it. The id travels in the queue cell, never in the message plist pushed
+onto %MESSAGES, so it can never reach a provider's request."
+  (let* ((content (getf args :content))
+         (id (or (getf args :vault-id)
+                 (a:when-let ((path (%vault-path (agent-vault service))))
+                   (vault-record path (m:service-name service) content)))))
+    (push (cons id (list :role :user :content content)) (%steer-queue service)))
   :ok)
 
 (defun cancel-run (service)
@@ -149,8 +167,10 @@ whose :TRUST is :AGENT."
 (defun issue-turn (service)
   ;; Steering only folds in here, between turns, so a message queued mid-turn
   ;; never lands ahead of the assistant reply or tool results already owed.
-  (dolist (steered (nreverse (shiftf (%steer-queue service) nil)))
-    (push-message service steered))
+  (dolist (cell (nreverse (shiftf (%steer-queue service) nil)))
+    (push-message service (cdr cell))
+    (a:when-let ((id (car cell)))
+      (vault-consume (%vault-path (agent-vault service)) id :folded)))
   (incf (%turns service))
   (emit-event (agent-sink service) (turn-event (m:agent-ref service) (%turns service)))
   (let ((ref (incf (%step-ref service)))
@@ -253,7 +273,8 @@ ticket's."
                             :max-turns (agent-max-turns service)
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
-                            :sink (agent-sink service))))
+                            :sink (agent-sink service)
+                            :vault (agent-vault service))))
     (m:cast child (list :run :messages (list (list :role :user :content task))))
     nil))
 
