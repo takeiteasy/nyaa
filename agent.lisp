@@ -145,9 +145,7 @@ id and path travel in the queue cell, never in the message plist pushed onto
          (path (or (getf args :vault-path) (%vault-path (agent-vault service))))
          (id (or (getf args :vault-id)
                  (and path
-                      (let ((id (vault-record path (m:service-name service) content)))
-                        (vault-claim path id)
-                        id)))))
+                      (vault-record path (m:service-name service) content :claim t)))))
     (push (list* id path (list :role :user :content content)) (%steer-queue service)))
   :ok)
 

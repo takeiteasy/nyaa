@@ -66,18 +66,33 @@ or compacting the same log serialise too.
 
 A steer waiting in an agent's queue, or one `:restore` has cast at an agent,
 is claimed: still `:pending` in the log, with `:claimed t` in
-`vault-entries`, but it cannot be restored or discarded. The claim is taken
-under the log's lock and ends when the entry is consumed, or when the agent
-is rolled back or stopped and its queue is dropped. A claimed steer that
-is dropped that way can be restored again. Claims are held in memory, per
-process.
+`vault-entries`, but it cannot be restored or discarded. Claims are
+persisted in the log, so other nyaa processes see them, and are taken under
+the log's lock:
+
+```lisp
+(:kind :claimed  :id "..." :at "..." :by (:pid 4242 :host "box" :token "..."))
+(:kind :released :id "..." :at "...")
+```
+
+A steer an agent records for itself carries the same owner as `:claimed-by`
+on its `:steer` line, so recording and claiming are one append. The latest
+claim or release wins, and `:consumed` ends it. A claim is released when the
+agent is rolled back or stopped and its queue is dropped; that steer can be
+restored again.
+
+The owner is a pid, a host and a random per-image token. A claim is live
+when its token is this image's, its host is another machine, or its pid is
+still running on this one. A claim whose owner has exited is ignored, so a
+crashed process never strands an entry.
 
 ## Compaction
 
 `(nyaa:vault-compact path :max-age seconds)` rewrites the log without the
 steers consumed more than `max-age` seconds ago (default `*vault-max-age*`,
 7 days; `0` drops every consumed steer) and their `:consumed` lines.
-Pending steers are always kept. It answers the steers dropped and kept.
+Pending steers are always kept, with their live claim folded onto the
+`:steer` line and their `:claimed`/`:released` lines dropped. It answers the steers dropped and kept.
 
 An append also compacts once the file passes `*vault-compact-size*` (1 MiB)
 and has doubled since the last attempt. A log with a malformed entry is
@@ -109,7 +124,7 @@ the id and log path travel with it, so the agent's own fold marks the
 *original* entry consumed, in the log it came from, rather than this tool
 recording a second one for the same steer. It is not consumed at the point
 of the call; only once the target agent actually folds it in. Concurrent
-restores of one id deliver it once. `:agent`, a string, picks the target: the entry's own
+restores of one id deliver it once, across processes too. `:agent`, a string, picks the target: the entry's own
 recorded agent by default, or an override -- required when the entry was
 recorded with no agent, as a delegated sub-agent's always is. Restoring or
 discarding an id that is unknown, already consumed or claimed is a
@@ -121,5 +136,6 @@ agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
 
-- Claims are per process; two processes restoring one entry can both
-  deliver it ([#88](https://todo.sr.ht/~takeiteasy/nyaa/88)).
+- A claim whose owner's pid has been reused by another process on the same
+  host stays live until that process exits
+  ([#89](https://todo.sr.ht/~takeiteasy/nyaa/89)).

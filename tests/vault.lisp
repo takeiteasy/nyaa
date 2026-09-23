@@ -419,3 +419,74 @@ after the message that triggered it has already returned."
         (vault :op :restore :id id)
         (m:call (m:lookup :assistant) (list :run :messages '((:role :user :content "go"))))
         (is (eq :folded (getf (first (wait-for-vault-status path :folded)) :status)))))))
+
+;;; --- claims across processes (~takeiteasy/nyaa#88) ------------------------------
+
+(defun foreign-owner (&key (pid 1) (host (machine-instance)))
+  (list :pid pid :host host :token "another-image"))
+
+(defun append-claim (path id owner)
+  (nyaa::%append-log path (list :kind :claimed :id id :at (nyaa::%now-iso8601) :by owner)))
+
+(defun dead-pid ()
+  "A pid with no running process."
+  (loop for pid from 99990 downto 2
+        unless (handler-case (progn (sb-posix:kill pid 0) t)
+                 (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm)))
+          return pid))
+
+(test another-process-claim-blocks-restore-and-discard
+  (with-vault-path (path)
+    (with-agent ((lambda (&rest request) (declare (ignore request)) (final-reply "done")))
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed :vault path)
+      (let ((id (nyaa:vault-record path :assistant "once")))
+        (append-claim path id (foreign-owner))
+        (is-true (getf (first (nyaa:vault-entries path)) :claimed))
+        (is (eq :held (nyaa:vault-claim-pending path id)))
+        (is (eq :bad-request (first (nyaa:tool-error (vault :op :restore :id id)))))
+        (is (eq :bad-request (first (nyaa:tool-error (vault :op :discard :id id)))))
+        (is (eq :pending (getf (first (nyaa:vault-entries path)) :status)))))))
+
+(test a-claim-on-another-host-is-always-live
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once")))
+      (append-claim path id (foreign-owner :pid (dead-pid) :host "elsewhere.invalid"))
+      (is (eq :held (nyaa:vault-claim-pending path id))))))
+
+(test a-claim-whose-owner-process-is-gone-is-restorable
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once")))
+      (append-claim path id (foreign-owner :pid (dead-pid)))
+      (is-false (getf (first (nyaa:vault-entries path)) :claimed))
+      (is (eq :claimed (nyaa:vault-claim-pending path id))))))
+
+(test a-released-claim-can-be-claimed-again
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once")))
+      (is (eq :claimed (nyaa:vault-claim-pending path id)))
+      (nyaa:vault-release path id)
+      (is (member :released (nyaa::%read-log path) :key (lambda (e) (getf e :kind))))
+      (is (eq :claimed (nyaa:vault-claim-pending path id))))))
+
+(test releasing-does-not-touch-another-processs-claim
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once")))
+      (append-claim path id (foreign-owner))
+      (nyaa:vault-release path id)
+      (is (eq :held (nyaa:vault-claim-pending path id))))))
+
+(test a-recorded-agent-steer-carries-its-claim
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "hi" :claim t)))
+      (is (equal (getf (nyaa::%vault-owner) :token)
+                 (getf (getf (first (nyaa::%read-log path)) :claimed-by) :token)))
+      (is (eq :held (nyaa:vault-claim-pending path id))))))
+
+(test compaction-keeps-a-live-claim-and-drops-claim-lines
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "hi")))
+      (append-claim path id (foreign-owner))
+      (nyaa:vault-compact path)
+      (is (eql 1 (length (nyaa::%read-log path))))
+      (is (eq :held (nyaa:vault-claim-pending path id))))))

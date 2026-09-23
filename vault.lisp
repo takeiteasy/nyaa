@@ -70,35 +70,66 @@ rewritten through a temporary file, so the original survives one."
 
 ;;; A steer sitting in an agent's in-memory queue, or one a :RESTORE has cast
 ;;; at an agent, is claimed: still :PENDING in the log, but no second delivery
-;;; may be started for it. The claim ends when the entry is consumed, or when
-;;; the agent drops its queue.
+;;; may be started for it. The claim is persisted in the log, so other
+;;; processes see it, and ends when the entry is consumed, released, or its
+;;; owner process is gone.
 ;;;
-;;; TODO: claims live in this process only, so two processes restoring one
-;;; entry can both deliver it. Upgrade path: a persisted :claimed entry with
-;;; a TTL, appended under the log's flock. Tracked in ~takeiteasy/nyaa#88.
+;;;   (:kind :claimed  :id "..." :at "iso" :by owner)
+;;;   (:kind :released :id "..." :at "iso")
+;;;
+;;; A steer an agent records for itself carries :CLAIMED-BY on its :STEER
+;;; entry instead, so recording and claiming are one append.
+;;;
+;;; TODO: a claim whose owner pid has been reused by another process on the
+;;; same host reads as live until that process exits. Upgrade path: record
+;;; the owner's start time and compare it too. Tracked in
+;;; ~takeiteasy/nyaa#89.
 
-(defvar *vault-claims* (make-hash-table :test 'equal)
-  "(canonical log namestring . id) -> T. Guarded by *LOG-LOCKS-LOCK*.")
+(defvar *vault-token* nil
+  "A random string naming this image, so its claims are recognised as its own
+even when a pid is reused.")
 
-(defun %claim-key (path id)
-  (cons (%log-key path) id))
+(defun %vault-owner ()
+  "This image's claim owner: (:pid :host :token)."
+  (list :pid (sb-posix:getpid) :host (machine-instance)
+        :token (or *vault-token*
+                   (setf *vault-token*
+                         (format nil "~36r" (random (expt 2 64) (make-random-state t)))))))
 
-(defun vault-claim (path id)
-  "Claim ID at PATH. Returns nil when it was already claimed."
-  (let ((key (%claim-key path id)))
-    (bt:with-lock-held (*log-locks-lock*)
-      (unless (gethash key *vault-claims*)
-        (setf (gethash key *vault-claims*) t)))))
+(defun %claim-live-p (owner)
+  "True when OWNER, a :CLAIMED-BY plist, is this image, on another host
+(flock is host-local, so it cannot be probed), or a process still running
+here."
+  (let ((pid (getf owner :pid)))
+    (or (equal (getf owner :token) (getf (%vault-owner) :token))
+        (not (equal (getf owner :host) (machine-instance)))
+        (not (integerp pid))
+        (handler-case (progn (sb-posix:kill pid 0) t)
+          (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm))))))
 
-(defun vault-release (path id)
-  "Drop ID's claim at PATH, if any."
-  (let ((key (%claim-key path id)))
-    (bt:with-lock-held (*log-locks-lock*)
-      (remhash key *vault-claims*))))
+(defun %claims-by-id (log)
+  "LOG's current claim owner by id, the latest entry winning."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (entry log table)
+      (let ((id (getf entry :id)))
+        (case (getf entry :kind)
+          (:steer (when (getf entry :claimed-by) (setf (gethash id table) (getf entry :claimed-by))))
+          (:claimed (setf (gethash id table) (getf entry :by)))
+          (:released (remhash id table)))))))
 
-(defun %vault-claimed-p (key)
-  (bt:with-lock-held (*log-locks-lock*)
-    (gethash key *vault-claims*)))
+(defun %live-claim (claims id)
+  (let ((owner (gethash id claims)))
+    (and owner (%claim-live-p owner) owner)))
+
+(defun %pending-state (log id)
+  "ID's state in LOG: :UNKNOWN for an id with no :STEER entry, its :HOW once
+consumed, :HELD when a live claim holds it, or nil when it is pending and
+free."
+  (let ((done (gethash id (%consumed-by-id log))))
+    (cond ((notany (lambda (e) (and (eq (getf e :kind) :steer) (equal (getf e :id) id))) log)
+           :unknown)
+          (done (getf done :how))
+          ((%live-claim (%claims-by-id log) id) :held))))
 
 (defun vault-claim-pending (path id)
   "Claim ID at PATH if it is a :PENDING steer nobody has claimed, checked and
@@ -106,34 +137,36 @@ claimed under PATH's lock. Returns :CLAIMED, :UNKNOWN for an id with no
 :STEER entry, :HELD when it is already claimed, or the status it already
 has."
   (with-log-lock (path)
-    (let* ((log (%read-log path))
-           (steer (find-if (lambda (e) (and (eq (getf e :kind) :steer)
-                                            (equal (getf e :id) id)))
-                           log))
-           (done (gethash id (%consumed-by-id log))))
-      (cond ((null steer) :unknown)
-            (done (getf done :how))
-            ((vault-claim path id) :claimed)
-            (t :held)))))
+    (or (%pending-state (%read-log path) id)
+        (progn (%append-log-locked path (list :kind :claimed :id id :at (%now-iso8601)
+                                              :by (%vault-owner)))
+               :claimed))))
 
-(defun vault-record (path agent content)
-  "Append a :STEER entry to PATH and return its id. AGENT, a keyword or nil,
-names the target agent when it is registered under one; a delegated
-sub-agent has no name (agent.lisp, checkpoint.lisp's %CONTEXT-ENTRIES), so
-nil is recorded and a later VAULT-RESTORE-TARGET call must be given one
-explicitly."
+(defun vault-release (path id)
+  "Drop this image's claim on ID at PATH, if it still holds one."
+  (with-log-lock (path)
+    (let ((log (%read-log path)))
+      (when (and (not (gethash id (%consumed-by-id log)))
+                 (equal (getf (gethash id (%claims-by-id log)) :token)
+                        (getf (%vault-owner) :token)))
+        (%append-log-locked path (list :kind :released :id id :at (%now-iso8601)))))))
+
+(defun vault-record (path agent content &key claim)
+  "Append a :STEER entry to PATH and return its id, claimed by this image
+when CLAIM. AGENT, a keyword or nil, names the target agent when it is
+registered under one; a delegated sub-agent has no name (agent.lisp,
+checkpoint.lisp's %CONTEXT-ENTRIES), so nil is recorded and a later
+VAULT-RESTORE-TARGET call must be given one explicitly."
   (let ((id (%vault-id)))
-    (%append-log path (list :kind :steer :id id :at (%now-iso8601)
-                            :agent agent :content content))
+    (%append-log path (list* :kind :steer :id id :at (%now-iso8601)
+                             :agent agent :content content
+                             (and claim (list :claimed-by (%vault-owner)))))
     (%vault-maybe-compact path)
     id))
 
 (defun vault-consume (path id how)
-  "Append a :CONSUMED entry marking ID as HOW (:FOLDED or :DISCARDED) and
-release its claim, under PATH's lock."
-  (with-log-lock (path)
-    (%append-log-locked path (list :kind :consumed :id id :at (%now-iso8601) :how how))
-    (vault-release path id))
+  "Append a :CONSUMED entry marking ID as HOW (:FOLDED or :DISCARDED)."
+  (%append-log path (list :kind :consumed :id id :at (%now-iso8601) :how how))
   (%vault-maybe-compact path))
 
 (defun vault-consume-pending (path id how)
@@ -143,17 +176,10 @@ steer nobody has claimed, checked and appended under PATH's lock. Returns
 or the status it already has."
   (let ((result
           (with-log-lock (path)
-            (let* ((log (%read-log path))
-                   (steer (find-if (lambda (e) (and (eq (getf e :kind) :steer)
-                                                    (equal (getf e :id) id)))
-                                   log))
-                   (done (gethash id (%consumed-by-id log))))
-              (cond ((null steer) :unknown)
-                    (done (getf done :how))
-                    ((%vault-claimed-p (%claim-key path id)) :held)
-                    (t (%append-log-locked
+            (or (%pending-state (%read-log path) id)
+                (progn (%append-log-locked
                         path (list :kind :consumed :id id :at (%now-iso8601) :how how))
-                       :consumed))))))
+                       :consumed)))))
     (when (eq result :consumed) (%vault-maybe-compact path))
     result))
 
@@ -174,7 +200,7 @@ pending steer held by an agent's queue or a restore. An id with no :STEER entry
 surfaced, since it names nothing a caller could act on."
   (let* ((log (%read-log path))
          (consumed (%consumed-by-id log))
-         (key (ignore-errors (%log-key path))))
+         (claims (%claims-by-id log)))
     (loop for entry in log
           when (eq (getf entry :kind) :steer)
             collect (let ((done (gethash (getf entry :id) consumed)))
@@ -182,8 +208,12 @@ surfaced, since it names nothing a caller could act on."
                             :agent (getf entry :agent) :content (getf entry :content)
                             :status (if done (getf done :how) :pending)
                             :consumed-at (and done (getf done :at))
-                            :claimed (and key (not done)
-                                          (%vault-claimed-p (cons key (getf entry :id))) t))))))
+                            :claimed (and (not done) (%live-claim claims (getf entry :id)) t))))))
+
+(defun %fold-claim (steer owner)
+  "STEER with its :CLAIMED-BY set to OWNER, or removed when OWNER is nil."
+  (let ((plain (loop for (k v) on steer by #'cddr unless (eq k :claimed-by) append (list k v))))
+    (if owner (append plain (list :claimed-by owner)) plain)))
 
 (defun vault-compact (path &key (max-age *vault-max-age*))
   "Rewrite PATH without the steers consumed more than MAX-AGE seconds ago
@@ -202,11 +232,19 @@ entry."
                        (when (or (zerop max-age) (not (stringp at)) (string< at cutoff))
                          (setf (gethash id expired) t))))
                    (%consumed-by-id log))
-          (let ((survivors (remove-if (lambda (entry) (gethash (getf entry :id) expired))
-                                      log)))
+          (let* ((claims (%claims-by-id log))
+                 (survivors
+                   (loop for entry in (remove-if (lambda (entry) (gethash (getf entry :id) expired))
+                                                 log)
+                         for kind = (getf entry :kind)
+                         unless (member kind '(:claimed :released))
+                           collect (if (eq kind :steer)
+                                       (%fold-claim entry (%live-claim claims (getf entry :id)))
+                                       entry))))
             (dolist (entry log)
               (when (and (eq (getf entry :kind) :steer) (gethash (getf entry :id) expired))
                 (incf dropped)))
             (setf kept (count :steer survivors :key (lambda (e) (getf e :kind))))
-            (when (plusp dropped) (%write-log path survivors))
+            (when (or (plusp dropped) (not (equal survivors log)))
+              (%write-log path survivors))
             (values dropped kept)))))))
