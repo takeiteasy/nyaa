@@ -32,60 +32,35 @@
 (defun perform-request (url method headers body timeout-ms)
   ;; SOCKET-BOX carries the connection out of the worker thread as soon as
   ;; ATTEMPT-REQUEST opens it, so a lapsed deadline -- or the worker's own
-  ;; unwind -- has something to close. ABANDONABLE-BOX is true only while
-  ;; the worker is inside ATTEMPT-REQUEST, so ABANDON-REQUEST's interrupt
-  ;; never throws to a catch tag that isn't there.
+  ;; unwind -- has something to close.
   (let* ((result nil)
          (socket-box (list nil))
-         (abandonable-box (list nil))
          (done (bt:make-semaphore))
          (worker (bt:make-thread
                   (lambda ()
                     (unwind-protect
-                         (setf result
-                               (catch 'abandoned
-                                 (setf (car abandonable-box) t)
-                                 (unwind-protect
-                                      (attempt-request url method headers body
-                                                       socket-box timeout-ms)
-                                   (setf (car abandonable-box) nil))))
-                      ;; Whatever unwound the worker -- a normal return, an
-                      ;; error, or ABANDON-REQUEST's interrupt -- its own
-                      ;; socket is its own to close.
+                         (setf result (attempt-request url method headers body
+                                                       socket-box timeout-ms))
+                      ;; Whatever unwound the worker -- a normal return or an
+                      ;; error -- its own socket is its own to close.
                       (let ((socket (car socket-box)))
                         (when socket (ignore-errors (usocket:socket-close socket))))
                       (bt:signal-semaphore done)))
                   :name "nyaa-http-request")))
     (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
         result
-        (progn (abandon-request worker socket-box abandonable-box)
+        (progn (abandon-request socket-box)
                (fail :timeout)))))
 
-(defun abandon-request (worker socket-box abandonable-box)
-  "Unblocks WORKER wherever the deadline found it -- connecting, writing, or
-waiting on a response -- so it errors out and unwinds instead of running
-until the server answers or the connection drops.
-
-#-ecl: closing the socket from its own thread reliably wakes the worker's
-blocked read.
-
-#+ecl: closing a socket from another thread does not wake a thread already
-blocked reading from it there -- the close call blocks right alongside it
-until the peer resolves the connection. The worker is interrupted directly
-instead; ABANDONABLE-BOX guards the throw, since outside ATTEMPT-REQUEST
-there is no 'ABANDONED catch waiting for it. The worker's own unwind then
-closes its socket."
-  (declare (ignorable worker socket-box abandonable-box))
-  #-ecl
+(defun abandon-request (socket-box)
+  "Unblocks the worker wherever the deadline found it -- connecting,
+writing, or waiting on a response -- so it errors out and unwinds instead
+of running until the server answers or the connection drops. Closing the
+socket from its own thread reliably wakes the worker's blocked read."
   (let ((socket (car socket-box)))
     (when socket
       (bt:make-thread (lambda () (ignore-errors (usocket:socket-close socket)))
-                      :name "nyaa-http-close")))
-  #+ecl
-  (ignore-errors
-   (when (bt:thread-alive-p worker)
-     (bt:interrupt-thread
-      worker (lambda () (when (car abandonable-box) (throw 'abandoned nil)))))))
+                      :name "nyaa-http-close"))))
 
 (defun attempt-request (url method headers body socket-box timeout-ms)
   (handler-case
@@ -96,8 +71,7 @@ closes its socket."
                        (puri:uri-host uri) (or (puri:uri-port uri) (if securep 443 80))
                        :element-type '(unsigned-byte 8)
                        ;; Bounds the connect phase alone, ahead of the whole-
-                       ;; exchange deadline above -- a bound drakma does not
-                       ;; offer on ECL, where :connection-timeout is a no-op.
+                       ;; exchange deadline above.
                        :timeout (max 1 (ceiling timeout-ms 1000))
                        :nodelay :if-supported))))
         (setf (car socket-box) socket)

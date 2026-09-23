@@ -36,24 +36,19 @@ ASDF does not know that, so editing the program means touching this file too."
   "The child's read/eval/print loop, passed on its command line.")
 
 (defparameter *worker-command* nil
-  "Argv that starts a bare Lisp, or NIL for the host implementation. The
-program is appended as the final argument. Set this to run workers on
-another implementation than the one hosting them.")
+  "Argv that starts a bare Lisp, or NIL for the host's own SBCL binary. The
+program is appended as the final argument. Set this to run workers under a
+different binary or with different flags than the host's own invocation.")
 
 (defconstant +worker-start-timeout+ 5000
   "Milliseconds a worker gets to answer its handshake.")
 
 (defun worker-argv ()
-  "The host implementation's bare, quiet, non-interactive invocation."
+  "The host's bare, quiet, non-interactive invocation."
   (or *worker-command*
-      #+sbcl (list (namestring sb-ext:*runtime-pathname*)
-                   "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
-                   "--eval")
-      #+ecl (list "ecl" "-q" "--norc" "--eval")
-      #+ccl (list "ccl" "--no-init" "--quiet" "--batch" "--eval")
-      #-(or sbcl ecl ccl)
-      (error "No worker invocation known for ~a; set NYAA:*WORKER-COMMAND*."
-             (lisp-implementation-type))))
+      (list (namestring sb-ext:*runtime-pathname*)
+            "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
+            "--eval")))
 
 (defstruct (worker (:constructor %make-worker (process)))
   process)

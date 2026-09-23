@@ -40,9 +40,8 @@ messages, so both reach a backend through here."
 (defmacro with-immediate-connect-refusal (&body body)
   "Run BODY -- which must make its USOCKET:SOCKET-CONNECT call directly,
 inside the same thread -- so a refused connection fails at once rather
-than waiting out the connect timeout. #-sbcl is unaffected: usocket's
-:timeout is a no-op on ECL and CCL does not take the SBCL polling path."
-  `(let (#+sbcl (usocket::*socket-connect-nonblock-wait* nil))
+than waiting out the connect timeout."
+  `(let ((usocket::*socket-connect-nonblock-wait* nil))
      ,@body))
 
 ;;; --- content ----------------------------------------------------------

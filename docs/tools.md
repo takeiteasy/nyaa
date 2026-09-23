@@ -154,11 +154,9 @@ so it is sent once, as asked, rather than duplicated or overridden.
 expects for `:stream` — drakma's own `:connection-timeout` does not bound the
 whole exchange, and it cannot close a connection it opened internally.
 `:timeout` bounds the connect phase too, ahead of the exchange deadline. A
-deadline that lapses unblocks the worker thread wherever it stalled, so it
-errors out and unwinds instead of running until the server answers: by
-closing the socket from another thread everywhere but ECL, and by
-interrupting the worker directly on ECL, where closing a socket does not
-wake a thread already blocked reading from it.
+deadline that lapses unblocks the worker thread wherever it stalled, by
+closing the socket from another thread, so it errors out and unwinds
+instead of running until the server answers.
 
 ## Workers
 
@@ -181,10 +179,10 @@ The source travels as a string, so source that does not read costs one reply
 rather than desynchronising the stream. Values print under `*print-length*`,
 `*print-level*` and a character cap.
 
-A worker runs the host implementation, resolved from the running binary.
-`*worker-command*` overrides the invocation. Starting one costs about 33 ms on
-SBCL and 41 ms on ECL, and an exchange with a running one about 0.2 ms, which is
-why an evaluation gets a fresh process instead of a pooled one.
+A worker runs the host's own SBCL binary. `*worker-command*` overrides the
+invocation. Starting one costs about 33 ms, and an exchange with a running
+one about 0.2 ms, which is why an evaluation gets a fresh process instead
+of a pooled one.
 
 A worker leads its own process group, the same as a `tool-shell` command (see
 the standard tools table above), so a process a form backgrounds is killed
@@ -207,9 +205,7 @@ filesystem, then an fd-based walk from the root, opening each component with
 `O_NOFOLLOW` and stepping into it — a symlink anywhere below the root is
 refused outright rather than resolved, and the final component is operated on
 relative to that same directory, so the check and the operation share one file
-descriptor with no window between them for a swap to land in. Available on
-SBCL, ECL and CCL; `tool-fs` answers `:unavailable` elsewhere, since a
-path-based re-check would be racy the same way.
+descriptor with no window between them for a swap to land in.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.
@@ -228,8 +224,7 @@ or `tool-self`'s job. See [introspection](introspection.md).
   not concurrent ([#27](https://todo.sr.ht/~takeiteasy/nyaa/27)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
-- `tool-image` has no source location for an interpreted definition on SBCL,
-  or anything not loaded from a compiled file on ECL
+- `tool-image` has no source location for an interpreted definition
   ([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks

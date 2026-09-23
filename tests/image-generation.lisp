@@ -1,9 +1,9 @@
 (in-package #:nyaa/tests)
 (in-suite :nyaa)
 
-;;; SBCL image generations (~takeiteasy/nyaa#48): the refusals SAVE-IMAGE
-;;; makes before ever suspending anything, GENERATIONS' :image field, and
-;;; -- #+sbcl, always on -- a real end-to-end save/relaunch in a subprocess.
+;;; Image generations (~takeiteasy/nyaa#48): the refusals SAVE-IMAGE makes
+;;; before ever suspending anything, GENERATIONS' :image field, and a real
+;;; end-to-end save/relaunch in a subprocess.
 
 (nyaa:define-provider :test-image-credentialed
   :protocol :protocol-openai
@@ -38,14 +38,8 @@
   `(with-generations-directory (,dir-var)
      (call-with-image-context ,dir-var (lambda (,context ,dir-var) (declare (ignorable ,dir-var)) ,@body))))
 
-;;; --- refusals, every implementation ------------------------------------
+;;; --- refusals ------------------------------------------------------------
 
-#-sbcl
-(test save-image-is-unsupported-off-sbcl
-  (with-image-context (ctx)
-    (signals error (nyaa:save-image ctx))))
-
-#+sbcl
 (test save-image-off-the-main-thread-is-refused
   (with-image-context (ctx)
     (let ((condition nil))
@@ -56,7 +50,6 @@
       (is (typep condition 'error))
       (is (search "main thread" (princ-to-string condition))))))
 
-#+sbcl
 (test save-image-refuses-a-credentialed-provider-before-suspending-anything
   (with-image-context (ctx dir)
     (m:mount ctx 'nyaa:protocol-openai)
@@ -66,20 +59,17 @@
       ;; refused ahead of CHECKPOINT: no generation was written
       (is (= before (length (nyaa:generations :dir dir)))))))
 
-#+sbcl
 (test relaunch-of-a-missing-core-is-refused
   (signals error (nyaa:relaunch "/no/such/file.core")))
 
 ;;; --- generations' :image field ------------------------------------------
 
-#+sbcl
 (test generations-image-is-nil-with-no-image-taken
   (with-image-context (ctx dir)
     (m:mount ctx 'image-test-thing)
     (nyaa:checkpoint ctx :dir dir)
     (is (null (getf (first (nyaa:generations :dir dir)) :image)))))
 
-#+sbcl
 (test save-image-writes-a-sibling-core-generations-reports
   (with-image-context (ctx dir)
     (m:mount ctx 'image-test-thing)
@@ -95,7 +85,6 @@
 ;;; the heap, not the call stack), so this SETFs it globally instead of
 ;;; going through WITH-IMAGE-CONTEXT, and puts it back after.
 
-#+sbcl
 (test save-image-round-trips-state-and-code-through-a-real-relaunch
   (with-generations-directory (dir)
     (let ((saved-registry m:*registry*)
@@ -153,7 +142,6 @@
        (unwind-protect (progn ,@body)
          (setf nyaa::*last-image* ,old-image nyaa::*self-dirty* ,old-dirty)))))
 
-#+sbcl
 (test require-image-refuses-eval-and-define-with-no-image-taken
   (with-self-image-state (nil nil)
     (with-image-context (ctx)
@@ -161,7 +149,6 @@
       (let ((result (nyaa:invoke-tool :tool-self :op :eval :form "1")))
         (is (equal :bad-request (first (nyaa:tool-error result))))))))
 
-#+sbcl
 (test require-image-accepts-after-a-clean-image-then-refuses-once-dirty
   (with-self-image-state ("/tmp/pretend.core" nil)
     (with-image-context (ctx)
@@ -172,13 +159,11 @@
         (let ((after (nyaa:invoke-tool :tool-self :op :eval :form "1")))
           (is (equal :bad-request (first (nyaa:tool-error after)))))))))
 
-#+sbcl
 (test self-define-refuses-a-non-definition-form
   (let ((nyaa::*last-image* nil) (nyaa::*self-dirty* nil))
     (with-image-context (ctx)
       (signals error (nyaa:self-define ctx "(+ 1 2)")))))
 
-#+sbcl
 (test self-define-redefines-and-takes-a-fresh-image
   (let ((nyaa::*last-image* nil) (nyaa::*self-dirty* t))
     (with-image-context (ctx dir)

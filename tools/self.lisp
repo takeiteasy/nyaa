@@ -226,12 +226,8 @@ defers interrupts across the whole form instead of leaving it abandonable."
 ;;; nyaa#64) abandons cooperatively instead of pre-emptively: an interrupt
 ;;; landing inside a DEFCLASS or DEFMETHOD expansion can leave CLOS
 ;;; mid-update, unlike TOOLS/HTTP.LISP's socket, which has one resource to
-;;; release on the way out. BT:INTERRUPT-THREAD's deferral around a target
-;;; thread's own critical sections (SBCL's WITHOUT-INTERRUPTS, CCL's) is not
-;;; portable -- ECL's MP:INTERRUPT-PROCESS fires immediately even inside
-;;; MP:WITHOUT-INTERRUPTS, confirmed by hand against the running
-;;; implementation -- so ABANDON-SELF-EVAL never interrupts a deferred
-;;; write. It only raises the ABANDON flag; the worker checks it itself,
+;;; release on the way out. ABANDON-SELF-EVAL never interrupts a deferred
+;;; write; it only raises the ABANDON flag, which the worker checks itself,
 ;;; from its own thread, right after EVAL-IN-HOST returns, and throws only
 ;;; then. A deadline during a deferred write therefore always waits for the
 ;;; form to finish rather than risking tearing it.

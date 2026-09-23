@@ -16,9 +16,8 @@ back.
 ;; => (:ok (:restored (:tool-fs :assistant) :missing nil :mismatched nil :extra nil))
 ```
 
-Declared-state generations only, on SBCL, ECL and CCL. On SBCL, a
-generation can also carry the image itself -- see
-[image generations](images.md).
+Declared-state generations by default; a generation can also carry the
+image itself -- see [image generations](images.md).
 
 ## `snapshot` and `restore`
 
@@ -108,5 +107,3 @@ instead, as [`tool-self`](self.md) does before every write it makes.
 - A checkpoint taken mid-run keeps the agent's conversation, not the turn or
   tool calls in flight, and nothing in the result says so
   ([#50](https://todo.sr.ht/~takeiteasy/nyaa/50)).
-- [Image generations](images.md) are SBCL only; ECL and CCL keep
-  declared-state generations alone.

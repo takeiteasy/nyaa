@@ -44,14 +44,9 @@ even for a bound special: `tool-eval`, `tool-repl` and `tool-self`, all
 thousands of symbols, so it reports `:total` and `:truncated` rather than
 cutting silently.
 
-Lambda lists and source locations are implementation-specific:
-`sb-introspect` on SBCL, `ext:compiled-function-file` and
-`si::function-lambda-list` on ECL, `ccl:arglist` for a lambda list on CCL.
-Absent — an interpreted definition on SBCL, anything not loaded from a
-compiled file on ECL, any source location at all on CCL — reports
-`:available nil` rather than erroring
-([#47](https://todo.sr.ht/~takeiteasy/nyaa/47),
-[#62](https://todo.sr.ht/~takeiteasy/nyaa/62)).
+Lambda lists and source locations come from `sb-introspect`. Absent — an
+interpreted definition — reports `:available nil` rather than erroring
+([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
 
 ## `tool-services`
 

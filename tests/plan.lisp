@@ -4,17 +4,6 @@
 ;;; TOOL-PLAN, the DSL gate (~takeiteasy/nyaa#6): checking a whole plan
 ;;; before any step runs, threading a value through :REF, and the reasons a
 ;;; step or a whole plan is refused.
-;;;
-;;; Skipped whole on ECL: every test here calls TOOL-PLAN, which is a
-;;; service calling back into another service from within its own handler
-;;; -- meow#58's race breaks a call as a deadlock often enough on ECL to
-;;; redden CI, the same reason meow's own ANSWERED-CALLER-CAN-CALL-BACK is
-;;; skipped there. Re-enable with the fix.
-
-(defmacro def-plan-test (name &body body)
-  `(test ,name
-     #+ecl (skip "~takeiteasy/meow#58 breaks a call as a deadlock on ECL")
-     #-ecl (progn ,@body)))
 
 ;;; A minimal :TRUST :AGENT tool that sleeps, so PLAN-HONOURS-ITS-TIMEOUT can
 ;;; force real elapsed time between two steps without a tool this trust
@@ -65,7 +54,7 @@
 
 ;;; --- running a plan ----------------------------------------------------
 
-(def-plan-test plan-threads-a-value-through-ref
+(test plan-threads-a-value-through-ref
   (with-plan
     (let ((result (plan (list (list :as "w" :tool "tool-fs"
                                     :args (list :op :write :path "src.txt" :data "hello ref"))
@@ -82,7 +71,7 @@
 
 ;;; --- refused before any step runs ---------------------------------------
 
-(def-plan-test plan-refuses-a-tool-outside-its-allow-list
+(test plan-refuses-a-tool-outside-its-allow-list
   (with-plan
     ;; tool-shell is mounted but not in this plan's :allow.
     (let ((result (plan (list (list :tool "tool-shell" :args (list :cmd "true"))
@@ -91,26 +80,26 @@
       (is (search "allow-list" (second (nyaa:tool-error result))))
       (is (not (sandbox-file-exists-p "never.txt"))))))
 
-(def-plan-test plan-refuses-an-operator-trusted-tool-even-when-allowed
+(test plan-refuses-an-operator-trusted-tool-even-when-allowed
   (call-with-plan '(:tool-fs :tool-shell) 16
     (lambda ()
       (let ((result (plan (list (list :tool "tool-shell" :args (list :cmd "true"))))))
         (is (search "agent-trusted" (second (nyaa:tool-error result))))))))
 
-(def-plan-test plan-refuses-an-unregistered-tool
+(test plan-refuses-an-unregistered-tool
   ;; Allowed by name, but nothing is mounted under it.
   (call-with-plan '(:tool-fs :tool-nonexistent) 16
     (lambda ()
       (let ((result (plan (list (list :tool "tool-nonexistent" :args nil)))))
         (is (search "no tool named" (second (nyaa:tool-error result))))))))
 
-(def-plan-test plans-do-not-nest
+(test plans-do-not-nest
   (call-with-plan '(:tool-fs :tool-plan) 16
     (lambda ()
       (let ((result (plan (list (list :tool "tool-plan" :args (list :steps nil))))))
         (is (search "nest" (second (nyaa:tool-error result))))))))
 
-(def-plan-test plan-refuses-a-duplicate-step-name
+(test plan-refuses-a-duplicate-step-name
   (with-plan
     (let ((result (plan (list (list :as "x" :tool "tool-fs"
                                     :args (list :op :read :path "a.txt"))
@@ -118,7 +107,7 @@
                                     :args (list :op :read :path "b.txt"))))))
       (is (search "duplicate" (second (nyaa:tool-error result)))))))
 
-(def-plan-test plan-refuses-a-ref-to-an-unknown-or-later-step
+(test plan-refuses-a-ref-to-an-unknown-or-later-step
   (with-plan
     (let ((result (plan (list (list :tool "tool-fs"
                                     :args (list :op :read :path (list :ref "later.data")))
@@ -126,13 +115,13 @@
                                     :args (list :op :read :path "a.txt"))))))
       (is (search "unknown or later step" (second (nyaa:tool-error result)))))))
 
-(def-plan-test plan-refuses-a-malformed-ref
+(test plan-refuses-a-malformed-ref
   (with-plan
     (let ((result (plan (list (list :tool "tool-fs"
                                     :args (list :op :read :path (list :ref "no-dot")))))))
       (is (search "malformed ref" (second (nyaa:tool-error result)))))))
 
-(def-plan-test plan-refuses-more-than-max-steps
+(test plan-refuses-more-than-max-steps
   (call-with-plan '(:tool-fs) 1
     (lambda ()
       (let ((result (plan (list (list :as "a" :tool "tool-fs"
@@ -143,7 +132,7 @@
 
 ;;; --- a step that fails ends the plan -------------------------------------
 
-(def-plan-test a-failing-step-ends-the-plan-with-the-results-so-far
+(test a-failing-step-ends-the-plan-with-the-results-so-far
   (with-plan
     (let ((result (plan (list (list :as "ok" :tool "tool-fs"
                                     :args (list :op :write :path "a.txt" :data "x"))
@@ -159,7 +148,7 @@
 
 ;;; --- the whole-plan deadline, checked between steps ----------------------
 
-(def-plan-test plan-honours-its-timeout-between-steps
+(test plan-honours-its-timeout-between-steps
   (call-with-plan '(:tool-fs :tool-sleep) 16
     (lambda ()
       (let ((result (plan (list (list :as "s" :tool "tool-sleep" :args (list :ms 50))

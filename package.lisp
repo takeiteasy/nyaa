@@ -24,7 +24,7 @@
    #:snapshot #:restore #:checkpoint #:rollback #:generations
    #:*generations-directory*
    ;; image generations
-   #:save-image #:relaunch #:save-recovery-image #:image-generations-unsupported
+   #:save-image #:relaunch #:save-recovery-image
    #:self-define
    ;; vault
    #:vault-record #:vault-consume #:vault-entries #:*vault-log*

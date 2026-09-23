@@ -63,13 +63,13 @@ An [agent](agent.md) runs a turn cycle over a model and its tools:
                 :messages '((:role :user :content "list the files")))
 ```
 
-Runs on SBCL, ECL and CCL.
+Runs on SBCL.
 
 ## Launching
 
-On SBCL, `bin/nyaa-install` builds a recovery image once, and `bin/nyaa`
-launches nyaa from the newest saved [image generation](images.md)
-afterwards, falling back to recovery if it won't load:
+`bin/nyaa-install` builds a recovery image once, and `bin/nyaa` launches
+nyaa from the newest saved [image generation](images.md) afterwards,
+falling back to recovery if it won't load:
 
 ```sh
 bin/nyaa-install
@@ -84,11 +84,10 @@ The suite uses FiveAM and runs through ASDF:
 (asdf:test-system :nyaa)
 ```
 
-From the shell, `tests/test.sh` runs it on `sbcl` (default), `ecl` or `ccl`
-and exits non-zero on failure:
+From the shell, `tests/test.sh` runs it and exits non-zero on failure:
 
 ```sh
-tests/test.sh ecl
+tests/test.sh
 ```
 
 Tests that make real network requests are skipped unless `NYAA_LIVE_HTTP` is

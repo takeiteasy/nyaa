@@ -64,7 +64,7 @@ travels in a TOOL-IMAGE reply.")
   (with-tools
     (let ((result (tool :tool-image :op :source :symbol "complete" :package "nyaa")))
       (is (eq :ok (first result)))
-      ;; Well-formed either way: a location on SBCL/ECL, or a plain miss.
+      ;; Well-formed either way: a location, or a plain miss.
       (if (result-value result :available)
           (is (stringp (result-value result :file)))
           (is (eq nil (result-value result :available)))))))

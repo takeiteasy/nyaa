@@ -3,7 +3,7 @@
 ;; SB-INTROSPECT backs the lambda lists and source locations below; it
 ;; ships with SBCL itself, so REQUIRE rather than a Quicklisp dependency,
 ;; ahead of the DEFUNs that call into it.
-#+sbcl (eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-introspect))
+(eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-introspect))
 
 ;;; Read-only introspection over the live CL image: describe, apropos,
 ;;; documentation and source locations. See ~takeiteasy/nyaa#10.
@@ -111,10 +111,7 @@ the implementation cannot say."
           (and list (prin1-to-string list))))))
 
 (defun function-lambda-list (symbol)
-  (or #+sbcl (sb-introspect:function-lambda-list symbol)
-      #+ecl (si::function-lambda-list symbol)
-      #+ccl (ccl:arglist symbol)
-      #-(or sbcl ecl ccl) nil))
+  (sb-introspect:function-lambda-list symbol))
 
 ;;; --- :apropos --------------------------------------------------------
 
@@ -163,29 +160,18 @@ the implementation cannot say."
       (ok :available nil))))
 
 (defun symbol-source (symbol)
-  "SYMBOL's (:file ... :position ...), or NIL when it is not fbound or the
-implementation offers no source location -- an interpreted definition on
-SBCL, or anything not loaded from a compiled file on ECL."
+  "SYMBOL's (:file ... :position ...), or NIL when it is not fbound or has
+no source location -- an interpreted definition, never loaded from a
+compiled file."
   (and (fboundp symbol) (function-source symbol)))
 
 (defun function-source (symbol)
-  (or #+sbcl (sbcl-function-source symbol)
-      #+ecl (ecl-function-source symbol)
-      #-(or sbcl ecl) nil))
-
-#+sbcl
-(defun sbcl-function-source (symbol)
   (let ((source (first (ignore-errors
                          (sb-introspect:find-definition-sources-by-name symbol :function)))))
     (and source
          (let ((path (sb-introspect:definition-source-pathname source)))
            (and path (list :file (namestring path)
                            :position (sb-introspect:definition-source-character-offset source)))))))
-
-#+ecl
-(defun ecl-function-source (symbol)
-  (multiple-value-bind (file position) (ignore-errors (ext:compiled-function-file (symbol-function symbol)))
-    (and file (list :file (namestring file) :position position))))
 
 ;;; --- :packages -----------------------------------------------------
 

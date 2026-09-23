@@ -11,12 +11,11 @@
 ;;; otherwise end up on disk (providers.md's credentials line, held the same
 ;;; way in tools/image.lisp).
 ;;;
-;;; SBCL image generations -- SAVE-LISP-AND-DIE, relaunch-and-restore, an
+;;; Image generations -- SAVE-LISP-AND-DIE, relaunch-and-restore, an
 ;;; install-time recovery image (~takeiteasy/nyaa#48) -- live in
 ;;; image-generation.lisp instead, layered on this file's declared-state
 ;;; generation and M:SUSPEND/M:RESUME (meow#64): SAVE-IMAGE takes one of
-;;; these first, then writes a sibling .core alongside it. ECL and CCL get
-;;; only what is here.
+;;; these first, then writes a sibling .core alongside it.
 ;;;
 ;;; The agent's own SNAPSHOT/RESTORE methods live at the end of agent.lisp,
 ;;; alongside the slots they read and write.

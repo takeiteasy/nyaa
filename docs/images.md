@@ -2,7 +2,7 @@
 
 An image generation is a [generation](checkpoints.md) that also carries
 the running image itself -- SBCL's `save-lisp-and-die` -- so a rollback
-can undo code, not only declared state. SBCL only.
+can undo code, not only declared state.
 
 ```lisp
 (nyaa:save-image *ctx*)
@@ -75,8 +75,9 @@ model-reachable tool op.
 
 ## Limitations
 
-- SBCL only. `save-image`, `relaunch` and `save-recovery-image` all
-  signal `image-generations-unsupported` on ECL and CCL.
+- Needs a current SBCL build. 2.2.9 (Debian's `apt` package as of this
+  writing) segfaults inside `save-lisp-and-die`'s own C runtime
+  ([#72](https://todo.sr.ht/~takeiteasy/nyaa/72)); 2.6.8 is known good.
 - A relaunched core's other external handles -- open sockets, worker
   process handles, a `tool-repl` session -- are stale, not just `cl+ssl`'s
   context. `cl+ssl:reload` is the only one handled here

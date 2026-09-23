@@ -1,3 +1,6 @@
+#-sbcl
+(error "nyaa requires SBCL; running on ~a." (lisp-implementation-type))
+
 (defsystem "nyaa"
   :description "Not Your Average Agent: an agent harness built on meow."
   :author "George Watson"

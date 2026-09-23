@@ -9,28 +9,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        lisp: [sbcl, ecl, ccl]
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Lisp
-        # SBCL is always installed: it bootstraps Quicklisp below regardless
-        # of which implementation the tests run under. CCL has no apt
-        # package -- it is installed from its upstream release below.
+      - name: Install SBCL
+        # Apt's SBCL is too old to save-lisp-and-die reliably (#72,
+        # segfaults inside its own C runtime); install a current upstream
+        # binary release instead.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y sbcl ${{ matrix.lisp != 'ccl' && matrix.lisp || '' }}
-
-      - name: Install CCL
-        if: matrix.lisp == 'ccl'
-        run: |
-          curl -sSfL https://github.com/Clozure/ccl/releases/download/v1.13/ccl-1.13-linuxx86.tar.gz \
-              | sudo tar xz -C /opt
-          printf '#!/bin/sh\nexec /opt/ccl/lx86cl64 "$@"\n' | sudo tee /usr/local/bin/ccl >/dev/null
-          sudo chmod +x /usr/local/bin/ccl
+          curl -sSfL https://sourceforge.net/projects/sbcl/files/sbcl/2.6.8/sbcl-2.6.8-x86-64-linux-binary.tar.bz2/download \
+              -o sbcl.tar.bz2
+          tar xjf sbcl.tar.bz2
+          cd sbcl-2.6.8-x86-64-linux
+          sudo sh install.sh
 
       - name: Install Quicklisp
         run: |
@@ -47,4 +38,4 @@ jobs:
               ~/quicklisp/local-projects/trivial-high-precision-timer
 
       - name: Test
-        run: tests/test.sh ${{ matrix.lisp }}
+        run: tests/test.sh

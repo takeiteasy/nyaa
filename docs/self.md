@@ -99,8 +99,8 @@ one is mounted, at `:info` or `:warn`.
 
 ## `self-define` and `:require-image`
 
-`:previous-source` is a manual way back, and only for one symbol. On
-SBCL, [`self-define`](images.md) closes that for real: it takes an
+`:previous-source` is a manual way back, and only for one symbol.
+[`self-define`](images.md) closes that for real: it takes an
 [image generation](images.md) immediately before the write, so
 `nyaa:relaunch`ing that core undoes the redefinition itself, not just
 declared state.

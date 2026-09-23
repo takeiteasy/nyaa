@@ -40,9 +40,7 @@
 (defun stop-fake-http (server)
   (setf (fake-running server) nil)
   ;; Wake the blocked accept with a throwaway connection, and close the
-  ;; listener only once the loop has left it. Closing a descriptor while
-  ;; another thread waits on it is a portability hazard: ECL on glibc
-  ;; aborts the image rather than signalling.
+  ;; listener only once the loop has left it.
   (ignore-errors
    (usocket:socket-close (usocket:socket-connect "127.0.0.1" (fake-port server))))
   (ignore-errors (bt:join-thread (fake-thread server)))

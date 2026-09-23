@@ -54,9 +54,7 @@
 (defparameter +getpid-form+
   ;; A worker runs the host implementation, so the bare image it starts has
   ;; exactly the internals this one does.
-  #+sbcl "(sb-unix:unix-getpid)"
-  #+ecl "(si:getpid)"
-  #+ccl "(ccl::getpid)")
+  "(sb-unix:unix-getpid)")
 
 (defun unix-process-alive-p (pid)
   (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
@@ -447,9 +445,9 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
                                                 :timeout 5000)))))))
 
 (test http-timeout-does-not-leak-its-worker-thread
-  ;; An abandoned request used to keep its worker thread -- and, on
-  ;; non-ECL, the separate thread that closes its socket -- alive until
-  ;; the server answered. *STALL* holds the fake server's response so the
+  ;; An abandoned request used to keep its worker thread -- and the
+  ;; separate thread that closes its socket -- alive until the server
+  ;; answered. *STALL* holds the fake server's response so the
   ;; test controls exactly when that happens -- SETF rather than LET,
   ;; since the handler runs on the fake server's own thread, which does
   ;; not see a dynamic binding made on this one.

@@ -42,10 +42,6 @@
 ;;; directory, so the symlink check and the operation share one file
 ;;; descriptor -- there is no window between them for a swap to land in
 ;;; (~takeiteasy/nyaa#52).
-;;;
-;;; Unavailable outside SBCL, ECL and CCL: without the walk, a path
-;;; re-check is racy the same way, so TOOL-FS answers :UNAVAILABLE rather
-;;; than fall back to one (~takeiteasy/nyaa#53).
 
 (defun native-absolute (path)
   (if (and (plusp (length path)) (char= (char path 0) #\/))
@@ -89,13 +85,9 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
   (case errno
     ((:eloop :enotdir) (fail (list :forbidden "path escapes sandbox root")))
     (:enoent (fail (list :error not-found-message)))
-    (:unavailable (fail :unavailable))
     (t (fail (list :error (string-downcase errno))))))
 
 (defun apply-fs-op (op root lexical data)
-  #-(or sbcl ecl ccl) (declare (ignore op root lexical data))
-  #-(or sbcl ecl ccl) (fail :unavailable)
-  #+(or sbcl ecl ccl)
   (bt:with-lock-held (*fs-lock*)
     (with-fs-cwd-saved
       (let* ((components (path-components root lexical))
@@ -171,17 +163,9 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
                (t (errno-result errno)))))))
 
 (defun fs-slurp-fd (fd)
-  #+sbcl (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))
-           (uiop:slurp-stream-string s))
-  #+ecl (with-open-stream (s (ext:make-stream-from-fd fd :input :element-type 'character))
-          (uiop:slurp-stream-string s))
-  #+ccl (with-open-stream (s (ccl::make-fd-stream fd :direction :input :element-type 'character))
-          (uiop:slurp-stream-string s)))
+  (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))
+    (uiop:slurp-stream-string s)))
 
 (defun fs-spit-fd (fd data)
-  #+sbcl (with-open-stream (s (sb-sys:make-fd-stream fd :output t :element-type 'character))
-           (write-string data s))
-  #+ecl (with-open-stream (s (ext:make-stream-from-fd fd :output :element-type 'character))
-          (write-string data s))
-  #+ccl (with-open-stream (s (ccl::make-fd-stream fd :direction :output :element-type 'character))
-          (write-string data s)))
+  (with-open-stream (s (sb-sys:make-fd-stream fd :output t :element-type 'character))
+    (write-string data s)))
