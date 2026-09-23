@@ -246,6 +246,7 @@
              (result (second (nyaa:rollback *ckpt-context* path :timeout 0.3))))
         (is (< (- (get-internal-real-time) start) (* 0.8 internal-time-units-per-second)))
         (is (equal '(:slow-restore-thing) (getf result :failed)))
+        (is (equal '((:slow-restore-thing :timeout)) (getf result :failures)))
         (is (member :stateful-thing (getf result :restored)))
         (is (eql 3 (thing)))))))
 

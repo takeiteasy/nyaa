@@ -14,7 +14,7 @@ back.
 
 (nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774.generation"
                :timeout 30)
-;; => (:ok (:restored (:tool-fs :assistant) :failed nil :interrupted nil
+;; => (:ok (:restored (:tool-fs :assistant) :failed nil :failures nil :interrupted nil
 ;;          :unavailable nil :missing nil :mismatched nil :extra nil))
 ```
 
@@ -85,6 +85,7 @@ accepted:
 |---|---|
 | `:restored` | names whose state was applied |
 | `:failed` | names whose restore got no answer |
+| `:failures` | each failed name with its reason: `(name :timeout)`, `(name :down)`, `(name :error)` or `(name :deadlock)` |
 | `:interrupted` | restored names that were snapshotted mid-work; the in-flight work is gone |
 | `:unavailable` | names the checkpoint could not snapshot — left as they are |
 | `:missing` | a generation entry with no service mounted under that name now |

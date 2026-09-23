@@ -274,9 +274,9 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
 (defun rollback (context path &key (timeout 30))
   "Restore the generation at PATH onto CONTEXT's named services now. Every
 restore is sent at once and given TIMEOUT seconds.
-Returns (:ok (:restored names :failed names :interrupted names :unavailable
-names :missing names :mismatched entries :extra names)). FAILED names a
-restore that got no answer; INTERRUPTED a restored service that was
+Returns (:ok (:restored names :failed names :failures entries :interrupted names
+:unavailable names :missing names :mismatched entries :extra names)). FAILED names a
+restore that got no answer and FAILURES lists each as (name reason); INTERRUPTED a restored service that was
 snapshotted mid-work, whose in-flight work is gone; UNAVAILABLE an entry the
 checkpoint could not snapshot, left as it is. MISSING names a generation
 entry with no service mounted under that name now; MISMATCHED one mounted
@@ -305,16 +305,17 @@ call -- the caller decides what drift means."
                      (mapcar (lambda (target) (list :restore (getf (car target) :state)))
                              targets)
                      :timeout timeout))
-          (restored '()) (failed '()) (interrupted '()))
+          (restored '()) (failed '()) (failures '()) (interrupted '()))
       (loop for (entry . nil) in targets
             for (nil status) in outcomes
             for name = (getf entry :name)
-            do (cond (status (push name failed))
+            do (cond (status (push name failed)
+                            (push (list name (%unavailable-reason status)) failures))
                      (t (push name restored)
                         (when (%interrupted-p (getf entry :state))
                           (push name interrupted)))))
       (ok :restored (nreverse restored) :failed (nreverse failed)
-          :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
+          :failures (nreverse failures) :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
           :missing (nreverse missing) :mismatched (nreverse mismatched)
           :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
                                  (mapcar (lambda (e) (getf e :name)) recorded))))))
