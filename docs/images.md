@@ -93,5 +93,8 @@ model-reachable tool op.
 - A `tool-repl` session does not survive a relaunch: its first call reports
   the session lost and the next starts empty. Sockets never cross a save --
   each is opened and closed within one message.
+- Vault claims on an agent's queued steers are taken again by the launched
+  core under its own token ([vault](vault.md#claims)); one another running
+  process holds is dropped from the queue.
 - A core is tens of megabytes; taking one is not free, and `bin/nyaa`'s
   probe launches a whole second SBCL process.

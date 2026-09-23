@@ -477,10 +477,64 @@ after the message that triggered it has already returned."
 
 (test a-claim-with-a-matching-start-time-is-live
   (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once"))
+          (ppid (sb-posix:getppid)))
+      (append-claim path id (foreign-owner :pid ppid :start (nyaa::%process-start-time ppid)))
+      (is (eq :held (nyaa:vault-claim-pending path id))))))
+
+(test a-claim-from-an-earlier-image-of-this-process-is-restorable
+  (with-vault-path (path)
     (let ((id (nyaa:vault-record path :assistant "once")))
       (append-claim path id (foreign-owner :pid (sb-posix:getpid)
                                            :start (nyaa::%process-start-time (sb-posix:getpid))))
-      (is (eq :held (nyaa:vault-claim-pending path id))))))
+      (is-false (getf (first (nyaa:vault-entries path)) :claimed))
+      (is (eq :claimed (nyaa:vault-claim-pending path id))))))
+
+(test saving-an-image-forgets-the-vault-token
+  (is (member 'nyaa::%forget-vault-token sb-ext:*save-hooks*))
+  (let ((nyaa::*vault-token* "abc"))
+    (nyaa::%forget-vault-token)
+    (is (null nyaa::*vault-token*))))
+
+(defun queue-cell (path id content)
+  (list* id path (list :role :user :content content)))
+
+(defun claim-token (path id)
+  (getf (gethash id (nyaa::%claims-by-id (nyaa::%read-log path))) :token))
+
+(test reclaiming-keeps-a-free-steer-and-claims-it-as-this-image
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "hi" :claim t))
+          (agent (make-instance 'nyaa:agent)))
+      (nyaa:vault-release path id)
+      (setf (nyaa::%steer-queue agent) (list (queue-cell path id "hi")))
+      (nyaa::reclaim-steer-claims agent)
+      (is (eql 1 (length (nyaa::%steer-queue agent))))
+      (is (equal (getf (nyaa::%vault-owner) :token) (claim-token path id))))))
+
+(test reclaiming-drops-a-steer-another-process-holds
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "hi"))
+          (agent (make-instance 'nyaa:agent)))
+      (append-claim path id (foreign-owner))
+      (setf (nyaa::%steer-queue agent) (list (queue-cell path id "hi")))
+      (nyaa::reclaim-steer-claims agent)
+      (is (null (nyaa::%steer-queue agent))))))
+
+(test reclaiming-drops-a-consumed-steer
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "hi"))
+          (agent (make-instance 'nyaa:agent)))
+      (nyaa:vault-consume path id :discarded)
+      (setf (nyaa::%steer-queue agent) (list (queue-cell path id "hi")))
+      (nyaa::reclaim-steer-claims agent)
+      (is (null (nyaa::%steer-queue agent))))))
+
+(test reclaiming-keeps-a-steer-with-no-vault-entry
+  (let ((agent (make-instance 'nyaa:agent)))
+    (setf (nyaa::%steer-queue agent) (list (queue-cell nil nil "hi")))
+    (nyaa::reclaim-steer-claims agent)
+    (is (eql 1 (length (nyaa::%steer-queue agent))))))
 
 (test a-released-claim-can-be-claimed-again
   (with-vault-path (path)

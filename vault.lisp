@@ -80,13 +80,15 @@ rewritten through a temporary file, so the original survives one."
 ;;; A steer an agent records for itself carries :CLAIMED-BY on its :STEER
 ;;; entry instead, so recording and claiming are one append.
 
-;; TODO: a saved core carries this token to every process launched from it,
-;; and a relaunch keeps claims made before it. Upgrade path: reset it in
-;; sb-ext:*save-hooks* and release claims on relaunch. Tracked in
-;; ~takeiteasy/nyaa#91.
 (defvar *vault-token* nil
   "A random string naming this image, so its claims are recognised as its own
-even when a pid is reused.")
+even when a pid is reused. Reset when an image is saved, so each launched core
+draws its own.")
+
+(defun %forget-vault-token ()
+  (setf *vault-token* nil))
+
+(pushnew '%forget-vault-token sb-ext:*save-hooks*)
 
 #+linux
 (defun %proc-stat-fields (line)
@@ -138,13 +140,15 @@ with a different one."
   "True when OWNER, a :CLAIMED-BY plist, is this image, on another host
 (flock is host-local, so it cannot be probed), or a process still running
 here that started when the claim was made. A claim or process with no
-readable start time is judged by its pid alone."
+readable start time is judged by its pid alone. A claim naming this process
+under another token is an earlier image's, replaced by a relaunch: dead."
   (let ((pid (getf owner :pid))
         (start (getf owner :start)))
     (or (equal (getf owner :token) (getf (%vault-owner) :token))
         (not (equal (getf owner :host) (machine-instance)))
         (not (integerp pid))
-        (and (handler-case (progn (sb-posix:kill pid 0) t)
+        (and (/= pid (sb-posix:getpid))
+             (handler-case (progn (sb-posix:kill pid 0) t)
                (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm)))
              (let ((now (and start (%process-start-time pid))))
                (or (null now) (eql start now)))))))

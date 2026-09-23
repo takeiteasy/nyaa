@@ -44,14 +44,20 @@ doesn't actually hold."
   "SUSPENSION closed over from before the fork -- the same process and
 service instances the saved core's heap already holds, so RESUME on load
 just respawns threads over them, no re-discovery needed. FORGET-WORKERS
-first: the workers that heap holds belong to the process that saved it.
-NYAA_IMAGE_PROBE
+first: the workers that heap holds belong to the process that saved it, and
+so do the vault claims on its agents' queued steers, which are claimed again
+as this image (RECLAIM-STEER-CLAIMS). NYAA_IMAGE_PROBE
 set skips all of that: BIN/NYAA and the integration tests use it to check
 a core loads without actually reviving its services."
   (lambda ()
     (cond
       ((uiop:getenv "NYAA_IMAGE_PROBE") (sb-ext:exit :code 0 :abort t))
       (t (forget-workers)
+         ;; TODO: reads meow's internal suspension-entries; upgrade path is
+         ;; a public accessor. Tracked in ~takeiteasy/meow#69.
+         (dolist (entry (meow::suspension-entries suspension))
+           (when (typep (second entry) 'agent)
+             (reclaim-steer-claims (second entry))))
          (cl+ssl:reload)
          (m:resume suspension)
          (sb-impl::toplevel-init)))))

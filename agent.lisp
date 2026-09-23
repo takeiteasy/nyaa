@@ -154,6 +154,15 @@ id and path travel in the queue cell, never in the message plist pushed onto
   (dolist (cell (%steer-queue service))
     (when (car cell) (vault-release (cadr cell) (car cell)))))
 
+(defun reclaim-steer-claims (service)
+  "Claim, as this image, every steer queued at SERVICE, dropping any that
+another process holds or that is already consumed."
+  (setf (%steer-queue service)
+        (remove-if-not (lambda (cell)
+                         (or (null (car cell))
+                             (eq :claimed (vault-claim-pending (cadr cell) (car cell)))))
+                       (%steer-queue service))))
+
 (defmethod m:dispose ((service agent) reason)
   (declare (ignore reason))
   (release-steer-claims service))

@@ -88,6 +88,12 @@ started at the recorded time. A claim or process with no readable start time
 (an unsupported OS) is judged by its pid alone. A claim whose owner has exited is ignored, so a
 crashed process never strands an entry.
 
+A saved image starts each launched core with a fresh token. A claim naming
+this process's pid under another token belongs to an image a
+[relaunch](images.md) replaced, so it is dead. A launched core claims its
+agents' queued steers again as itself, dropping any that another running
+process holds or that are already consumed.
+
 ## Compaction
 
 `(nyaa:vault-compact path :max-age seconds)` rewrites the log without the
@@ -135,10 +141,3 @@ so concurrent discards of one id consume it once.
 
 `:path` is a mount option (default nil, meaning the same default an
 agent's `:vault t` uses), read once at mount time.
-
-## Limitations
-.
-
-- A saved image carries its claim token to every process launched from it,
-  and a relaunch keeps the claims made before it
-  ([#91](https://todo.sr.ht/~takeiteasy/nyaa/91)).
