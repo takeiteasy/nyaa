@@ -252,3 +252,38 @@
         (write-string "(broken" s))
       (is (equal '((:kind :x)) (nyaa::%read-log path)))
       (is (null (nth-value 1 (nyaa::%read-log path)))))))
+
+;;; --- cross-process log lock (~takeiteasy/nyaa#84) --------------------------
+
+(defmacro with-foreign-log-flock ((path) &body body)
+  "BODY run while another file description holds PATH's sidecar flock, as
+another process would."
+  `(let ((fd (sb-posix:open (format nil "~a.lock" (nyaa::%log-key ,path))
+                            (logior sb-posix:o-creat sb-posix:o-rdwr) #o644)))
+     (unwind-protect
+          (progn (nyaa::%flock-exclusive fd) ,@body)
+       (sb-posix:close fd))))
+
+(defun blocks-on-foreign-flock-p (path thunk)
+  "True when THUNK, run on a thread, waits for PATH's flock and then finishes
+once it is released."
+  (let (thread finished-early)
+    (with-foreign-log-flock (path)
+      (setf thread (bt:make-thread thunk))
+      (sleep 0.3)
+      (setf finished-early (not (bt:thread-alive-p thread))))
+    (bt:join-thread thread)
+    (not finished-early)))
+
+(test appending-waits-for-a-lock-held-by-another-process
+  (with-generations-directory (dir)
+    (let ((path (format nil "~aa.log" dir)))
+      (nyaa::%append-log path '(:kind :first))
+      (is-true (blocks-on-foreign-flock-p path (lambda () (nyaa::%append-log path '(:kind :x)))))
+      (is (equal '((:kind :first) (:kind :x)) (nyaa::%read-log path))))))
+
+(test the-lock-sidecar-sits-beside-the-log
+  (with-generations-directory (dir)
+    (let ((path (format nil "~aa.log" dir)))
+      (nyaa::%append-log path '(:kind :x))
+      (is-true (probe-file (format nil "~a.lock" (nyaa::%log-key path)))))))

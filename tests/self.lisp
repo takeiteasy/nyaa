@@ -38,7 +38,8 @@
                     (funcall body))
                (m:stop context))))
       (delete-package "NYAA-SELF-TEST")
-      (ignore-errors (delete-file log)))))
+      (ignore-errors (delete-file log))
+      (ignore-errors (delete-file (format nil "~a.lock" log))))))
 
 (defmacro with-self ((&optional (enable ''(:eval :define :reload))) &body body)
   `(call-with-self ,enable (lambda () ,@body)))

@@ -12,7 +12,8 @@
 (defmacro with-vault-path ((path) &body body)
   `(let ((,path (make-vault-log-path)))
      (unwind-protect (progn ,@body)
-       (ignore-errors (delete-file ,path)))))
+       (ignore-errors (delete-file ,path))
+       (ignore-errors (delete-file (format nil "~a.lock" ,path))))))
 
 (defun wait-for-vault-status (path status &optional (deadline 3.0))
   "PATH's entries once the first one reaches STATUS, or its current entries
@@ -320,3 +321,17 @@ after the message that triggered it has already returned."
       (mapc #'bt:join-thread threads)
       (is (eql 1 (count :consumed results)))
       (is (eql 2 (length (nyaa::%read-log path)))))))
+
+;;; --- cross-process lock (~takeiteasy/nyaa#84) ---------------------------------
+
+(test vault-compact-waits-for-a-lock-held-by-another-process
+  (with-vault-path (path)
+    (nyaa:vault-record path :assistant "a")
+    (is-true (blocks-on-foreign-flock-p path (lambda () (nyaa:vault-compact path :max-age 0))))))
+
+(test vault-consume-pending-waits-for-a-lock-held-by-another-process
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "a")))
+      (is-true (blocks-on-foreign-flock-p
+                path (lambda () (nyaa:vault-consume-pending path id :discarded))))
+      (is (eq :discarded (getf (first (nyaa:vault-entries path)) :status))))))

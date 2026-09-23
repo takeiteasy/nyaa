@@ -18,10 +18,6 @@
 ;;; derives its list from files on disk rather than an index. VAULT-COMPACT
 ;;; rewrites the log without consumed entries past a maximum age, on demand
 ;;; and automatically once the file grows past a size threshold.
-;;;
-;;; TODO: compaction is safe within one process only -- another process
-;;; appending between its read and its rename loses that entry. Upgrade
-;;; path: an flock on the log file. Tracked in ~takeiteasy/nyaa#84.
 
 (defvar *vault-max-age* (* 7 24 60 60)
   "Seconds a consumed entry is kept before VAULT-COMPACT drops it.")
@@ -94,7 +90,7 @@ explicitly."
 steer, checked and appended under PATH's lock. Returns :CONSUMED, :UNKNOWN
 for an id with no :STEER entry, or the status it already has."
   (let ((result
-          (bt:with-lock-held ((%log-lock path))
+          (with-log-lock (path)
             (let* ((log (%read-log path))
                    (steer (find-if (lambda (e) (and (eq (getf e :kind) :steer)
                                                     (equal (getf e :id) id)))
@@ -138,7 +134,7 @@ surfaced, since it names nothing a caller could act on."
 dropped and the steers kept, or nil, leaving the file untouched, when the
 log has a malformed entry -- rewriting it would lose everything past that
 entry."
-  (bt:with-lock-held ((%log-lock path))
+  (with-log-lock (path)
     (multiple-value-bind (log clean) (%read-log path)
       (when clean
         (let* ((cutoff (%now-iso8601 (- (get-universal-time) max-age)))

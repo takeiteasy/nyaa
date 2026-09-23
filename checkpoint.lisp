@@ -1,5 +1,7 @@
 (in-package #:nyaa)
 
+(eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-posix))
+
 ;;; Generations (~takeiteasy/nyaa#11). A checkpoint is one s-expression file
 ;;; recording every named service's own declared state, taken through the
 ;;; SNAPSHOT/RESTORE convention (tool.lisp) shared by every tool, the agent
@@ -94,6 +96,9 @@ worker applies to a submitted form."
 ;;;
 ;;; One lock per log file, keyed by its canonical name, so two specs naming
 ;;; the same file serialise and different files never queue behind each other.
+;;; WITH-LOG-LOCK adds an flock(2) on a sidecar "<log>.lock" file, so other
+;;; processes appending to or compacting the same log serialise too. The
+;;; sidecar is never renamed, unlike the log a compaction replaces.
 
 (defvar *log-locks* (make-hash-table :test 'equal)
   "Canonical log namestring -> its lock.")
@@ -114,8 +119,31 @@ worker applies to a submitted form."
       (or (gethash key *log-locks*)
           (setf (gethash key *log-locks*) (bt:make-lock :name key))))))
 
+(defconstant +lock-ex+ 2)
+
+(defun %flock-exclusive (fd)
+  (loop until (zerop (sb-alien:alien-funcall
+                      (sb-alien:extern-alien "flock" (function sb-alien:int sb-alien:int sb-alien:int))
+                      fd +lock-ex+))
+        unless (= (sb-alien:get-errno) sb-posix:eintr)
+          do (error "flock failed, errno ~d" (sb-alien:get-errno))))
+
+(defun call-with-log-lock (path thunk)
+  (bt:with-lock-held ((%log-lock path))
+    (let ((fd (sb-posix:open (concatenate 'string (%log-key path) ".lock")
+                             (logior sb-posix:o-creat sb-posix:o-rdwr) #o644)))
+      (unwind-protect
+           (progn (sb-posix:fcntl fd sb-posix:f-setfd 1) ; FD_CLOEXEC
+                  (%flock-exclusive fd)
+                  (funcall thunk))
+        (sb-posix:close fd)))))
+
+(defmacro with-log-lock ((path) &body body)
+  "Run BODY holding PATH's in-process lock and its cross-process flock."
+  `(call-with-log-lock ,path (lambda () ,@body)))
+
 (defun %append-log-locked (path entry)
-  "%APPEND-LOG's write, for a caller already holding PATH's %LOG-LOCK."
+  "%APPEND-LOG's write, for a caller already holding PATH's WITH-LOG-LOCK."
   (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
     (with-open-file (stream path :direction :output :if-exists :append
                                   :if-does-not-exist :create)
@@ -126,7 +154,7 @@ worker applies to a submitted form."
   "Append ENTRY, a plist, to PATH as one printed form per line. *PRINT-CASE*
 downcase and the keyword package, so the file reads back the same way
 regardless of the caller's own *PACKAGE*."
-  (bt:with-lock-held ((%log-lock path))
+  (with-log-lock (path)
     (%append-log-locked path entry)))
 
 (defun %read-log (path)
@@ -146,7 +174,7 @@ then, T when the whole file read cleanly."
 
 (defun %write-log (path entries)
   "ENTRIES written to PATH, one form per line, through a temporary file in
-the same directory and renamed in. The caller holds PATH's %LOG-LOCK."
+the same directory and renamed in. The caller holds PATH's WITH-LOG-LOCK."
   (uiop:with-temporary-file (:pathname tmp :directory (uiop:pathname-directory-pathname path)
                              :type "tmp" :keep t)
     (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))

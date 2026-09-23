@@ -57,7 +57,9 @@ bound to nil, the same guard a generation and
 same shared `%append-log`/`%read-log` helpers checkpoint.lisp declares -- so
 a vault entry can never run code merely by being read back. Appends to one
 log file serialise behind a lock of their own, keyed by the file's canonical
-name, so different logs never wait on each other.
+name, so different logs never wait on each other. The lock is also an
+`flock` on a sidecar `<log>.lock` file, so other nyaa processes appending to
+or compacting the same log serialise too.
 
 ## Compaction
 
@@ -106,9 +108,6 @@ agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
 
-- Compaction is safe within one process only; another process appending
-  during a compaction loses its entry
-  ([#84](https://todo.sr.ht/~takeiteasy/nyaa/84)).
 - `:restore` checks an entry is pending, then casts it; two concurrent
   calls on one id can both deliver it
   ([#87](https://todo.sr.ht/~takeiteasy/nyaa/87)).
