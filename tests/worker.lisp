@@ -46,3 +46,29 @@
       (nyaa::kill-live-workers)
       (is (null nyaa::*live-workers*))
       (is (notany #'nyaa::worker-alive-p workers)))))
+
+;;; --- elision (~takeiteasy/nyaa#26) --------------------------------------
+
+(test a-small-value-is-not-elided
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval w "(+ 1 2)" 5000)))
+      (is (equal "3" (getf (second result) :value)))
+      (is (null (getf (second result) :elided))))))
+
+(test a-value-past-print-length-is-elided
+  (with-worker (w)
+    (is (eq t (getf (second (nyaa::worker-eval w "(make-list 200)" 5000)) :elided)))))
+
+(test a-value-past-print-level-is-elided
+  (with-worker (w)
+    (is (eq t (getf (second (nyaa::worker-eval w "(list 1 (list 2 (list 3 (list 4 (list 5 (list 6 (list 7 (list 8 (list 9)))))))))" 5000)) :elided)))))
+
+(test a-value-past-the-character-cap-is-elided
+  (with-worker (w)
+    (is (eq t (getf (second (nyaa::worker-eval w "(make-string 5000 :initial-element #\\a)" 5000)) :elided)))))
+
+(test printed-text-containing-dots-is-not-elided
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval w "(princ \"...\")" 5000)))
+      (is (equal "..." (getf (second result) :out)))
+      (is (null (getf (second result) :elided))))))

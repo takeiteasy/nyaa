@@ -11,14 +11,21 @@
 ;;; bound to nil:
 ;;;
 ;;;   host   -> (:eval "<source>")
-;;;   worker -> (:ready)                     once, at boot
-;;;          -> (:ok "<value>" "<output>")
+;;;   worker -> (:ready)                          once, at boot
+;;;          -> (:ok "<value>" "<output>" <elided>)
 ;;;          -> (:error "<message>" "<output>")
 ;;;          -> (:reader-error "<message>")
 ;;;
-;;; The source travels as a string rather than a form: the envelope then
-;;; holds nothing but keywords and strings, so source that does not read
-;;; costs one reply instead of desynchronising the stream.
+;;; The source travels as a string rather than a form, and <elided> is
+;;; either the keyword :ELIDED or NIL: the envelope then holds nothing but
+;;; keywords and strings, so source that does not read costs one reply
+;;; instead of desynchronising the stream.
+;;;
+;;; <elided> is set when the value's printed form was cut by the worker's
+;;; character cap or its *PRINT-LENGTH*/*PRINT-LEVEL*. The value itself
+;;; stays reachable either way: the worker keeps a REPL history under *,
+;;; ** and ***, so a caller that gets :ELIDED can inspect the value with a
+;;; further :eval rather than lose the rest of it.
 ;;;
 ;;; A worker leads its own process group (see process.lisp), so a form that
 ;;; backgrounds a process is signalled along with the worker at kill time,
@@ -155,7 +162,8 @@ deadline kills the worker, which closes the pipe and ends the reader."
 
 (defun interpret-reply (reply)
   (case (and (consp reply) (first reply))
-    (:ok (ok :value (second reply) :out (or (third reply) "")))
+    (:ok (ok :value (second reply) :out (or (third reply) "")
+             :elided (eq (fourth reply) :elided)))
     (:error (fail (list :error (second reply))))
     (:reader-error (bad-request "~a" (second reply)))
     (t (if (eq reply :timeout) (fail :timeout) (fail :unavailable)))))
