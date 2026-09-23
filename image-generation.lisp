@@ -63,13 +63,27 @@ a core loads without actually reviving its services."
 #+sbcl
 (defun %save-and-die (suspension core-path)
   "Runs in the forked child, which SAVE-IMAGE has already confirmed is
-down to its own single thread. Never returns: SAVE-LISP-AND-DIE replaces
-the process on success, and this EXITs it on failure so the child never
-falls through to its copy of SAVE-IMAGE's own cleanup."
+down to its own single thread. Never returns: SAVE-LISP-AND-DIE exits the
+process on success (SAVE-IMAGE reads that exit status, not this return,
+since the child's own further execution is moot either way), and this
+EXITs it with :code 1 on failure, so a save that raised partway through
+-- leaving a truncated core -- is never mistaken for one that finished."
   (ignore-errors
    (sb-ext:save-lisp-and-die (namestring core-path)
                              :toplevel (%make-image-toplevel suspension)))
   (sb-ext:exit :code 1 :abort t))
+
+#+sbcl
+(defun %require-clean-save (pid core-path)
+  "PID's WAITPID status, checked against SAVE-LISP-AND-DIE's own contract
+(a clean exit :code 0): anything else -- a nonzero code, a signal -- means
+CORE-PATH is truncated or absent, not a generation to hand back as if it
+were whole. Deletes it and signals rather than returning a broken path."
+  (multiple-value-bind (reported-pid status) (sb-posix:waitpid pid 0)
+    (declare (ignore reported-pid))
+    (unless (and (sb-posix:wifexited status) (zerop (sb-posix:wexitstatus status)))
+      (ignore-errors (delete-file core-path))
+      (error "save-lisp-and-die did not finish cleanly (status ~a); ~a was not written" status core-path))))
 
 (defun save-image (context &key (dir *generations-directory*) label keep)
   "Fork and SAVE-LISP-AND-DIE a full image of CONTEXT's tree, alongside a
@@ -89,12 +103,12 @@ before this returns, whether or not the fork succeeded."
     (%require-no-credentials context)
     (let* ((generation-path (checkpoint context :dir dir :label label :keep keep))
            (core-path (%image-path generation-path))
-           (suspension (m:suspend context)))
-      (let ((pid (sb-posix:fork)))
-        (if (zerop pid)
-            (%save-and-die suspension core-path)
-            (unwind-protect (sb-posix:waitpid pid 0)
-              (m:resume suspension))))
+           (suspension (m:suspend context))
+           (pid (sb-posix:fork)))
+      (if (zerop pid)
+          (%save-and-die suspension core-path)
+          (unwind-protect (%require-clean-save pid core-path)
+            (m:resume suspension)))
       (when keep (%prune-generations (uiop:pathname-directory-pathname generation-path) keep))
       (setf *last-image* (%canonical-path core-path) *self-dirty* nil)
       (values *last-image* (%canonical-path generation-path)))))
