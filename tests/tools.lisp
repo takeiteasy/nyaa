@@ -278,6 +278,21 @@ err
     (is (equal "still-here
 " (result-value (tool :tool-shell :cmd "echo still-here") :out)))))
 
+(test shell-registers-a-command-only-while-it-runs
+  (nyaa::run-command "true" 5000)
+  (is (null nyaa::*live-commands*))
+  (nyaa::run-command "sleep 30" 200)
+  (is (null nyaa::*live-commands*)))
+
+(test kill-live-commands-kills-a-running-command
+  (let* ((result nil)
+         (thread (bt:make-thread (lambda () (setf result (nyaa::run-command "sleep 30" 30000))))))
+    (is-true (eventually (lambda () nyaa::*live-commands*)))
+    (nyaa::kill-live-commands)
+    (is-true (eventually (lambda () (not (bt:thread-alive-p thread)))))
+    (is (not (eql 0 (getf (second result) :exit))))
+    (is (null nyaa::*live-commands*))))
+
 (test shell-rejects-a-missing-command
   (with-tools
     (is (equal :bad-request

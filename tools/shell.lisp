@@ -15,12 +15,30 @@
   (:invoke (cmd timeout)
     (run-command cmd timeout)))
 
+(defvar *live-commands* '()
+  "Processes of commands still running, so RELAUNCH can kill them before it
+replaces the process.")
+
+(defvar *live-commands-lock* (bt:make-lock :name "nyaa-live-commands"))
+
+(defun kill-live-commands ()
+  "Kill every running command's process group. Each RUN-COMMAND unregisters
+its own entry as it unwinds."
+  (dolist (process (bt:with-lock-held (*live-commands-lock*) (copy-list *live-commands*)))
+    (terminate-process-group process)))
+
 (defun run-command (cmd timeout-ms)
-  (let* ((process (launch-in-process-group (list "/bin/sh" "-c" cmd)
-                                           :output :stream
-                                           :error-output :output))
-         (done (bt:make-semaphore))
-         (output nil))
+  (let ((process (launch-in-process-group (list "/bin/sh" "-c" cmd)
+                                          :output :stream
+                                          :error-output :output)))
+    (bt:with-lock-held (*live-commands-lock*) (push process *live-commands*))
+    (unwind-protect (await-command process timeout-ms)
+      (bt:with-lock-held (*live-commands-lock*)
+        (setf *live-commands* (remove process *live-commands*))))))
+
+(defun await-command (process timeout-ms)
+  (let ((done (bt:make-semaphore))
+        (output nil))
     ;; Drain concurrently: a command that outruns the pipe buffer would
     ;; otherwise block on write while we block waiting for it to exit.
     (bt:make-thread

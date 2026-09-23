@@ -38,7 +38,8 @@ fork succeeded, failed, or never ran because of a stray thread.
 ## Relaunching
 
 `(relaunch core)` probes `core` in a subprocess and, if it loads cleanly,
-kills the process's live `tool-repl` workers and `execv`s into it. Never
+kills the process's live `tool-repl` workers and running `tool-shell`
+commands, then `execv`s into it. Never
 returns on success.
 
 The saved core's own toplevel, on load:
@@ -92,7 +93,5 @@ model-reachable tool op.
 - A `tool-repl` session does not survive a relaunch: its first call reports
   the session lost and the next starts empty. Sockets never cross a save --
   each is opened and closed within one message.
-- `relaunch` kills workers only; a `tool-shell` command still running is left
-  behind ([#82](https://todo.sr.ht/~takeiteasy/nyaa/82)).
 - A core is tens of megabytes; taking one is not free, and `bin/nyaa`'s
   probe launches a whole second SBCL process.

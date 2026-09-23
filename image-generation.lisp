@@ -222,14 +222,15 @@ signals an error on failure, execv's usual contract."
 
 (defun relaunch (core)
   "Replace the running SBCL process with CORE (EXECV), after confirming it
-loads (%PROBE-CORE), killing this process's workers first so none outlives
-it as an orphan. A generation's core is code-exact -- unlike
+loads (%PROBE-CORE), killing this process's workers and running shell
+commands first so none outlives it as an orphan. A generation's core is code-exact -- unlike
 declared-state ROLLBACK, this is the manual way tool-self's :DEFINE
 writes can actually be undone (~takeiteasy/nyaa#63) until an operator
 does it. Never returns on success."
   (unless (probe-file core) (error "no such core: ~a" core))
   (unless (%probe-core core) (error "~a did not load cleanly; refusing to relaunch into it" core))
   (kill-live-workers)
+  (kill-live-commands)
   (finish-output) (finish-output *error-output*)
   (let ((runtime (namestring sb-ext:*runtime-pathname*)))
     (%execv runtime (list runtime "--core" (namestring core)))))
