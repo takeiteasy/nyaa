@@ -117,12 +117,11 @@
             :form "(defclass thing () ((x :initform 1 :accessor thing-x) (y :initform 2 :accessor thing-y)))")
       (is (= 2 (funcall (find-symbol "THING-Y" "NYAA-SELF-TEST") instance))))))
 
-;;; --- the CLOS mutation latch (~takeiteasy/nyaa#79) --------------------
+;;; --- the CLOS mutation latch (~takeiteasy/nyaa#79, #81) --------------------
 ;;;
-;;; #64's whole-form deferral (~takeiteasy/nyaa#68's own ceiling) is gone:
-;;; RUN-IN-HOST now only abandons cooperatively once SBCL's own loaders say
-;;; a form has reached its actual CLOS mutation, so a wedged :eql
-;;; specializer or a slow compile ahead of that point is still killed.
+;;; RUN-IN-HOST defers a lapsed deadline only while one of SBCL's own
+;;; loaders is mid-mutation, so a wedged :eql specializer or slow compile
+;;; is killed whether or not the form mutated something earlier.
 
 (defun no-nyaa-self-eval-thread-p ()
   "T once every RUN-IN-HOST worker has actually exited -- polled rather
@@ -168,22 +167,55 @@ interrupt still has to land and unwind."
     (sleep 1.2)
     (is (not (boundp (find-symbol "*SELF-TEST-WEDGED*" "NYAA-SELF-TEST"))))))
 
-(test self-eval-a-clos-mutation-past-its-timeout-still-lands
-  (with-self ()
-    (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
-                        :form "(progn (defclass self-test-latched-a () ()) (sleep 0.3) (defclass self-test-latched-b () ()))")))
-      ;; the timeout lands after the first DEFCLASS has already reached
-      ;; SBCL's own loader, latching -- so this waits for the whole form
-      ;; rather than tearing it mid-way
-      (is (equal :timeout (nyaa:tool-error result))))
-    (sleep 0.5)
-    (is-true (find-class (find-symbol "SELF-TEST-LATCHED-A" "NYAA-SELF-TEST") nil))
-    (is-true (find-class (find-symbol "SELF-TEST-LATCHED-B" "NYAA-SELF-TEST") nil))))
-
 (defun late-outcome-entry ()
   (find :late-outcome (getf (second (self :log)) :entries) :key (lambda (e) (getf e :kind))))
 
-(test self-write-landing-after-its-timeout-logs-a-late-outcome
+(defun class-named (name)
+  (find-class (find-symbol name "NYAA-SELF-TEST") nil))
+
+(test self-eval-is-killed-between-clos-mutations
+  (with-self ()
+    (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                        :form "(progn (defclass self-test-latched-a () ()) (sleep 0.3) (defclass self-test-latched-b () ()))")))
+      (is (equal :timeout (nyaa:tool-error result))))
+    ;; the deadline lands after the first DEFCLASS finished: it stays, the
+    ;; rest of the form is killed, and the log says so
+    (is-true (no-nyaa-self-eval-thread-p))
+    (is-true (class-named "SELF-TEST-LATCHED-A"))
+    (is-false (class-named "SELF-TEST-LATCHED-B"))
+    (is-true (eventually #'late-outcome-entry))
+    (is (equal '(:error :abandoned) (getf (late-outcome-entry) :outcome)))))
+
+(test self-define-a-wedge-after-a-first-mutation-is-killed-not-leaked
+  (with-self ()
+    (self :define :package "NYAA-SELF-TEST" :form "(defgeneric self-test-second-wedge (x))")
+    (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                        :form "(progn (defclass self-test-first-mutation () ())
+                                      (defmethod self-test-second-wedge ((x (eql (progn (sleep 5) 1)))) :done))")))
+      (is (equal :timeout (nyaa:tool-error result))))
+    (is-true (no-nyaa-self-eval-thread-p))
+    (is-true (class-named "SELF-TEST-FIRST-MUTATION"))
+    (signals error (funcall (find-symbol "SELF-TEST-SECOND-WEDGE" "NYAA-SELF-TEST") 1))))
+
+(test self-eval-a-wedge-in-a-defgeneric-method-option-is-killed
+  (with-self ()
+    (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                :form "(defgeneric self-test-option-wedge (x) (:method ((x (eql (progn (sleep 5) 1)))) :done))")
+    (is-true (no-nyaa-self-eval-thread-p))))
+
+(test self-eval-a-struct-is-never-torn-by-its-deadline
+  (with-self ()
+    (self :eval :timeout 20 :package "NYAA-SELF-TEST"
+                :form "(defstruct (self-test-struct-a (:conc-name nil) (:constructor make-self-test-struct-a)) self-test-sa self-test-sb self-test-sh)")
+    (is-true (no-nyaa-self-eval-thread-p))
+    ;; whether the deadline landed before, or waited for the whole span,
+    ;; the struct is either absent or fully defined
+    (let ((class (class-named "SELF-TEST-STRUCT-A")))
+      (when class
+        (is-true (fboundp (find-symbol "MAKE-SELF-TEST-STRUCT-A" "NYAA-SELF-TEST")))
+        (is-true (fboundp (find-symbol "SELF-TEST-SH" "NYAA-SELF-TEST")))))))
+
+(test self-write-abandoned-after-its-timeout-logs-a-late-outcome
   (with-self ()
     (self :eval :timeout 50 :package "NYAA-SELF-TEST"
                 :form "(progn (defclass self-test-late-a () ()) (sleep 0.3))")
@@ -191,7 +223,7 @@ interrupt still has to land and unwind."
     (let* ((entries (getf (second (self :log)) :entries))
            (late (late-outcome-entry))
            (intent (find :intent entries :key (lambda (e) (getf e :kind)) :from-end t)))
-      (is (eq :ok (getf late :outcome)))
+      (is (equal '(:error :abandoned) (getf late :outcome)))
       (is (equal (getf intent :checkpoint) (getf late :checkpoint)))
       (is (equal '(:intent :outcome :late-outcome)
                  (mapcar (lambda (e) (getf e :kind)) (last entries 3)))))))

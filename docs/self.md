@@ -63,15 +63,14 @@ so a wedged form costs a timeout, not a wedged service. A value is printed
 under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 8, a 4000-character cap.
 
-A lapsed `:timeout` interrupts pre-emptively until evaluation reaches
-SBCL's own class, method, generic-function or struct loader -- past an
-`:eql` specializer's own form and a method's compile, the parts a wedged
-or slow form could still be caught in. From there the interrupt does
-nothing: the form finishes, so the deadline never tears a mutation. The
-caller still gets `:timeout`; a write that lands afterwards is logged as a
-`:late-outcome` entry. A form that wedges before that point -- a wedged
-`:eql` specializer, a slow compile -- is killed, not leaked
-([#79](https://todo.sr.ht/~takeiteasy/nyaa/79)).
+A lapsed `:timeout` interrupts pre-emptively, except while SBCL is
+mid-way through one class, method, generic-function or struct definition:
+the interrupt waits for that definition to finish, then lands, so a
+deadline never tears a mutation. A wedged `:eql` specializer or slow compile
+is killed, not leaked, whether or not the form mutated something earlier.
+The caller gets `:timeout`; a form killed after landing one or more
+mutations is left partially applied and logged as a `:late-outcome` entry
+with `:outcome (:error :abandoned)`.
 
 ## Checkpoint and log
 
@@ -86,8 +85,10 @@ points at what to roll back to -- and an outcome entry after:
 (:at "2026-09-23T10:00:00Z" :kind :outcome :op :eval :outcome :ok)
 ```
 
-A write that finishes after its caller received `:timeout` adds a third
-entry, `(:kind :late-outcome ... :checkpoint "..." :outcome :ok)`, whose
+A write that finishes, or is killed after mutating, after its caller
+received `:timeout` adds a third entry,
+`(:kind :late-outcome ... :checkpoint "..." :outcome :ok)` or
+`:outcome (:error :abandoned)`, whose
 `:checkpoint` matches its intent entry's. The log always reads intent,
 `:timeout` outcome, then `:late-outcome`.
 
@@ -151,10 +152,10 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   way back; `self-define`'s image generation is the code-exact one, but
   only tracks tool-self's own writes -- code loaded any other way is not
   reflected in `:require-image`'s staleness check.
-- A form that wedges *after* reaching its own CLOS mutation -- a second,
-  later `defmethod` in the same `:eval` whose `:eql` specializer hangs --
-  still leaks its thread, the same way the whole-form deferral did before
-  it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)).
+- User code a definition itself calls -- a MOP method, a macro in a
+  `defstruct` constructor -- runs with the interrupt deferred, so a wedge
+  there still leaks its thread
+  ([#101](https://todo.sr.ht/~takeiteasy/nyaa/101)).
 - The checkpoint taken before a write waits up to `checkpoint`'s own 30
   second `:timeout` for a busy service, independent of `:timeout`, and
   does not report which services it caught mid-run.

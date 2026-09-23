@@ -197,78 +197,99 @@ immediately before the write."
           (bad-request "no child named ~(~a~)" name))
       (error (e) (fail (list :error (princ-to-string e)))))))
 
-;;; --- CLOS mutation latch (~takeiteasy/nyaa#79) -------------------------
+;;; --- CLOS mutation latch (~takeiteasy/nyaa#79, #81) --------------------
 ;;;
-;;; SBCL's own PCL/DEFSTRUCT loaders are hooked to say exactly when a
-;;; form's evaluation reaches its actual CLOS mutation, so :DEFINE only
-;;; lets a lapsed deadline wait for the form past that point instead of
-;;; across the whole of it (#64, #68).
+;;; SBCL's own PCL/DEFSTRUCT loaders are hooked to say exactly when a form's
+;;; evaluation is inside a class, method, generic-function or struct
+;;; mutation, so :DEFINE only defers a lapsed deadline for the duration of
+;;; one mutation instead of across the whole form.
 ;;;
 ;;; *CLOS-MUTATION-LATCH*, bound fresh by RUN-IN-HOST for each evaluation,
-;;; starts nil: an interrupt still lands pre-emptively, so a wedged form
-;;; before its own CLOS mutation is killed, not leaked. The latching hooks
-;;; below set it once evaluation reaches one of SBCL's own class, method,
-;;; generic-function or struct loaders -- installed with SB-INT:ENCAPSULATE,
-;;; the same primitive TRACE and PROFILE use, so a rename here breaks
-;;; loudly rather than silently stops latching. COMPILE-OR-LOAD-DEFGENERIC
-;;; (a DEFMETHOD's own implicit ENSURE-GENERIC-FUNCTION, ahead of its :eql
-;;; specializers and method compile) doesn't latch -- it defers interrupts
-;;; for the duration of the call instead, so it can only ever run to
-;;; completion or not start, no cooperative check needed. That deferral is
-;;; itself gated on *CLOS-MUTATION-LATCH* being bound, so a DEFMETHOD
-;;; anywhere else in the image (the REPL, ASDF, hmr) is unaffected.
+;;; counts the mutations in flight. Outside one the interrupt lands
+;;; pre-emptively, so a wedged :eql specializer or slow compile is killed,
+;;; not leaked; inside one it only records itself as pending, and the
+;;; mutation's own exit throws once the count returns to zero. A form killed
+;;; after landing a mutation is partially applied and reports :ABANDONED.
 ;;;
-;;; TODO: a form that wedges *after* reaching its own mutation -- a second,
-;;; later DEFMETHOD in the same :eval whose :eql specializer hangs -- still
-;;; leaks its thread, the same way the whole-form deferral did. Tracked in
-;;; ~takeiteasy/nyaa#81.
+;;; The hooks are installed with SB-INT:ENCAPSULATE, the primitive TRACE and
+;;; PROFILE use, so a rename breaks loudly. They are gated on the latch
+;;; being bound, so a DEFMETHOD elsewhere in the image is unaffected.
+;;;
+;;; TODO: user code a loader itself calls (a MOP method, a constructor
+;;; macro in a defstruct) runs with the interrupt deferred, so a wedge there
+;;; still leaks its thread. Tracked in ~takeiteasy/nyaa#101.
+
+(defstruct clos-latch
+  (depth 0 :type fixnum)
+  (pending nil)
+  (mutated nil))
 
 (defvar *clos-mutation-latch* nil
-  "Nil outside RUN-IN-HOST. Bound there to a fresh cons for the form being
-evaluated; the hooks below set its CAR once that form's own evaluation
-reaches SBCL's CLOS or DEFSTRUCT machinery.")
+  "Nil outside RUN-IN-HOST; bound there to a CLOS-LATCH for the form being
+evaluated.")
 
-(a:define-constant +clos-latching-hooks+
+(a:define-constant +clos-held-hooks+
     '(sb-pcl::load-defclass sb-pcl::load-defmethod sb-pcl::load-defgeneric
-      sb-kernel::%defstruct)
+      sb-pcl::set-initial-methods sb-pcl::compile-or-load-defgeneric)
   :test #'equal
-  :documentation "SBCL internals that apply a class, method, generic
-function or struct definition once its own form has already evaluated
-every part a user's code could still wedge on (an :eql specializer, a
-slow compile) -- the point RUN-IN-HOST's interrupt switches from killing
-the thread to waiting for it, since nothing past here can run long.")
+  :documentation "SBCL internals each of which is one whole mutation:
+the interrupt is deferred for exactly the call.")
 
-(defun %latch-clos-mutation (next &rest args)
-  (when *clos-mutation-latch* (setf (car *clos-mutation-latch*) t))
+(a:define-constant +clos-span-hooks+
+    '((sb-kernel::%defstruct . :begin) (sb-kernel::%target-defstruct . :end))
+  :test #'equal
+  :documentation "A defstruct is several steps between these two; the
+interrupt is deferred across the span so a struct is never torn.")
+
+(defun %finish-clos-mutation (latch)
+  (setf (clos-latch-mutated latch) t)
+  (when (and (zerop (clos-latch-depth latch)) (clos-latch-pending latch))
+    (throw 'self-abandoned (fail :abandoned))))
+
+(defun %hold-clos-mutation (next &rest args)
+  (let ((latch *clos-mutation-latch*))
+    (if (null latch)
+        (apply next args)
+        (progn
+          (incf (clos-latch-depth latch))
+          (multiple-value-prog1 (unwind-protect (apply next args)
+                                  (decf (clos-latch-depth latch)))
+            (%finish-clos-mutation latch))))))
+
+(defun %begin-clos-mutation (next &rest args)
+  (when *clos-mutation-latch* (incf (clos-latch-depth *clos-mutation-latch*)))
   (apply next args))
 
-(defun %atomic-clos-mutation (next &rest args)
-  "Only defers interrupts inside a RUN-IN-HOST evaluation -- *CLOS-MUTATION-
-LATCH* bound means one is in progress. Elsewhere (the REPL, ASDF, hmr) this
-must stay a no-op: deferring interrupts for every DEFMETHOD in the image,
-on any thread, is a far bigger change than RUN-IN-HOST's own contract asks
-for."
-  (if *clos-mutation-latch*
-      (sb-sys:without-interrupts (apply next args))
-      (apply next args)))
+(defun %end-clos-mutation (next &rest args)
+  (let ((latch *clos-mutation-latch*))
+    (if (null latch)
+        (apply next args)
+        (multiple-value-prog1 (apply next args)
+          (decf (clos-latch-depth latch))
+          (%finish-clos-mutation latch)))))
+
+(defun %clos-hook-alist ()
+  (append (mapcar (lambda (name) (cons name #'%hold-clos-mutation)) +clos-held-hooks+)
+          (mapcar (lambda (entry)
+                    (cons (car entry) (if (eq :begin (cdr entry))
+                                          #'%begin-clos-mutation
+                                          #'%end-clos-mutation)))
+                  +clos-span-hooks+)))
 
 (defun %install-clos-mutation-hooks ()
-  "Idempotent: UNENCAPSULATEs first, so reloading this file (or SBCL
-recompiling it in a running image) never stacks a second copy of the same
-hook."
-  (dolist (name +clos-latching-hooks+)
-    (sb-int:unencapsulate name 'nyaa-self)
-    (sb-int:encapsulate name 'nyaa-self #'%latch-clos-mutation))
-  (sb-int:unencapsulate 'sb-pcl::compile-or-load-defgeneric 'nyaa-self)
-  (sb-int:encapsulate 'sb-pcl::compile-or-load-defgeneric 'nyaa-self #'%atomic-clos-mutation))
+  "Idempotent: UNENCAPSULATEs first, so reloading this file never stacks a
+second copy of the same hook."
+  (loop for (name . hook) in (%clos-hook-alist)
+        do (sb-int:unencapsulate name 'nyaa-self)
+           (sb-int:encapsulate name 'nyaa-self hook)))
 
 (defun clos-mutation-hooks-installed-p ()
   "T if every hook %INSTALL-CLOS-MUTATION-HOOKS installs is still in
 place -- checked by a test, so a future SBCL rename of one of these
 internals fails loudly instead of silently reverting :DEFINE to
 pre-emptive-only."
-  (and (every (lambda (name) (sb-int:encapsulated-p name 'nyaa-self)) +clos-latching-hooks+)
-       (sb-int:encapsulated-p 'sb-pcl::compile-or-load-defgeneric 'nyaa-self)))
+  (loop for (name) in (%clos-hook-alist)
+        always (sb-int:encapsulated-p name 'nyaa-self)))
 
 (eval-when (:load-toplevel :execute) (%install-clos-mutation-hooks))
 
@@ -279,11 +300,9 @@ pre-emptive-only."
 ;;; interrupt so it only ever throws to a catch tag that is actually there.
 ;;;
 ;;; A deadline's interrupt lands pre-emptively (THROW straight to
-;;; SELF-ABANDONED) until *CLOS-MUTATION-LATCH* is set. Once it is, the
-;;; interrupt does nothing: the form is left to finish, so a deadline
-;;; landing inside SBCL's own CLOS mutation never tears it. The caller has
-;;; already been told :TIMEOUT by then, so the worker reports the form's
-;;; real result through ON-LATE when it completes.
+;;; SELF-ABANDONED) except inside a CLOS mutation, where it waits for that
+;;; mutation to finish. The caller has already been told :TIMEOUT by then,
+;;; so a form abandoned after mutating reports :ABANDONED through ON-LATE.
 ;;;
 ;;; STATE is the hand-off between the two threads: whichever of the worker
 ;;; (:DONE) and the caller (:TIMED-OUT) claims it first by
@@ -291,14 +310,13 @@ pre-emptive-only."
 
 (defun run-in-host (form timeout-ms &key on-late)
   "FORM evaluated on its own thread, interrupted at TIMEOUT-MS. Once
-evaluation reaches SBCL's own CLOS/DEFSTRUCT machinery (see above) the
-interrupt no longer kills it: the form finishes, and ON-LATE, if given, is
-called with its result on that thread after the caller has already
-received :TIMEOUT."
+the interrupt lands between CLOS mutations (see above), never inside one.
+A form killed after mutating reports (fail :abandoned) to ON-LATE, if
+given, after the caller has already received :TIMEOUT."
   (let* ((result nil)
          (in-region (list nil))
          (state (list :running))
-         (latch (list nil))
+         (latch (make-clos-latch))
          (done (bt:make-semaphore))
          (registry m:*registry*)
          (worker (bt:make-thread
@@ -327,10 +345,16 @@ received :TIMEOUT."
    (when (bt:thread-alive-p worker)
      (bt:interrupt-thread
       worker (lambda ()
-               (when (and (car in-region) (not (car latch)))
-                 (throw 'self-abandoned nil)))))))
+               (when (car in-region)
+                 (if (plusp (clos-latch-depth latch))
+                     (setf (clos-latch-pending latch) t)
+                     (throw 'self-abandoned
+                       (and (clos-latch-mutated latch) (fail :abandoned))))))))))
 
 (defun eval-in-host (form)
+  ;; TODO: *package* is not bound to the request's :package here, so symbols
+  ;; interned at macroexpansion (a defstruct's accessors) land in the worker's
+  ;; default package. Tracked in ~takeiteasy/nyaa#102.
   (let ((out (make-string-output-stream)))
     (handler-case
         (let ((value (let ((*standard-output* out) (*error-output* out))
