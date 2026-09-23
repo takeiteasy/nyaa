@@ -1,0 +1,14 @@
+#!/bin/sh
+# Build the recovery image bin/nyaa falls back to when a generation's core
+# won't load. Usage: bin/nyaa-install
+set -e
+
+NYAA_HOME="${NYAA_HOME:-$HOME/.nyaa}"
+QUICKLISP_SETUP="${QUICKLISP_SETUP:-$HOME/quicklisp/setup.lisp}"
+RECOVERY="$NYAA_HOME/images/recovery.core"
+
+mkdir -p "$(dirname "$RECOVERY")"
+
+exec sbcl --non-interactive --no-userinit --load "$QUICKLISP_SETUP" \
+    --eval "(ql:quickload :nyaa :silent t)" \
+    --eval "(nyaa:save-recovery-image \"$RECOVERY\")"

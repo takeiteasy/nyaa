@@ -1,0 +1,36 @@
+#!/bin/sh
+# Launch nyaa from the newest image generation, or a given core, falling
+# back to the recovery image (bin/nyaa-install) if it won't load.
+# Usage: bin/nyaa [core-file] [-- sbcl-args...]
+set -e
+
+NYAA_HOME="${NYAA_HOME:-$HOME/.nyaa}"
+RECOVERY="$NYAA_HOME/images/recovery.core"
+
+if [ "$1" != "" ] && [ "$1" != "--" ]; then
+    CORE="$1"
+    shift
+else
+    CORE=$(ls -t "$NYAA_HOME"/generations/*.core 2>/dev/null | head -n 1 || true)
+fi
+
+if [ "$1" = "--" ]; then
+    shift
+fi
+
+if [ -z "$CORE" ]; then
+    CORE="$RECOVERY"
+elif [ ! -f "$CORE" ]; then
+    echo "bin/nyaa: no such core: $CORE" >&2
+    exit 1
+elif ! NYAA_IMAGE_PROBE=1 sbcl --core "$CORE" --noinform --non-interactive >/dev/null 2>&1; then
+    echo "bin/nyaa: $CORE did not load cleanly, falling back to the recovery image" >&2
+    CORE="$RECOVERY"
+fi
+
+if [ ! -f "$CORE" ]; then
+    echo "bin/nyaa: no core to run -- try bin/nyaa-install first" >&2
+    exit 1
+fi
+
+exec sbcl --core "$CORE" "$@"

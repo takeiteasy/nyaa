@@ -23,6 +23,8 @@
    ;; checkpoints
    #:snapshot #:restore #:checkpoint #:rollback #:generations
    #:*generations-directory*
+   ;; image generations
+   #:save-image #:relaunch #:save-recovery-image #:image-generations-unsupported
    ;; vault
    #:vault-record #:vault-consume #:vault-entries #:*vault-log*
    ;; parameter schemas

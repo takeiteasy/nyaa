@@ -65,6 +65,17 @@ An [agent](agent.md) runs a turn cycle over a model and its tools:
 
 Runs on SBCL, ECL and CCL.
 
+## Launching
+
+On SBCL, `bin/nyaa-install` builds a recovery image once, and `bin/nyaa`
+launches nyaa from the newest saved [image generation](images.md)
+afterwards, falling back to recovery if it won't load:
+
+```sh
+bin/nyaa-install
+bin/nyaa
+```
+
 ## Tests
 
 The suite uses FiveAM and runs through ASDF:

@@ -12,8 +12,11 @@
 ;;; way in tools/image.lisp).
 ;;;
 ;;; SBCL image generations -- SAVE-LISP-AND-DIE, relaunch-and-restore, an
-;;; install-time recovery image -- are a follow-up, not this file. ECL gets
-;;; only what is here, exactly as the ticket asks.
+;;; install-time recovery image (~takeiteasy/nyaa#48) -- live in
+;;; image-generation.lisp instead, layered on this file's declared-state
+;;; generation and M:SUSPEND/M:RESUME (meow#64): SAVE-IMAGE takes one of
+;;; these first, then writes a sibling .core alongside it. ECL and CCL get
+;;; only what is here.
 ;;;
 ;;; The agent's own SNAPSHOT/RESTORE methods live at the end of agent.lisp,
 ;;; alongside the slots they read and write.
@@ -160,10 +163,17 @@ generations afterwards."
     (when keep (%prune-generations directory keep))
     (%canonical-path path)))
 
+(defun %generation-image (path)
+  "PATH's sibling .core (~takeiteasy/nyaa#48's SAVE-IMAGE writes one
+alongside its generation, same basename), or nil."
+  (let ((core (make-pathname :type "core" :defaults path)))
+    (and (probe-file core) (namestring (%canonical-path core)))))
+
 (defun generations (&key (dir *generations-directory*))
   "Every generation under DIR, newest first, as (:path :created :label
-:services), :services naming the services it covers rather than their
-state."
+:services :image), :services naming the services it covers rather than
+their state. :IMAGE is the generation's sibling .core, or nil if none was
+taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
   (sort (loop for path in (ignore-errors
                             (uiop:directory-files (uiop:ensure-directory-pathname dir)
                                                   "*.generation"))
@@ -173,7 +183,8 @@ state."
                               :created (getf generation :created)
                               :label (getf generation :label)
                               :services (mapcar (lambda (entry) (getf entry :name))
-                                                (getf generation :services))))
+                                                (getf generation :services))
+                              :image (%generation-image path)))
         ;; The filename is timestamp-then-random, so sorting by it (rather
         ;; than :CREATED, which two generations in the same second share)
         ;; is both newest-first and a total order -- PRUNE-GENERATIONS
@@ -183,7 +194,9 @@ state."
 
 (defun %prune-generations (dir keep)
   (dolist (stale (nthcdr keep (generations :dir dir)))
-    (ignore-errors (delete-file (getf stale :path)))))
+    (ignore-errors (delete-file (getf stale :path)))
+    (a:when-let ((image (getf stale :image)))
+      (ignore-errors (delete-file image)))))
 
 (defun rollback (context path)
   "Restore the generation at PATH onto CONTEXT's named services now.

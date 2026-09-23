@@ -20,6 +20,7 @@ Runs on SBCL, ECL and CCL.
 - [The agent loop](docs/agent.md)
 - [Parameter schemas](docs/schema.md)
 - [Checkpoints and rollback](docs/checkpoints.md)
+- [Image generations](docs/images.md)
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)
 

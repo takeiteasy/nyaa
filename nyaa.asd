@@ -56,7 +56,11 @@
                ;; After providers: the loop reaches a model by name through
                ;; COMPLETE, and defaults its tool allow-list from the
                ;; discovered tools, so both must already be defined.
-               (:file "agent"))
+               (:file "agent")
+               ;; Last: SAVE-IMAGE needs CHECKPOINT (checkpoint.lisp),
+               ;; M:SUSPEND/M:RESUME, and PROVIDER-API-KEY (provider.lisp)
+               ;; to refuse a credentialed mount.
+               (:file "image-generation"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/tests"
@@ -78,6 +82,7 @@
                (:file "plan")
                (:file "introspect")
                (:file "checkpoint")
+               (:file "image-generation")
                (:file "self")
                (:file "vault"))
   :perform (test-op (o c)
