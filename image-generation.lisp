@@ -79,9 +79,9 @@ thread, the only one still standing once M:SUSPEND has parked every
 other. Refuses -- before suspending anything -- if a mounted PROVIDER
 holds an :API-KEY.
 
-Returns the core's pathname. The calling process is unaffected: every
-service is suspended for the fork and resumed again before this returns,
-whether or not the fork succeeded."
+Returns (values core-path generation-path). The calling process is
+unaffected: every service is suspended for the fork and resumed again
+before this returns, whether or not the fork succeeded."
   #-sbcl (image-generations-unsupported)
   #+sbcl
   (progn
@@ -96,7 +96,48 @@ whether or not the fork succeeded."
             (unwind-protect (sb-posix:waitpid pid 0)
               (m:resume suspension))))
       (when keep (%prune-generations (uiop:pathname-directory-pathname generation-path) keep))
-      (%canonical-path core-path))))
+      (setf *last-image* (%canonical-path core-path) *self-dirty* nil)
+      (values *last-image* (%canonical-path generation-path)))))
+
+;;; --- SELF-DEFINE (~takeiteasy/nyaa#63) ---------------------------------
+;;;
+;;; tool-self's :define, even checkpointed, can only be undone back to
+;;; declared state -- never the redefinition itself. SELF-DEFINE closes
+;;; that gap for an operator by taking an image generation immediately
+;;; before the write, so RELAUNCHing that core undoes the code too. It is
+;;; a REPL entry, not a tool op: an agent's turn can't reach it (SAVE-IMAGE
+;;; needs the main thread), and the operator interrupts it the ordinary
+;;; way -- there is no worker thread or :TIMEOUT here to abandon.
+
+(defun self-define (context form &key (package "CL-USER") label (log (%default-self-log)))
+  "Redefine FORM (read in PACKAGE), with an image generation taken
+immediately before it as the rollback path. Returns the definition's
+result and the image's path. Signals as SAVE-IMAGE does for its own
+refusals (off the main thread, a credentialed provider); a malformed or
+non-definition FORM is a plain error, same shape PARSE-DEFINE-FORM
+reports through tool-self."
+  #-sbcl (image-generations-unsupported)
+  #+sbcl
+  (multiple-value-bind (parsed problem) (parse-define-form form package)
+    (if problem
+        (error "~a" problem)
+        (let ((previous (self-write-previous-source :define parsed)))
+          (multiple-value-bind (image-path checkpoint-path)
+              (save-image context :label (or label (format nil "self-define ~(~a~)" (first parsed))))
+            (%log-self-define-entry log :intent parsed label checkpoint-path previous image-path)
+            (let ((result (eval-in-host parsed)))
+              (%log-self-define-entry log :outcome parsed label checkpoint-path previous image-path result)
+              (values result image-path)))))))
+
+(defun %log-self-define-entry (log kind parsed label checkpoint-path previous image-path &optional result)
+  (let ((entry (if (eq kind :intent)
+                    (list :at (%now-iso8601) :kind :intent :op :define
+                          :form (prin1-to-string parsed) :label label
+                          :checkpoint (namestring checkpoint-path) :previous-source previous
+                          :image image-path)
+                    (list :at (%now-iso8601) :kind :outcome :op :define
+                          :outcome (if (tool-error-p result) (list :error (tool-error result)) :ok)))))
+    (%append-log log entry)))
 
 ;;; --- launching --------------------------------------------------------
 

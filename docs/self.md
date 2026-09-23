@@ -95,6 +95,40 @@ merely by being read back. Each entry also reaches [meow's
 logger](https://github.com/takeiteasy/meow/blob/trunk/docs/logger.md) when
 one is mounted, at `:info` or `:warn`.
 
+## `self-define` and `:require-image`
+
+`:previous-source` is a manual way back, and only for one symbol. On
+SBCL, [`self-define`](images.md) closes that for real: it takes an
+[image generation](images.md) immediately before the write, so
+`nyaa:relaunch`ing that core undoes the redefinition itself, not just
+declared state.
+
+```lisp
+(nyaa:self-define *ctx* "(defun greet () :hi)" :package "MY-APP")
+;; => :hi, #P"~/.nyaa/generations/....core"
+```
+
+It is a REPL entry, not a tool op: `save-image` needs the main thread, so
+no agent turn can reach it, and there is no worker thread or `:timeout`
+here for an operator to abandon -- interrupt it the ordinary way.
+`(context form &key package label log)`; `context` is the mounted
+context's process to image, matching `save-image`'s own argument.
+
+`:require-image`, a mount option (default nil), refuses `:eval` and
+`:define` once it's true unless an image has been taken and nothing has
+written since:
+
+```lisp
+(m:mount *ctx* 'nyaa:tool-self :enable '(:eval :define) :require-image t)
+(nyaa:invoke-tool :tool-self :op :eval :form "1")
+;; => (:error (:bad-request "take an image generation first (~takeiteasy/nyaa#48)"))
+```
+
+With it set, `self-define` becomes the only way to still redefine
+anything: every write it enables stays code-exact and undoable. Every
+intent log entry, `:require-image` or not, also records `:image`, the
+newest image's path at the time -- `nil` if none has been taken yet.
+
 ## Trust posture
 
 `:operator` only. Host eval can read anything the image holds, including a
@@ -104,11 +138,12 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
 
 ## Limitations
 
-- Rollback restores declared service state, not code: a `:define`'s
-  checkpoint does not undo the redefinition itself, only whatever state
-  drifted around it. `:previous-source` is the manual way back until image
-  generations land ([#48](https://todo.sr.ht/~takeiteasy/nyaa/48),
-  [#63](https://todo.sr.ht/~takeiteasy/nyaa/63)).
+- Rollback restores declared service state, not code: an ordinary
+  tool-self `:define`'s checkpoint does not undo the redefinition itself,
+  only whatever state drifted around it. `:previous-source` is the manual
+  way back; `self-define`'s image generation is the code-exact one, but
+  only tracks tool-self's own writes -- code loaded any other way is not
+  reflected in `:require-image`'s staleness check.
 - A deferred CLOS `:define` ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64))
   closes the tearing window by deferring interrupts across the whole form,
   not just its CLOS mutation: a wedged `:eql` specializer form or a slow

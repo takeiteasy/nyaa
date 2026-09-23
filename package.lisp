@@ -25,6 +25,7 @@
    #:*generations-directory*
    ;; image generations
    #:save-image #:relaunch #:save-recovery-image #:image-generations-unsupported
+   #:self-define
    ;; vault
    #:vault-record #:vault-consume #:vault-entries #:*vault-log*
    ;; parameter schemas

@@ -70,7 +70,8 @@ back to the recovery image -- a plain image with no services, built by
 
 Reaches everywhere `tool-self`'s `:eval` already does -- taking an image
 is `:operator`-level, done from the REPL
-([`self-define`](self.md#self-define)), not a model-reachable tool op.
+([`self-define`](self.md#self-define-and-require-image)), not a
+model-reachable tool op.
 
 ## Limitations
 

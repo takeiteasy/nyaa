@@ -131,3 +131,68 @@
                         (ignore-errors (delete-file out-file)))))
                (m:stop ctx)))
         (setf m:*registry* saved-registry)))))
+
+;;; --- SELF-DEFINE and :require-image (~takeiteasy/nyaa#63) ---------------
+;;;
+;;; *LAST-IMAGE* and *SELF-DIRTY* (tools/self.lisp) are process-wide, not
+;;; per mount, so every test here LETs them rather than touching the
+;;; ambient value -- a dynamic binding a FiveAM test's own unwind restores
+;;; regardless of how the test ends.
+
+(or (find-package "NYAA-SELF-DEFINE-TEST") (make-package "NYAA-SELF-DEFINE-TEST" :use '("CL")))
+
+;;; TOOL-SELF's own dispatch runs on its mounted process's thread, not the
+;;; test's -- a LET's dynamic binding is per-thread, so it would never be
+;;; seen there. SETF plus UNWIND-PROTECT mutates the actual global value
+;;; instead, restoring it once the test is done either way.
+
+(defmacro with-self-image-state ((last-image self-dirty) &body body)
+  (let ((old-image (gensym)) (old-dirty (gensym)))
+    `(let ((,old-image nyaa::*last-image*) (,old-dirty nyaa::*self-dirty*))
+       (setf nyaa::*last-image* ,last-image nyaa::*self-dirty* ,self-dirty)
+       (unwind-protect (progn ,@body)
+         (setf nyaa::*last-image* ,old-image nyaa::*self-dirty* ,old-dirty)))))
+
+#+sbcl
+(test require-image-refuses-eval-and-define-with-no-image-taken
+  (with-self-image-state (nil nil)
+    (with-image-context (ctx)
+      (m:mount ctx 'nyaa:tool-self :enable '(:eval :define) :require-image t)
+      (let ((result (nyaa:invoke-tool :tool-self :op :eval :form "1")))
+        (is (equal :bad-request (first (nyaa:tool-error result))))))))
+
+#+sbcl
+(test require-image-accepts-after-a-clean-image-then-refuses-once-dirty
+  (with-self-image-state ("/tmp/pretend.core" nil)
+    (with-image-context (ctx)
+      (m:mount ctx 'nyaa:tool-self :enable '(:eval :define) :require-image t)
+      (let ((before (nyaa:invoke-tool :tool-self :op :eval :form "1")))
+        (is (eq :ok (first before)))
+        ;; that write just made the image stale
+        (let ((after (nyaa:invoke-tool :tool-self :op :eval :form "1")))
+          (is (equal :bad-request (first (nyaa:tool-error after)))))))))
+
+#+sbcl
+(test self-define-refuses-a-non-definition-form
+  (let ((nyaa::*last-image* nil) (nyaa::*self-dirty* nil))
+    (with-image-context (ctx)
+      (signals error (nyaa:self-define ctx "(+ 1 2)")))))
+
+#+sbcl
+(test self-define-redefines-and-takes-a-fresh-image
+  (let ((nyaa::*last-image* nil) (nyaa::*self-dirty* t))
+    (with-image-context (ctx dir)
+      ;; SELF-DEFINE has no :dir of its own -- it goes through
+      ;; *GENERATIONS-DIRECTORY*, same as CHECKPOINT's own default
+      (let ((nyaa:*generations-directory* dir))
+        (multiple-value-bind (result image-path)
+            (nyaa:self-define ctx "(defun greet () :hi)" :package "NYAA-SELF-DEFINE-TEST")
+          (declare (ignore result))
+          (is (eq :hi (funcall (find-symbol "GREET" "NYAA-SELF-DEFINE-TEST"))))
+          ;; SELF-DEFINE leaves the image clean for :REQUIRE-IMAGE afterwards
+          (is (equal image-path nyaa::*last-image*))
+          (is-false nyaa::*self-dirty*)
+          (is-true (probe-file image-path))
+          (is (search "self-define"
+                      (getf (first (nyaa:generations :dir dir)) :label))))))))
+

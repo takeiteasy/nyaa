@@ -37,6 +37,18 @@ loading this file never touches the filesystem or the user's home.")
   (or *self-log*
       (setf *self-log* (merge-pathnames ".nyaa/self.log" (user-homedir-pathname)))))
 
+(defvar *last-image* nil
+  "SAVE-IMAGE's (image-generation.lisp, loaded after this file) most
+recent core pathname, or nil if none has been taken. Set there; read here
+for :REQUIRE-IMAGE and logged on every write, so this file only ever
+depends on a var, never a forward reference to a function in a file that
+loads after it.")
+
+(defvar *self-dirty* nil
+  "T once any tool-self write has happened since *LAST-IMAGE* was taken.
+Cleared by SAVE-IMAGE and SELF-DEFINE; set by every write this file
+performs, regardless of :op.")
+
 (a:define-constant +definition-heads+
     '(defun defmacro defgeneric defmethod defclass defstruct defparameter
       defvar m:defservice nyaa:define-tool)
@@ -69,7 +81,13 @@ leaked thread instead of a killable one.")
 here; :LOG always answers.")
              (dir :initarg :dir :initform *generations-directory* :reader self-dir)
              (keep :initarg :keep :initform nil :reader self-keep)
-             (log-path :initarg :log :initform nil :reader self-log-path))
+             (log-path :initarg :log :initform nil :reader self-log-path)
+             (require-image :initarg :require-image :initform nil :reader self-require-image-p
+                            :documentation "T refuses :eval and :define
+unless an image generation (~takeiteasy/nyaa#48) has been taken and
+nothing has written since (*LAST-IMAGE*, *SELF-DIRTY*) -- SELF-DEFINE is
+then the only way an operator can still redefine anything, and every
+:define stays code-exact, undoable by relaunching that image."))
      :params ((:op (member :eval :define :reload :log) :required t
                :doc "operation to perform")
               (:form string :doc "source text of one form, for :eval and :define")
@@ -83,9 +101,21 @@ here; :LOG always answers.")
   (:invoke (op form package name label limit timeout)
     (case op
       (:log (op-self-log (self-log-file service) limit))
-      (t (if (not (member op (self-enable service)))
-             (fail (list :forbidden (format nil "~(~a~) is not enabled" op)))
-             (op-self-write service op form package name label timeout))))))
+      (t (cond
+           ((not (member op (self-enable service)))
+            (fail (list :forbidden (format nil "~(~a~) is not enabled" op))))
+           ((and (member op '(:eval :define)) (self-require-image-p service)
+                 (%image-required-refusal))
+            (bad-request "~a" (%image-required-refusal)))
+           (t (op-self-write service op form package name label timeout)))))))
+
+(defun %image-required-refusal ()
+  "Why :REQUIRE-IMAGE refuses right now, or nil if it wouldn't. A generation
+taken before any tool-self write, but with a write since, is stale: it
+would roll back to before the write tool-self is about to make, not to
+before this one."
+  (cond ((null *last-image*) "take an image generation first (~takeiteasy/nyaa#48)")
+        (*self-dirty* "the last image generation is stale -- take another first")))
 
 (defun self-log-file (service)
   (or (self-log-path service) (%default-self-log)))
@@ -149,6 +179,7 @@ exist is a problem, never created on the operator's behalf."
                                              :dir (self-dir service) :keep (self-keep service)
                                              :label (or label (format nil "tool-self ~(~a~)" op)))))
                    (previous (self-write-previous-source op parsed)))
+              (setf *self-dirty* t)
               (log-self-entry service :intent op parsed label checkpoint-path previous)
               (let ((result (perform-self-write service op parsed timeout)))
                 (log-self-outcome service op parsed result)
@@ -158,9 +189,11 @@ exist is a problem, never created on the operator's behalf."
 (defun self-write-previous-source (op parsed)
   "PARSED's defined name's current SYMBOL-SOURCE (tools/image.lisp), for
 :DEFINE only, so a log entry that redefines something still points at where
-it used to live -- rollback restores declared state, never code
-(~takeiteasy/nyaa#48, ~takeiteasy/nyaa#63), so this is the only revert path
-a generation buys."
+it used to live. Declared-state ROLLBACK never restores code
+(~takeiteasy/nyaa#48); an ordinary tool-self :define therefore has no way
+back but this pointer -- SELF-DEFINE (image-generation.lisp,
+~takeiteasy/nyaa#63) is the code-exact one, an image generation taken
+immediately before the write."
   (when (and (eq op :define) (second parsed) (symbolp (second parsed)))
     (symbol-source (second parsed))))
 
@@ -267,7 +300,8 @@ could ~takeiteasy/nyaa#26 already tracks for the worker side."
   (let ((entry (list :at (%now-iso8601) :kind kind :op op
                      :form (and (member op '(:eval :define)) (prin1-to-string parsed))
                      :name (and (eq op :reload) parsed)
-                     :label label :checkpoint checkpoint-path :previous-source previous)))
+                     :label label :checkpoint checkpoint-path :previous-source previous
+                     :image *last-image*)))
     (%append-log (self-log-file service) entry)
     (m:log-info service "tool-self ~(~a~) ~(~a~), checkpoint ~a" kind op checkpoint-path)))
 
