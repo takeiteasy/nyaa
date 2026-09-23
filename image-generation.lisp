@@ -43,13 +43,16 @@ doesn't actually hold."
 (defun %make-image-toplevel (suspension)
   "SUSPENSION closed over from before the fork -- the same process and
 service instances the saved core's heap already holds, so RESUME on load
-just respawns threads over them, no re-discovery needed. NYAA_IMAGE_PROBE
+just respawns threads over them, no re-discovery needed. FORGET-WORKERS
+first: the workers that heap holds belong to the process that saved it.
+NYAA_IMAGE_PROBE
 set skips all of that: BIN/NYAA and the integration tests use it to check
 a core loads without actually reviving its services."
   (lambda ()
     (cond
       ((uiop:getenv "NYAA_IMAGE_PROBE") (sb-ext:exit :code 0 :abort t))
-      (t (cl+ssl:reload)
+      (t (forget-workers)
+         (cl+ssl:reload)
          (m:resume suspension)
          (sb-impl::toplevel-init)))))
 
@@ -219,12 +222,14 @@ signals an error on failure, execv's usual contract."
 
 (defun relaunch (core)
   "Replace the running SBCL process with CORE (EXECV), after confirming it
-loads (%PROBE-CORE). A generation's core is code-exact -- unlike
+loads (%PROBE-CORE), killing this process's workers first so none outlives
+it as an orphan. A generation's core is code-exact -- unlike
 declared-state ROLLBACK, this is the manual way tool-self's :DEFINE
 writes can actually be undone (~takeiteasy/nyaa#63) until an operator
 does it. Never returns on success."
   (unless (probe-file core) (error "no such core: ~a" core))
   (unless (%probe-core core) (error "~a did not load cleanly; refusing to relaunch into it" core))
+  (kill-live-workers)
   (finish-output) (finish-output *error-output*)
   (let ((runtime (namestring sb-ext:*runtime-pathname*)))
     (%execv runtime (list runtime "--core" (namestring core)))))

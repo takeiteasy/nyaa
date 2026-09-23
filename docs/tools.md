@@ -145,7 +145,8 @@ this easy to call should not be able to `rm -rf`.
 "<what the form printed>"))`. Source that does not read is a
 `(:bad-request ...)`, a form that signals is an `(:error detail)`, and a worker
 that missed its deadline is killed: `tool-eval` starts a fresh one next call,
-and a `tool-repl` id starts empty again.
+and a `tool-repl` id starts empty again. A session inherited through a
+relaunched [image](images.md) is reported lost once, then starts empty.
 
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.

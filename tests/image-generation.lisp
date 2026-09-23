@@ -152,6 +152,45 @@
                (m:stop-and-wait ctx)))
         (setf m:*registry* saved-registry)))))
 
+;;; A tool-repl worker the saved core's heap holds belongs to the parent
+;;; process, which is still running it: the core must report the session
+;;; lost without signalling that worker.
+
+(test relaunched-core-drops-an-inherited-repl-session-without-killing-it
+  (with-generations-directory (dir)
+    (let ((saved-registry m:*registry*)
+          (registry (make-instance 'm:registry)))
+      (unwind-protect
+           (let ((ctx (progn (setf m:*registry* registry)
+                             (m:start-service (make-instance 'm:context :name :image-tools)
+                                              :registry registry))))
+             (unwind-protect
+                  (progn
+                    (m:mount ctx 'nyaa:tool-repl)
+                    (nyaa:invoke-tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+                    (let* ((core (namestring (nyaa:save-image ctx :dir dir)))
+                           (out-file (format nil "~anyaa-image-test-out-~36r.txt"
+                                             (namestring (uiop:temporary-directory))
+                                             (random (expt 2 64) (make-random-state t)))))
+                      (unwind-protect
+                           (multiple-value-bind (out err code)
+                               (uiop:run-program
+                                (list (namestring sb-ext:*runtime-pathname*) "--core" core "--noinform"
+                                      "--non-interactive" "--eval"
+                                      (format nil "(with-open-file (s ~s :direction :output :if-exists :supersede) ~
+                                                    (format s \"~~s\" (nyaa:tool-error (nyaa:invoke-tool :tool-repl :id \"a\" :form \"*x*\"))))"
+                                              out-file))
+                                :output :string :error-output :string :ignore-error-status t)
+                             (declare (ignore out))
+                             (is (zerop code) "relaunched core exited ~a: ~a" code err)
+                             (is (search "relaunch" (uiop:read-file-string out-file)))
+                             ;; the parent's own worker survived the core dropping its copy
+                             (is (equal "1" (getf (second (nyaa:invoke-tool :tool-repl :id "a" :form "*x*"))
+                                                  :value))))
+                        (ignore-errors (delete-file out-file)))))
+               (m:stop-and-wait ctx)))
+        (setf m:*registry* saved-registry)))))
+
 ;;; --- SELF-DEFINE and :require-image (~takeiteasy/nyaa#63) ---------------
 ;;;
 ;;; *LAST-IMAGE* and *SELF-DIRTY* (tools/self.lisp) are process-wide, not

@@ -24,3 +24,25 @@
     (is (not (nyaa::worker-alive-p w)))
     ;; A dead worker answers, rather than blocking a caller that reuses it.
     (is (eq :unavailable (nyaa:tool-error (nyaa::worker-eval w "1" 500))))))
+
+(test stale-worker-reads-dead-and-is-never-signalled
+  (let* ((worker (nyaa::start-worker))
+         (boot nyaa::*boot*))
+    (unwind-protect
+         (progn
+           (setf nyaa::*boot* (list :later-boot))
+           (is (nyaa::worker-stale-p worker))
+           (is (not (nyaa::worker-alive-p worker)))
+           (nyaa::kill-worker worker)
+           (is (uiop:process-alive-p (nyaa::worker-process worker))))
+      (setf nyaa::*boot* boot)
+      (nyaa::terminate-process-group (nyaa::worker-process worker)))))
+
+(test kill-live-workers-kills-each-registered-worker
+  (let ((nyaa::*live-workers* '())
+        (nyaa::*live-workers-lock* (bt:make-lock)))
+    (let ((workers (list (nyaa::start-worker) (nyaa::start-worker))))
+      (is (= 2 (length nyaa::*live-workers*)))
+      (nyaa::kill-live-workers)
+      (is (null nyaa::*live-workers*))
+      (is (notany #'nyaa::worker-alive-p workers)))))

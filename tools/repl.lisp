@@ -4,6 +4,9 @@
 ;;; Workers start on first use; :pristine replaces one under the same id,
 ;;; and so does a lapsed deadline, which kills the worker it belongs to.
 ;;;
+;;; A worker inherited through a saved core is stale: its session is reported
+;;; lost once and starts empty on the next call.
+;;;
 ;;; Trust posture: arbitrary evaluation. Trusted operator only, until the
 ;;; DSL gate (~takeiteasy/nyaa#6) can constrain what a form may do.
 ;;;
@@ -26,14 +29,18 @@
     (when pristine
       (drop-repl-worker service id))
     (let ((worker (repl-worker service id)))
-      (if (null worker)
-          (fail :unavailable)
-          (let ((result (worker-eval worker form timeout)))
-            ;; A worker that missed its deadline was killed; forget it so the
-            ;; id starts empty rather than answering :unavailable for ever.
-            (unless (worker-alive-p worker)
-              (drop-repl-worker service id))
-            result)))))
+      (cond
+        ((null worker) (fail :unavailable))
+        ((worker-stale-p worker)
+         (drop-repl-worker service id)
+         (fail (list :error "session lost to an image relaunch; it starts empty on the next call")))
+        (t
+         (let ((result (worker-eval worker form timeout)))
+           ;; A worker that missed its deadline was killed; forget it so the
+           ;; id starts empty rather than answering :unavailable for ever.
+           (unless (worker-alive-p worker)
+             (drop-repl-worker service id))
+           result))))))
 
 (defun repl-worker (service id)
   "ID's worker, started on first use. Each is held as an effect, so stopping

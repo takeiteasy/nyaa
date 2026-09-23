@@ -50,8 +50,30 @@ different binary or with different flags than the host's own invocation.")
             "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
             "--eval")))
 
-(defstruct (worker (:constructor %make-worker (process)))
-  process)
+(defvar *boot* (list :boot)
+  "Identifies this process image. A worker records the value it started
+under, so one inherited through a saved core reads as stale.")
+
+(defvar *live-workers* '()
+  "Workers started and not yet killed, so RELAUNCH can kill them before it
+replaces the process.")
+
+(defvar *live-workers-lock* (bt:make-lock :name "nyaa-live-workers"))
+
+(defstruct (worker (:constructor %make-worker (process &aux (boot *boot*))))
+  process boot)
+
+(defun worker-stale-p (worker)
+  "True for a worker inherited from an earlier process image: its pid and
+pipes belong to that image, so nothing here may signal or touch them."
+  (not (eq (worker-boot worker) *boot*)))
+
+(defun %register-worker (worker)
+  (bt:with-lock-held (*live-workers-lock*) (push worker *live-workers*)))
+
+(defun %unregister-worker (worker)
+  (bt:with-lock-held (*live-workers-lock*)
+    (setf *live-workers* (remove worker *live-workers*))))
 
 (defun start-worker ()
   "A running worker, or NIL if the child never answered its handshake."
@@ -64,17 +86,42 @@ different binary or with different flags than the host's own invocation.")
                    ;; child writes to stderr would corrupt the protocol.
                    :error-output nil)))))
     (when worker
+      (%register-worker worker)
       (if (equal '(:ready) (read-reply worker +worker-start-timeout+))
           worker
           (progn (kill-worker worker) nil)))))
 
 (defun worker-alive-p (worker)
-  (and worker (uiop:process-alive-p (worker-process worker))))
+  (and worker
+       (not (worker-stale-p worker))
+       (uiop:process-alive-p (worker-process worker))))
 
 (defun kill-worker (worker)
   (when worker
-    (terminate-process-group (worker-process worker)))
+    (%unregister-worker worker)
+    (unless (worker-stale-p worker)
+      (terminate-process-group (worker-process worker))))
   nil)
+
+(defun kill-live-workers ()
+  "Kill every registered worker. The list is copied first: KILL-WORKER
+takes the same, non-recursive, lock."
+  (dolist (worker (bt:with-lock-held (*live-workers-lock*) (copy-list *live-workers*)))
+    (kill-worker worker)))
+
+(defun forget-workers ()
+  "Start a new process image's worker bookkeeping: every worker held so far
+reads as stale, and none is signalled. SBCL's own list of child processes
+survives a save too; its entries for these workers go, so a pid a new child
+reuses is never reaped through them."
+  (let ((pids (mapcar (lambda (w) (uiop:process-info-pid (worker-process w)))
+                      *live-workers*)))
+    (sb-thread:with-recursive-lock (sb-impl::*active-processes-lock*)
+      (setf sb-impl::*active-processes*
+            (remove-if (lambda (p) (member (sb-ext:process-pid p) pids))
+                       sb-impl::*active-processes*))))
+  (setf *boot* (list :boot))
+  (bt:with-lock-held (*live-workers-lock*) (setf *live-workers* '())))
 
 (defun worker-eval (worker source timeout-ms)
   "Evaluate SOURCE in WORKER. Returns a tool result; a worker that missed

@@ -38,14 +38,17 @@ fork succeeded, failed, or never ran because of a stray thread.
 ## Relaunching
 
 `(relaunch core)` probes `core` in a subprocess and, if it loads cleanly,
-`execv`s the current process into it. Never returns on success.
+kills the process's live `tool-repl` workers and `execv`s into it. Never
+returns on success.
 
 The saved core's own toplevel, on load:
 
 1. Exits at once if `NYAA_IMAGE_PROBE` is set -- `relaunch` and
    `bin/nyaa` both use this to check a core loads without reviving its
    services.
-2. Otherwise, `cl+ssl:reload`s (foreign libraries need re-initialising
+2. Otherwise, `forget-workers` marks every worker the heap holds as stale --
+   its pid and pipes belong to the process that saved it, so it is never
+   signalled -- then `cl+ssl:reload`s (foreign libraries need re-initialising
    after a reload), `m:resume`s the tree `save-image` suspended -- the
    same process and service instances the core's heap already holds, so
    nothing is rediscovered -- and falls through to SBCL's own toplevel,
@@ -86,9 +89,10 @@ model-reachable tool op.
 - A thread `context`'s own tree doesn't own -- another mounted tree's,
   meow's hmr watcher -- still blocks `save-image` for up to `timeout`
   seconds, then refuses, naming it.
-- A relaunched core's other external handles -- open sockets, worker
-  process handles, a `tool-repl` session -- are stale, not just `cl+ssl`'s
-  context. `cl+ssl:reload` is the only one handled here
-  ([#70](https://todo.sr.ht/~takeiteasy/nyaa/70)).
+- A `tool-repl` session does not survive a relaunch: its first call reports
+  the session lost and the next starts empty. Sockets never cross a save --
+  each is opened and closed within one message.
+- `relaunch` kills workers only; a `tool-shell` command still running is left
+  behind ([#82](https://todo.sr.ht/~takeiteasy/nyaa/82)).
 - A core is tens of megabytes; taking one is not free, and `bin/nyaa`'s
   probe launches a whole second SBCL process.

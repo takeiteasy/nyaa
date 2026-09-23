@@ -553,6 +553,29 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
     (is (eq :error (first (nyaa:tool-error
                            (tool :tool-repl :id "a" :form "*x*")))))))
 
+(test repl-session-from-an-earlier-image-is-reported-lost-then-starts-empty
+  ;; Bumping *BOOT* makes the live worker read as inherited from a saved
+  ;; core: it must be dropped without being signalled.
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+    (let ((old-pid (parse-integer
+                    (result-value (tool :tool-repl :id "a" :form +getpid-form+) :value)))
+          (boot nyaa::*boot*))
+      (unwind-protect
+           (progn
+             (setf nyaa::*boot* (list :later-boot))
+             (let ((lost (tool :tool-repl :id "a" :form "*x*")))
+               (is (eq :error (first (nyaa:tool-error lost))))
+               (is (search "relaunch" (second (nyaa:tool-error lost)))))
+             (is (unix-process-alive-p old-pid))
+             (is (equal "NIL" (result-value (tool :tool-repl :id "a" :form "(boundp '*x*)")
+                                            :value)))
+             ;; the second worker dies under the token it started with
+             (m:stop-and-wait *context*))
+        (setf nyaa::*boot* boot)
+        (uiop:run-program (list "/bin/kill" "-9" (princ-to-string old-pid))
+                          :ignore-error-status t)))))
+
 (test repl-workers-die-with-the-service
   (let ((pids '()))
     (with-tools
