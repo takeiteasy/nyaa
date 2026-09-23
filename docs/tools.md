@@ -111,7 +111,7 @@ kept running.
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
-| `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One worker per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts it. |
+| `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
 | `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
 | `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
@@ -142,11 +142,18 @@ and refuse one. Each tool's exact types are in its `:params`; see
 this easy to call should not be able to `rm -rf`.
 
 `tool-eval` and `tool-repl` answer `(:ok (:value "<printed value>" :out
-"<what the form printed>"))`. Source that does not read is a
+"<what the form printed>" :elided <bool>))`. `:elided` is true when the
+worker's print limits or character cap cut the value's printed form; see
+[Workers](#workers) for getting past it. Source that does not read is a
 `(:bad-request ...)`, a form that signals is an `(:error detail)`, and a worker
 that missed its deadline is killed: `tool-eval` starts a fresh one next call,
 and a `tool-repl` id starts empty again. A session inherited through a
 relaunched [image](images.md) is reported lost once, then starts empty.
+
+Each `tool-repl` id runs on its own session, mounted under the tool's
+context on first use, so a long evaluation on one id no longer blocks
+another, or the tool's own `:describe`. Calls on one id still run in order,
+since a session's own mailbox serialises them.
 
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
@@ -171,14 +178,33 @@ fresh `NYAA-WORKER` package. One exchange per line:
 ```lisp
 (:eval "(+ 1 2)")            ; host to worker
 (:ready)                     ; worker, once, at boot
-(:ok "3" "")                 ; value, then anything the form printed
+(:ok "3" "" nil)             ; value, output, then :elided or nil
 (:error "message" "")        ; the form signalled
 (:reader-error "message")    ; the source did not read
 ```
 
 The source travels as a string, so source that does not read costs one reply
 rather than desynchronising the stream. Values print under `*print-length*`,
-`*print-level*` and a character cap.
+`*print-level*` and a character cap; the reply's fourth element is `:elided`
+when any of those cut the printed form, `nil` when the value printed in full.
+
+The value itself is never lost to elision: the worker keeps a REPL history
+under `*`, `**` and `***`, shifted the same way the standard toplevel's are
+after each successful eval (an erroring form leaves them alone). A `tool-repl`
+session's history survives across calls on that id, so an elided value can
+still be inspected:
+
+```lisp
+(invoke-tool :tool-repl :id "a" :form "(make-list 500)")
+;; => (:ok (:value "(NIL NIL NIL ...)" :out "" :elided t))
+(invoke-tool :tool-repl :id "a" :form "(defparameter v *)")
+(invoke-tool :tool-repl :id "a" :form "(length v)")
+;; => (:ok (:value "500" :out "" :elided nil))
+```
+
+`tool-eval`'s worker is killed after the call, so its history is of no use
+past the reply — a caller that hits `:elided` there needs `tool-repl` to look
+further at the value.
 
 A worker runs the host's own SBCL binary. `*worker-command*` overrides the
 invocation. Starting one costs about 33 ms, and an exchange with a running
@@ -219,10 +245,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- A value too large to print is truncated silently, and the caller cannot ask
-  for the rest ([#26](https://todo.sr.ht/~takeiteasy/nyaa/26)).
-- `tool-repl` handles one message at a time, so its sessions are isolated but
-  not concurrent ([#27](https://todo.sr.ht/~takeiteasy/nyaa/27)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

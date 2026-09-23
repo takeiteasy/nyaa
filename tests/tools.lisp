@@ -51,6 +51,13 @@
 (defun result-value (result key)
   (getf (second result) key))
 
+(defmacro tool-thread (&body body)
+  ;; A plain BT:MAKE-THREAD does not inherit dynamic bindings, and
+  ;; M:*REGISTRY* is one WITH-TOOLS establishes with a LET -- so a thread
+  ;; that calls TOOL needs it carried across explicitly.
+  `(let ((registry m:*registry*))
+     (bt:make-thread (lambda () (let ((m:*registry* registry)) ,@body)))))
+
 (defparameter +getpid-form+
   ;; A worker runs the host implementation, so the bare image it starts has
   ;; exactly the internals this one does.
@@ -619,3 +626,64 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   (with-tools
     (is (equal :bad-request
                (first (nyaa:tool-error (tool :tool-repl :timeout 100)))))))
+
+;;; --- repl concurrency (~takeiteasy/nyaa#27) ------------------------------
+
+(test repl-sessions-run-concurrently
+  ;; A long eval on one id must not block another, or the tool's own
+  ;; :describe, which every id's session shares no process with.
+  (with-tools
+    (let ((thread (tool-thread (tool :tool-repl :id "slow" :form "(sleep 2)"))))
+      (sleep 0.2) ;; let "slow"'s session start its eval first
+      (let ((start (get-internal-real-time)))
+        (is (equal "3" (result-value (tool :tool-repl :id "fast" :form "(+ 1 2)")
+                                     :value)))
+        (is (< (- (get-internal-real-time) start)
+               internal-time-units-per-second))
+        (is (nyaa:describe-tool :tool-repl)))
+      (bt:join-thread thread))))
+
+(test repl-calls-on-one-id-still-run-in-order
+  (with-tools
+    (tool :tool-repl :id "a" :form "(defparameter *log* nil)")
+    (let ((threads (list (tool-thread (tool :tool-repl :id "a"
+                                            :form "(push 1 *log*)"))
+                         (tool-thread (tool :tool-repl :id "a"
+                                           :form "(push 2 *log*)")))))
+      (mapc #'bt:join-thread threads)
+      (is (equal "2" (result-value (tool :tool-repl :id "a" :form "(length *log*)")
+                                   :value))))))
+
+(test unmounting-tool-repl-answers-a-queued-call-promptly
+  (with-tools
+    (let* ((result nil)
+           (thread (tool-thread
+                    (setf result (tool :tool-repl :id "a" :form "(sleep 5)")))))
+      (sleep 0.2) ;; let the session start its eval first
+      (let ((start (get-internal-real-time)))
+        (m:unmount *context* :tool-repl)
+        (bt:join-thread thread)
+        (is (< (- (get-internal-real-time) start)
+               (* 2 internal-time-units-per-second))))
+      (is (eq :unavailable (nyaa:tool-error result))))))
+
+;;; --- elision and REPL history (~takeiteasy/nyaa#26) ---------------------
+
+(test repl-history-reaches-an-elided-value
+  (with-tools
+    (let ((made (tool :tool-repl :id "a" :form "(make-list 200)")))
+      (is (eq t (result-value made :elided)))
+      (is (equal "200" (result-value (tool :tool-repl :id "a" :form "(length *)")
+                                     :value))))))
+
+(test repl-history-keeps-two-evals-back
+  (with-tools
+    (tool :tool-repl :id "a" :form "1")
+    (tool :tool-repl :id "a" :form "2")
+    (is (equal "1" (result-value (tool :tool-repl :id "a" :form "**") :value)))))
+
+(test repl-history-is-untouched-by-an-erroring-form
+  (with-tools
+    (tool :tool-repl :id "a" :form "41")
+    (nyaa:tool-error (tool :tool-repl :id "a" :form "(error \"boom\")"))
+    (is (equal "41" (result-value (tool :tool-repl :id "a" :form "*") :value)))))
