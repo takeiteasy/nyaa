@@ -61,11 +61,6 @@ cannot bring back."
        (getf state :in-flight)
        t))
 
-(defun %restore-child (process state)
-  (multiple-value-bind (reply status) (m:call process (list :restore state) :timeout 30)
-    (declare (ignore reply))
-    (not status)))
-
 ;;; --- the generation file --------------------------------------------------
 
 (defun %generation-filename ()
@@ -276,12 +271,9 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
     (a:when-let ((image (getf stale :image)))
       (ignore-errors (delete-file image)))))
 
-;; TODO: restores are sent one M:CALL at a time, so a busy service delays every
-;; later one. Upgrade path: a per-process-message parallel call. Tracked in
-;; ~takeiteasy/nyaa#92.
-
-(defun rollback (context path)
-  "Restore the generation at PATH onto CONTEXT's named services now.
+(defun rollback (context path &key (timeout 30))
+  "Restore the generation at PATH onto CONTEXT's named services now. Every
+restore is sent at once and given TIMEOUT seconds.
 Returns (:ok (:restored names :failed names :interrupted names :unavailable
 names :missing names :mismatched entries :extra names)). FAILED names a
 restore that got no answer; INTERRUPTED a restored service that was
@@ -294,8 +286,8 @@ call -- the caller decides what drift means."
   (let* ((generation (%read-generation path))
          (recorded (getf generation :services))
          (current (%context-entries context))
-         (restored '()) (failed '()) (interrupted '()) (unavailable '())
-         (missing '()) (mismatched '()))
+         (targets '())
+         (unavailable '()) (missing '()) (mismatched '()))
     (dolist (entry recorded)
       (let* ((name (getf entry :name))
              (found (find name current :key (lambda (e) (getf e :name)))))
@@ -306,12 +298,23 @@ call -- the caller decides what drift means."
                        :actual (getf found :class))
                  mismatched))
           ((getf entry :unavailable) (push name unavailable))
-          ((not (%restore-child (getf found :process) (getf entry :state)))
-           (push name failed))
-          (t (push name restored)
-             (when (%interrupted-p (getf entry :state)) (push name interrupted))))))
-    (ok :restored (nreverse restored) :failed (nreverse failed)
-        :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
-        :missing (nreverse missing) :mismatched (nreverse mismatched)
-        :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
-                               (mapcar (lambda (e) (getf e :name)) recorded)))))
+          (t (push (cons entry found) targets)))))
+    (setf targets (nreverse targets))
+    (let ((outcomes (m:call-each
+                     (mapcar (lambda (target) (getf (cdr target) :process)) targets)
+                     (mapcar (lambda (target) (list :restore (getf (car target) :state)))
+                             targets)
+                     :timeout timeout))
+          (restored '()) (failed '()) (interrupted '()))
+      (loop for (entry . nil) in targets
+            for (nil status) in outcomes
+            for name = (getf entry :name)
+            do (cond (status (push name failed))
+                     (t (push name restored)
+                        (when (%interrupted-p (getf entry :state))
+                          (push name interrupted)))))
+      (ok :restored (nreverse restored) :failed (nreverse failed)
+          :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
+          :missing (nreverse missing) :mismatched (nreverse mismatched)
+          :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
+                                 (mapcar (lambda (e) (getf e :name)) recorded))))))

@@ -228,6 +228,27 @@
                                :key (lambda (e) (getf e :name)))
                          :state)))))))
 
+(m:defservice slow-restore-thing () ()
+  (:name :slow-restore-thing))
+
+(defmethod m:handle ((service slow-restore-thing) message)
+  (case (first message)
+    (:restore (sleep 1) t)
+    (t nil)))
+
+(test a-slow-restore-does-not-delay-the-others
+  (with-checkpoints (dir)
+    (m:mount *ckpt-context* 'slow-restore-thing)
+    (set-thing 3)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (set-thing 0)
+      (let* ((start (get-internal-real-time))
+             (result (second (nyaa:rollback *ckpt-context* path :timeout 0.3))))
+        (is (< (- (get-internal-real-time) start) (* 0.8 internal-time-units-per-second)))
+        (is (equal '(:slow-restore-thing) (getf result :failed)))
+        (is (member :stateful-thing (getf result :restored)))
+        (is (eql 3 (thing)))))))
+
 ;;; --- tool-checkpoint --------------------------------------------------
 
 (test tool-checkpoint-is-operator-trusted

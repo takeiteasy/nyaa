@@ -12,7 +12,8 @@ back.
 ;; => ((:path #P"..." :created "2026-09-22T17:16:10Z" :label "before edit"
 ;;      :services (:tool-fs :assistant)) ...)
 
-(nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774.generation")
+(nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774.generation"
+               :timeout 30)
 ;; => (:ok (:restored (:tool-fs :assistant) :failed nil :interrupted nil
 ;;          :unavailable nil :missing nil :mismatched nil :extra nil))
 ```
@@ -76,7 +77,8 @@ rather than at metadata alone.
 ## Rollback and drift
 
 `rollback` restores state onto the services mounted now; it does not
-remount. Drift since the checkpoint is reported rather than silently
+remount. Every restore is sent at once and given `:timeout` seconds (default
+30), so one busy service does not delay the rest. Drift since the checkpoint is reported rather than silently
 accepted:
 
 | Key | Meaning |
