@@ -15,8 +15,7 @@
 
 (defun same-json (json text)
   "JSON, a rendered schema, against TEXT. Compared structurally: a JSON
-object carries no key order, and hash tables do not iterate alike on every
-implementation."
+object carries no key order."
   (labels ((same (a b)
              (cond
                ((hash-table-p a)
@@ -139,6 +138,15 @@ implementation."
                      \"required\":[\"city\"],
                      \"additionalProperties\":false}"))
     (is (same-json (rendered 'nyaa:any) "{}"))))
+
+(test rendering-keeps-declaration-order
+  "Property order follows declaration, not alphabetical or hash order --
+SBCL's hash tables iterate in insertion order, so a rendered schema renders
+the same way on every run."
+  (is (string= (json '((:zeta string :doc "last letter" :default "z")
+                        (:alpha (nyaa:object (:yak integer :required t) (:bee boolean)))
+                        (:mid (integer 1 9))))
+               "{\"type\":\"object\",\"properties\":{\"zeta\":{\"type\":\"string\",\"description\":\"last letter\",\"default\":\"z\"},\"alpha\":{\"type\":\"object\",\"properties\":{\"yak\":{\"type\":\"integer\"},\"bee\":{\"type\":\"boolean\"}},\"required\":[\"yak\"],\"additionalProperties\":false},\"mid\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":9}},\"required\":[],\"additionalProperties\":false}")))
 
 (test any-coerces-whatever-it-is-given
   (is (equal '(:x 7) (coerced '((:x nyaa:any)) '(:x 7))))

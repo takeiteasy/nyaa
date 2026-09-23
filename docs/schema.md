@@ -77,8 +77,10 @@ declared type, and carries no coercion of its own.
 
 `schema->json-schema` returns a hash table, which jzon serialises directly, so
 a protocol embeds it in a larger request body rather than splicing strings.
-`json-schema->schema` is its inverse; an unrecognised construct is an error,
-matching the closed set.
+Properties render in declaration order -- SBCL's hash tables iterate in
+insertion order, so a schema renders the same way on every run, which keeps a
+request body stable for prompt caching. `json-schema->schema` is its inverse;
+an unrecognised construct is an error, matching the closed set.
 
 A round trip preserves every specifier, its options and the `required` set.
 It does not preserve parameter order: a JSON object carries none, so an import
@@ -89,5 +91,3 @@ is ordered by parameter name.
 - A parameter is `:required` or it is not; a parameter required only for some
   other parameter's value still needs a check in the tool
   ([#30](https://todo.sr.ht/~takeiteasy/nyaa/30)).
-- Property order in a rendered schema follows the implementation's hash table,
-  not the declaration ([#29](https://todo.sr.ht/~takeiteasy/nyaa/29)).
