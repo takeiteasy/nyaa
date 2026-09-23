@@ -63,6 +63,14 @@ so a wedged form costs a timeout, not a wedged service. A value is printed
 under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 8, a 4000-character cap.
 
+A `:define` whose head mutates CLOS across several sub-forms -- `defclass`,
+`defmethod`, `defgeneric`, `defstruct`, `m:defservice` or
+`nyaa:define-tool` -- runs with interrupts deferred across the whole form,
+so a lapsed `:timeout` there waits for the definition to finish rather than
+tearing it. The caller still gets `:timeout`; the definition can still have
+landed. `defun`, `defmacro`, `defparameter` and `defvar` each end in one
+store, so they stay interruptible as before.
+
 ## Checkpoint and log
 
 Every write takes a [checkpoint](checkpoints.md) first, then writes an
@@ -101,9 +109,13 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   drifted around it. `:previous-source` is the manual way back until image
   generations land ([#48](https://todo.sr.ht/~takeiteasy/nyaa/48),
   [#63](https://todo.sr.ht/~takeiteasy/nyaa/63)).
-- An interrupt at `:eval`/`:define`'s deadline can land inside a `defclass`
-  or `defmethod` expansion and leave CLOS mid-update
-  ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64)).
+- A deferred CLOS `:define` ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64))
+  closes the tearing window by deferring interrupts across the whole form,
+  not just its CLOS mutation: a wedged `:eql` specializer form or a slow
+  compile inside one now leaks its thread instead of being killed
+  ([#68](https://todo.sr.ht/~takeiteasy/nyaa/68)). The outcome log also
+  still records `(:error :timeout)` even when the deferred form went on to
+  complete ([#69](https://todo.sr.ht/~takeiteasy/nyaa/69)).
 - The checkpoint taken before a write shares checkpoint.lisp's own
   ceilings: it is not bounded by `:timeout`
   ([#51](https://todo.sr.ht/~takeiteasy/nyaa/51)), and issued mid-run, the

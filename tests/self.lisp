@@ -116,6 +116,30 @@
             :form "(defclass thing () ((x :initform 1 :accessor thing-x) (y :initform 2 :accessor thing-y)))")
       (is (= 2 (funcall (find-symbol "THING-Y" "NYAA-SELF-TEST") instance))))))
 
+;;; --- deferred interrupts around a CLOS :define (~takeiteasy/nyaa#64) --
+
+(test self-define-clos-form-completes-past-its-timeout
+  (with-self ()
+    (self :define :package "NYAA-SELF-TEST" :form "(defgeneric self-test-defer (x))")
+    (let ((result (self :define :package "NYAA-SELF-TEST" :timeout 50
+                        :form "(defmethod self-test-defer ((x (eql (progn (sleep 0.3) 1)))) :done)")))
+      ;; the caller still gets :timeout ...
+      (is (equal :timeout (nyaa:tool-error result))))
+    ;; ... but the deferred method landed rather than being torn
+    (sleep 0.5)
+    (is (eq :done (funcall (find-symbol "SELF-TEST-DEFER" "NYAA-SELF-TEST") 1)))))
+
+(test self-define-non-clos-form-still-interruptible-past-its-timeout
+  (with-self ()
+    (let ((result (self :define :package "NYAA-SELF-TEST" :timeout 50
+                        :form "(defparameter *self-test-wedged* (progn (sleep 1) :never))")))
+      (is (equal :timeout (nyaa:tool-error result))))
+    ;; a non-CLOS head (defun, defmacro, defparameter, defvar) never defers,
+    ;; so the interrupt still lands mid-eval and the definition never
+    ;; completes
+    (sleep 1.2)
+    (is (not (boundp (find-symbol "*SELF-TEST-WEDGED*" "NYAA-SELF-TEST"))))))
+
 ;;; --- :reload ---------------------------------------------------------
 
 (test self-reload-restarts-a-named-child

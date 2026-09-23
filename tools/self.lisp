@@ -45,6 +45,21 @@ loading this file never touches the filesystem or the user's home.")
 call -- is :EVAL's job instead, so :DEFINE's checkpoint label and
 :previous-source logging always describe an actual definition.")
 
+(a:define-constant +clos-definition-heads+
+    '(defclass defmethod defgeneric defstruct m:defservice nyaa:define-tool)
+  :test #'equal
+  :documentation "Heads of +DEFINITION-HEADS+ that expand into several
+sub-forms mutating CLOS (a DEFCLASS's class-defining code, method-adding
+forms for DEFMETHOD) -- M:DEFSERVICE and NYAA:DEFINE-TOOL both macroexpand
+to DEFCLASS plus DEFMETHOD. An interrupt landing between those sub-forms can
+leave CLOS mid-update, so :DEFINE abandons these cooperatively instead of
+pre-emptively (RUN-IN-HOST, below), waiting for the form to finish rather
+than risking a torn redefinition. DEFUN, DEFMACRO, DEFPARAMETER and DEFVAR
+each end in one store and cannot tear this way, so they stay pre-emptively
+interruptible -- treating them the same way would also make their init
+forms uninterruptible, turning a wedged (defparameter *x* (loop)) into a
+leaked thread instead of a killable one.")
+
 (define-tool :tool-self
     (:trust :operator
      :summary "Evaluate, redefine and reload in the host image; every write checkpointed and logged"
@@ -151,8 +166,13 @@ a generation buys."
 
 (defun perform-self-write (service op parsed timeout)
   (ecase op
-    ((:eval :define) (run-in-host parsed timeout))
+    ((:eval :define) (run-in-host parsed timeout (self-write-defers-p op parsed)))
     (:reload (op-self-reload service parsed timeout))))
+
+(defun self-write-defers-p (op parsed)
+  "T when PARSED's head is one of +CLOS-DEFINITION-HEADS+, so RUN-IN-HOST
+defers interrupts across the whole form instead of leaving it abandonable."
+  (and (eq op :define) (member (first parsed) +clos-definition-heads+ :test #'eq)))
 
 (defun op-self-reload (service name timeout)
   (declare (ignore timeout))
@@ -166,20 +186,32 @@ a generation buys."
 ;;; --- host eval, bounded and interruptible ------------------------------
 
 ;;; Same shape as TOOLS/HTTP.LISP's ABANDON-REQUEST: a worker thread, a
-;;; semaphore for the caller's wait, and an ABANDONABLE-BOX guarding the
+;;; semaphore for the caller's wait, and an IN-REGION box guarding the
 ;;; interrupt so it only ever throws to a catch tag that is actually there.
 ;;;
-;;; TODO: an interrupt landing inside a DEFCLASS or DEFMETHOD expansion can
-;;; leave CLOS mid-update -- unlike TOOLS/HTTP.LISP's socket, there is no
-;;; single resource to release on the way out. Upgrade path: run :DEFINE
-;;; forms with interrupts deferred across the definition itself (SBCL's
-;;; WITHOUT-INTERRUPTS, or the host's equivalent) so a deadline there waits
-;;; one form longer rather than tearing the redefinition. Tracked in
-;;; ~takeiteasy/nyaa#64.
+;;; A :DEFINE whose head is one of +CLOS-DEFINITION-HEADS+ (~takeiteasy/
+;;; nyaa#64) abandons cooperatively instead of pre-emptively: an interrupt
+;;; landing inside a DEFCLASS or DEFMETHOD expansion can leave CLOS
+;;; mid-update, unlike TOOLS/HTTP.LISP's socket, which has one resource to
+;;; release on the way out. BT:INTERRUPT-THREAD's deferral around a target
+;;; thread's own critical sections (SBCL's WITHOUT-INTERRUPTS, CCL's) is not
+;;; portable -- ECL's MP:INTERRUPT-PROCESS fires immediately even inside
+;;; MP:WITHOUT-INTERRUPTS, confirmed by hand against the running
+;;; implementation -- so ABANDON-SELF-EVAL never interrupts a deferred
+;;; write. It only raises the ABANDON flag; the worker checks it itself,
+;;; from its own thread, right after EVAL-IN-HOST returns, and throws only
+;;; then. A deadline during a deferred write therefore always waits for the
+;;; form to finish rather than risking tearing it -- and a form that never
+;;; finishes leaks its thread instead of being killed, the ceiling
+;;; ~takeiteasy/nyaa#68 tracks.
 
-(defun run-in-host (form timeout-ms)
+(defun run-in-host (form timeout-ms &optional defer-p)
+  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS -- or, when
+DEFER-P, abandoned cooperatively (see above) so a lapsed deadline waits one
+form longer instead of tearing a CLOS-mutating :define."
   (let* ((result nil)
-         (abandonable-box (list nil))
+         (in-region (list nil))
+         (abandon (list nil))
          (done (bt:make-semaphore))
          (registry m:*registry*)
          (worker (bt:make-thread
@@ -188,20 +220,25 @@ a generation buys."
                       (unwind-protect
                            (setf result
                                  (catch 'self-abandoned
-                                   (setf (car abandonable-box) t)
-                                   (unwind-protect (eval-in-host form)
-                                     (setf (car abandonable-box) nil))))
+                                   (setf (car in-region) t)
+                                   (unwind-protect
+                                        (prog1 (eval-in-host form)
+                                          (when (and defer-p (car abandon))
+                                            (throw 'self-abandoned nil)))
+                                     (setf (car in-region) nil))))
                         (bt:signal-semaphore done))))
                   :name "nyaa-self-eval")))
     (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
         result
-        (progn (abandon-self-eval worker abandonable-box) (fail :timeout)))))
+        (progn (abandon-self-eval worker in-region abandon defer-p) (fail :timeout)))))
 
-(defun abandon-self-eval (worker abandonable-box)
-  (ignore-errors
-   (when (bt:thread-alive-p worker)
-     (bt:interrupt-thread
-      worker (lambda () (when (car abandonable-box) (throw 'self-abandoned nil)))))))
+(defun abandon-self-eval (worker in-region abandon defer-p)
+  (if defer-p
+      (setf (car abandon) t)
+      (ignore-errors
+       (when (bt:thread-alive-p worker)
+         (bt:interrupt-thread
+          worker (lambda () (when (car in-region) (throw 'self-abandoned nil))))))))
 
 (defun eval-in-host (form)
   (let ((out (make-string-output-stream)))
