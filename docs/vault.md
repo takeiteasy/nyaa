@@ -56,7 +56,8 @@ list from files on disk rather than an index. `:how` is `:folded` or
 generation and [`tool-self`'s log](self.md#checkpoint-and-log) both apply,
 through the same shared `%append-log`/`%read-log` helpers checkpoint.lisp
 declares -- so a vault entry can never run code merely by being read back,
-and an append to either log serialises the same way.
+and appends to one log file serialise behind a lock of their own, keyed by
+the file's canonical name, so different logs never wait on each other.
 
 ## `tool-vault`
 
@@ -91,9 +92,6 @@ agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
 
-- One lock serialises every append across every log path, self's and the
-  vault's alike, so they queue behind each other even though they touch
-  different files ([#65](https://todo.sr.ht/~takeiteasy/nyaa/65)).
 - The log never shrinks and every read folds it in full, so both cost grow
   without bound as entries pile up
   ([#67](https://todo.sr.ht/~takeiteasy/nyaa/67)).

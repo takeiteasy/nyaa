@@ -92,22 +92,35 @@ worker applies to a submitted form."
 ;;; back the same guarded way a generation is. Shared here rather than
 ;;; duplicated.
 ;;;
-;;; TODO: one lock across every log path, so an append to the self log
-;;; blocks behind an append to the vault and vice versa -- a corner cut on
-;;; purpose. Upgrade path: a lock per path, keyed by its truename, if
-;;; concurrent logs ever make that queue matter. Tracked in
-;;; ~takeiteasy/nyaa#65.
+;;; One lock per log file, keyed by its canonical name, so two specs naming
+;;; the same file serialise and different files never queue behind each other.
 
-(defvar *log-lock* (bt:make-lock :name "nyaa-log")
-  "Serialises every %APPEND-LOG across every log path (~takeiteasy/nyaa#65).")
+(defvar *log-locks* (make-hash-table :test 'equal)
+  "Canonical log namestring -> its lock.")
+
+(defvar *log-locks-lock* (bt:make-lock :name "nyaa-log-registry")
+  "Guards *LOG-LOCKS*.")
+
+(defun %log-key (path)
+  "PATH's canonical namestring. Its directory must exist."
+  (or (a:when-let ((file (probe-file path))) (namestring file))
+      (namestring (merge-pathnames (file-namestring path)
+                                   (truename (uiop:pathname-directory-pathname path))))))
+
+(defun %log-lock (path)
+  (ensure-directories-exist path)
+  (let ((key (%log-key path)))
+    (bt:with-lock-held (*log-locks-lock*)
+      (or (gethash key *log-locks*)
+          (setf (gethash key *log-locks*) (bt:make-lock :name key))))))
 
 (defun %append-log (path entry)
   "Append ENTRY, a plist, to PATH as one printed form per line. *PRINT-CASE*
 downcase and the keyword package, so the file reads back the same way
 regardless of the caller's own *PACKAGE*."
-  (ensure-directories-exist path)
-  (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
-    (bt:with-lock-held (*log-lock*)
+  (let ((lock (%log-lock path))
+        (*package* (find-package "KEYWORD")) (*print-case* :downcase))
+    (bt:with-lock-held (lock)
       (with-open-file (stream path :direction :output :if-exists :append
                                     :if-does-not-exist :create)
         (prin1 entry stream)
@@ -116,14 +129,29 @@ regardless of the caller's own *PACKAGE*."
 (defun %read-log (path)
   "Every entry in PATH, oldest first, read with *READ-EVAL* nil -- the same
 guard %READ-GENERATION applies -- so a log can never run code merely by
-being read back. A malformed line is skipped rather than failing the read."
+being read back. A malformed form ends the read; the second value is nil
+then, T when the whole file read cleanly."
   (if (not (probe-file path))
-      nil
-      (let ((*read-eval* nil) (*package* (find-package "KEYWORD")))
+      (values nil t)
+      (let ((*read-eval* nil) (*package* (find-package "KEYWORD")) (clean t))
         (with-open-file (stream path)
-          (loop for form = (handler-case (read stream nil :eof) (error () :eof))
-                until (eq form :eof)
-                collect form)))))
+          (values (loop for form = (handler-case (read stream nil :eof)
+                                     (error () (setf clean nil) :eof))
+                        until (eq form :eof)
+                        collect form)
+                  clean)))))
+
+(defun %write-log (path entries)
+  "ENTRIES written to PATH, one form per line, through a temporary file in
+the same directory and renamed in. The caller holds PATH's %LOG-LOCK."
+  (uiop:with-temporary-file (:pathname tmp :directory (uiop:pathname-directory-pathname path)
+                             :type "tmp" :keep t)
+    (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+      (with-open-file (stream tmp :direction :output :if-exists :supersede)
+        (dolist (entry entries)
+          (prin1 entry stream)
+          (terpri stream))))
+    (uiop:rename-file-overwriting-target tmp path)))
 
 ;;; --- the API -------------------------------------------------------------
 

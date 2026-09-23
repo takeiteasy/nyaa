@@ -218,3 +218,37 @@
                (first (nyaa:tool-error
                        (nyaa:invoke-tool :tool-checkpoint :op :restore
                                         :path "/nonexistent/x.generation")))))))
+
+;;; --- per-path log locks (~takeiteasy/nyaa#65) -----------------------------
+
+(test one-file-under-two-spellings-shares-a-lock
+  (with-generations-directory (dir)
+    (ensure-directories-exist (format nil "~asub/" dir))
+    (let ((a (format nil "~ax.log" dir))
+          (b (format nil "~asub/../x.log" dir)))
+      (is (eq (nyaa::%log-lock a) (nyaa::%log-lock b)))
+      (is (not (eq (nyaa::%log-lock a) (nyaa::%log-lock (format nil "~ay.log" dir))))))))
+
+(test appending-to-one-log-does-not-wait-on-another
+  (with-generations-directory (dir)
+    (let* ((a (format nil "~aa.log" dir))
+           (b (format nil "~ab.log" dir))
+           (lock (nyaa::%log-lock a))
+           (done nil))
+      (bt:with-lock-held (lock)
+        (bt:make-thread (lambda ()
+                          (nyaa::%append-log b '(:kind :x))
+                          (setf done t)))
+        (loop repeat 100 until done do (sleep 0.05))
+        (is-true done))
+      (is (equal '((:kind :x)) (nyaa::%read-log b))))))
+
+(test read-log-reports-a-torn-tail
+  (with-generations-directory (dir)
+    (let ((path (format nil "~aa.log" dir)))
+      (nyaa::%append-log path '(:kind :x))
+      (is (eq t (nth-value 1 (nyaa::%read-log path))))
+      (with-open-file (s path :direction :output :if-exists :append)
+        (write-string "(broken" s))
+      (is (equal '((:kind :x)) (nyaa::%read-log path)))
+      (is (null (nth-value 1 (nyaa::%read-log path)))))))

@@ -230,8 +230,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).
-- `tool-self` and `tool-vault` share one append-only log lock, so a write to
-  one blocks behind a write to the other
-  ([#65](https://todo.sr.ht/~takeiteasy/nyaa/65)), and the vault's log
-  itself never shrinks ([#67](https://todo.sr.ht/~takeiteasy/nyaa/67)). See
+- The vault's log itself never shrinks
+  ([#67](https://todo.sr.ht/~takeiteasy/nyaa/67)). See
   [the vault](vault.md#limitations).
