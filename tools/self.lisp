@@ -201,9 +201,14 @@ defers interrupts across the whole form instead of leaving it abandonable."
 ;;; write. It only raises the ABANDON flag; the worker checks it itself,
 ;;; from its own thread, right after EVAL-IN-HOST returns, and throws only
 ;;; then. A deadline during a deferred write therefore always waits for the
-;;; form to finish rather than risking tearing it -- and a form that never
-;;; finishes leaks its thread instead of being killed, the ceiling
-;;; ~takeiteasy/nyaa#68 tracks.
+;;; form to finish rather than risking tearing it.
+;;;
+;;; TODO: a form that never finishes -- a wedged :eql specializer, a slow
+;;; compile -- leaks its thread instead of being killed, since it is never
+;;; interrupted at all. Upgrade path: defer only around the CLOS mutation
+;;; itself, once an implementation exposes where that starts relative to
+;;; the form's own evaluation, rather than around the whole form. Tracked
+;;; in ~takeiteasy/nyaa#68.
 
 (defun run-in-host (form timeout-ms &optional defer-p)
   "FORM evaluated on its own thread, interrupted at TIMEOUT-MS -- or, when
