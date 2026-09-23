@@ -401,17 +401,16 @@ here but not assumed of the caller's own services)."
 
 ;;; --- checkpoints (~takeiteasy/nyaa#11) ----------------------------------
 
-;;; %PENDING, %PENDING-ORDER, %STEP-REF and %CANCEL-TIMER all reference
-;;; spawned processes that will not exist after a restore, so none of them
-;;; is recorded: a snapshot taken mid-run keeps the conversation and drops
-;;; the turn in flight, and RESTORE always lands a not-running agent. This
-;;; is deliberate rather than a gap -- #12 checkpoints *during* a run, so
-;;; refusing a busy agent would make the feature useless there -- and is
-;;; tracked as ~takeiteasy/nyaa#50: the dropped turn's tool calls are simply
-;;; gone, never retried or reported.
+;;; The turn and tool calls in flight reference spawned processes a restore
+;;; cannot bring back, so only their ids are recorded, under :IN-FLIGHT, for
+;;; a caller to see the checkpoint was taken mid-run. RESTORE lands a
+;;; not-running agent and ignores it.
 
 (defmethod snapshot ((service agent))
-  (list :messages (%messages service) :turns (%turns service)))
+  (append (list :messages (%messages service) :turns (%turns service))
+          (when (%running-p service)
+            (list :in-flight (list :turn (%turns service)
+                                   :tool-calls (copy-list (%pending-order service)))))))
 
 (defmethod restore ((service agent) state)
   (cancel-deadline service)

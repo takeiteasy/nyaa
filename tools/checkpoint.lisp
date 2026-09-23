@@ -30,8 +30,9 @@
 
 (defun op-checkpoint-save (context dir label keep)
   (handler-case
-      (ok :path (namestring (checkpoint (m:service-process context)
-                                        :dir dir :label label :keep keep)))
+      (multiple-value-bind (path interrupted unavailable)
+          (checkpoint (m:service-process context) :dir dir :label label :keep keep)
+        (ok :path (namestring path) :interrupted interrupted :unavailable unavailable))
     (file-error (e) (fail (list :error (princ-to-string e))))))
 
 (defun op-checkpoint-list (dir)

@@ -22,12 +22,6 @@
 ;;; merely by the log being read back. Each entry also reaches meow's
 ;;; logger, when one is mounted, for live visibility; the file is the
 ;;; durable copy.
-;;;
-;;; TODO: a checkpoint taken here shares #11's own ceilings -- it does not
-;;; bound its own time by :TIMEOUT (~takeiteasy/nyaa#51) and, issued mid-run
-;;; the way an agent's own call always is, it keeps the conversation but not
-;;; the turn in flight (~takeiteasy/nyaa#50). Both are tracked already;
-;;; nothing here raises the ceiling further.
 
 (defvar *self-log* nil
   "Default log path for TOOL-SELF: ~/.nyaa/self.log, resolved lazily so

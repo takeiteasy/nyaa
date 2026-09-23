@@ -46,12 +46,20 @@ whose name is nil (agent.lisp) -- is skipped, as is its own subtree."
 
 ;;; A reply of (:error ...) -- a service outside these three conventions,
 ;;; still answering the shared UNKNOWN-MESSAGE fallback -- is recorded as no
-;;; state rather than failing the whole checkpoint. A transport failure
-;;; (M:CALL's second value) is treated the same way.
+;;; state. A transport failure (M:CALL's second value) is recorded as
+;;; :UNAVAILABLE instead, which ROLLBACK skips rather than restoring nil over
+;;; whatever the service holds.
 
-(defun %snapshot-child (process)
-  (multiple-value-bind (reply status) (m:call process '(:snapshot) :timeout 30)
-    (if (or status (tool-error-p reply)) nil reply)))
+(defun %unavailable-reason (status)
+  "STATUS, M:CALL's second value, as a keyword safe to print into a generation."
+  (if (consp status) (first status) status))
+
+(defun %interrupted-p (state)
+  "True when STATE is a plist carrying a non-nil :IN-FLIGHT -- work a restore
+cannot bring back."
+  (and (consp state) (a:proper-list-p state) (evenp (length state))
+       (getf state :in-flight)
+       t))
 
 (defun %restore-child (process state)
   (multiple-value-bind (reply status) (m:call process (list :restore state) :timeout 30)
@@ -186,13 +194,6 @@ the same directory and renamed in. The caller holds PATH's WITH-LOG-LOCK."
 
 ;;; --- the API -------------------------------------------------------------
 
-;; TODO: entries are snapshotted one M:CALL at a time, in mount order, so a
-;; service busy in a long synchronous call (a protocol mid-HTTP-exchange, a
-;; tool mid-command) makes every later entry wait behind it rather than
-;; being skipped or run in parallel. Upgrade path: fan the calls out
-;; concurrently and cap each on its own deadline independently of the
-;; others. Tracked in ~takeiteasy/nyaa#51.
-
 (defun %canonical-path (path)
   "PATH resolved to its TRUENAME when possible. A symlinked TMPDIR (macOS's
 /var, say) resolves differently under a plain MERGE-PATHNAMES than under a
@@ -201,17 +202,31 @@ the resolving -- so CHECKPOINT's return and GENERATIONS' own :path both go
 through this, and always compare equal to each other."
   (or (ignore-errors (truename path)) path))
 
-(defun checkpoint (context &key (dir *generations-directory*) label keep)
+(defun %snapshot-entry (entry outcome)
+  (destructuring-bind (reply status) outcome
+    (let ((base (list :name (getf entry :name) :class (getf entry :class))))
+      (cond (status (append base (list :unavailable (%unavailable-reason status))))
+            ((tool-error-p reply) (append base (list :state nil)))
+            (t (append base (list :state reply)))))))
+
+(defun %entry-names (services key)
+  (loop for entry in services
+        when (ecase key
+               (:interrupted (%interrupted-p (getf entry :state)))
+               (:unavailable (getf entry :unavailable)))
+          collect (getf entry :name)))
+
+(defun checkpoint (context &key (dir *generations-directory*) label keep (timeout 30))
   "Snapshot every named service under CONTEXT, a mounted context's process,
-recursively, and write it as a generation file under DIR. Returns the
-generation's pathname. KEEP, given, prunes DIR to its KEEP newest
-generations afterwards."
+recursively, and write it as a generation file under DIR. Every service is
+asked at once and given TIMEOUT seconds; one that does not answer is
+recorded :UNAVAILABLE. KEEP, given, prunes DIR to its KEEP newest
+generations afterwards. Returns the generation's pathname, then the names
+of the services snapshotted mid-work and of those unavailable."
   (let* ((entries (%context-entries context))
-         (services (mapcar (lambda (entry)
-                              (list :name (getf entry :name)
-                                    :class (getf entry :class)
-                                    :state (%snapshot-child (getf entry :process))))
-                            entries))
+         (outcomes (m:call-all (mapcar (lambda (entry) (getf entry :process)) entries)
+                               '(:snapshot) :timeout timeout))
+         (services (mapcar #'%snapshot-entry entries outcomes))
          (directory (uiop:ensure-directory-pathname dir))
          (path (merge-pathnames (%generation-filename) directory)))
     (ensure-directories-exist directory)
@@ -219,7 +234,9 @@ generations afterwards."
                        (list :nyaa-generation 1 :created (%now-iso8601)
                              :label label :services services))
     (when keep (%prune-generations directory keep))
-    (%canonical-path path)))
+    (values (%canonical-path path)
+            (%entry-names services :interrupted)
+            (%entry-names services :unavailable))))
 
 (defun %generation-image (path)
   "PATH's sibling .core (~takeiteasy/nyaa#48's SAVE-IMAGE writes one
@@ -229,8 +246,9 @@ alongside its generation, same basename), or nil."
 
 (defun generations (&key (dir *generations-directory*))
   "Every generation under DIR, newest first, as (:path :created :label
-:services :image), :services naming the services it covers rather than
-their state. :IMAGE is the generation's sibling .core, or nil if none was
+:services :interrupted :unavailable :image), :services naming the services
+it covers rather than their state, :interrupted and :unavailable the ones
+snapshotted mid-work or not at all. :IMAGE is the generation's sibling .core, or nil if none was
 taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
   (sort (loop for path in (ignore-errors
                             (uiop:directory-files (uiop:ensure-directory-pathname dir)
@@ -242,6 +260,8 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
                               :label (getf generation :label)
                               :services (mapcar (lambda (entry) (getf entry :name))
                                                 (getf generation :services))
+                              :interrupted (%entry-names (getf generation :services) :interrupted)
+                              :unavailable (%entry-names (getf generation :services) :unavailable)
                               :image (%generation-image path)))
         ;; The filename is timestamp-then-random, so sorting by it (rather
         ;; than :CREATED, which two generations in the same second share)
@@ -256,18 +276,26 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
     (a:when-let ((image (getf stale :image)))
       (ignore-errors (delete-file image)))))
 
+;; TODO: restores are sent one M:CALL at a time, so a busy service delays every
+;; later one. Upgrade path: a per-process-message parallel call. Tracked in
+;; ~takeiteasy/nyaa#92.
+
 (defun rollback (context path)
   "Restore the generation at PATH onto CONTEXT's named services now.
-Returns (:ok (:restored names :missing names :mismatched entries :extra
-names)). MISSING names a generation entry with no service mounted under
-that name now; MISMATCHED one mounted under a different class, which is
-reported rather than restored; EXTRA a service mounted now the generation
-does not name. None of these fails the call -- the caller decides what
-drift means."
+Returns (:ok (:restored names :failed names :interrupted names :unavailable
+names :missing names :mismatched entries :extra names)). FAILED names a
+restore that got no answer; INTERRUPTED a restored service that was
+snapshotted mid-work, whose in-flight work is gone; UNAVAILABLE an entry the
+checkpoint could not snapshot, left as it is. MISSING names a generation
+entry with no service mounted under that name now; MISMATCHED one mounted
+under a different class, which is reported rather than restored; EXTRA a
+service mounted now the generation does not name. None of these fails the
+call -- the caller decides what drift means."
   (let* ((generation (%read-generation path))
          (recorded (getf generation :services))
          (current (%context-entries context))
-         (restored '()) (missing '()) (mismatched '()))
+         (restored '()) (failed '()) (interrupted '()) (unavailable '())
+         (missing '()) (mismatched '()))
     (dolist (entry recorded)
       (let* ((name (getf entry :name))
              (found (find name current :key (lambda (e) (getf e :name)))))
@@ -277,9 +305,13 @@ drift means."
            (push (list :name name :expected (getf entry :class)
                        :actual (getf found :class))
                  mismatched))
-          (t (%restore-child (getf found :process) (getf entry :state))
-             (push name restored)))))
-    (ok :restored (nreverse restored) :missing (nreverse missing)
-        :mismatched (nreverse mismatched)
+          ((getf entry :unavailable) (push name unavailable))
+          ((not (%restore-child (getf found :process) (getf entry :state)))
+           (push name failed))
+          (t (push name restored)
+             (when (%interrupted-p (getf entry :state)) (push name interrupted))))))
+    (ok :restored (nreverse restored) :failed (nreverse failed)
+        :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
+        :missing (nreverse missing) :mismatched (nreverse mismatched)
         :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
                                (mapcar (lambda (e) (getf e :name)) recorded)))))

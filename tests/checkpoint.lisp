@@ -144,37 +144,36 @@
 (test agent-checkpoint-restores-mid-run-state-and-lands-not-running
   ;; A snapshot is only interesting taken mid-run: finishing a run exits the
   ;; agent (M:AGENT's own convention), and the mount's default :restart
-  ;; brings it back as a fresh, empty instance -- there is no conversation
-  ;; left to see afterwards, from CHECKPOINT or otherwise. The backend is
-  ;; slowed down to hold that window open, and the checkpoint is taken, then
+  ;; brings it back as a fresh, empty instance. The backend is slowed down
+  ;; to hold that window open, and the whole context is checkpointed, then
   ;; rolled back, while :running-p is still t on the very same process.
-  ;;
-  ;; The agent is checkpointed through its own nested context, holding only
-  ;; itself: CHECKPOINT walks a context's children serially, one SNAPSHOT
-  ;; call at a time (~takeiteasy/nyaa#51), and protocol-openai is
-  ;; itself blocked for the run's own 0.3s while its one HTTP exchange is in
-  ;; flight -- a checkpoint of the whole :agents context would queue behind
-  ;; it and only reach :assistant after the run had already finished.
+  ;; protocol-openai is blocked for the run's own 0.3s, so this also shows
+  ;; CHECKPOINT does not queue behind it.
   (let* ((registry (make-instance 'm:registry))
          (m:*registry* registry)
          (context (m:start-service (make-instance 'm:context :name :agents)
                                    :registry registry))
          (server (start-fake-http (lambda (&rest r) (declare (ignore r))
-                                    (sleep 0.3) (json-response +hello-reply+))))
-         (agent-context (m:mount context 'm:context :name :agent-only)))
+                                    (sleep 0.3) (json-response +hello-reply+)))))
     (unwind-protect
          (with-generations-directory (dir)
            (m:mount context 'nyaa:protocol-openai)
            (apply #'m:mount context (first (keyed)) :base-url (fake-http-url server) (rest (keyed)))
-           (m:mount agent-context 'nyaa:agent :name :assistant :model :provider-test-keyed)
+           (m:mount context 'nyaa:agent :name :assistant :model :provider-test-keyed)
            (m:cast (m:lookup :assistant) (list :run :messages '((:role :user :content "hi"))))
            (let ((mid-run (wait-for-agent-turns :assistant 1 1.0)))
              (is (eql 1 (getf mid-run :turns)))
              (is (search "hi" (prin1-to-string (getf mid-run :messages))))
-             (let ((path (nyaa:checkpoint agent-context :dir dir)))
-               (nyaa:rollback agent-context path)
+             (is (equal '(:turn 1 :tool-calls nil) (getf mid-run :in-flight)))
+             (multiple-value-bind (path interrupted) (nyaa:checkpoint context :dir dir)
+               (is (equal '(:assistant) interrupted))
+               (is (equal '(:assistant) (getf (first (nyaa:generations :dir dir)) :interrupted)))
+               (is (equal '(:assistant)
+                          (getf (second (nyaa:rollback context path)) :interrupted)))
                (let ((restored (agent-snapshot :assistant)))
-                 (is (equal mid-run restored)))
+                 (is (equal (getf mid-run :messages) (getf restored :messages)))
+                 (is (eql 1 (getf restored :turns)))
+                 (is (null (getf restored :in-flight))))
                ;; RESTORE always lands a not-running agent: a further :run
                ;; is accepted at once rather than refused as already
                ;; running. START-RUN answers synchronously, before the
@@ -185,6 +184,49 @@
                                    (list :run :messages '((:role :user :content "second")))))))))
       (m:stop context)
       (stop-fake-http server))))
+
+;;; --- unavailable services -------------------------------------------------
+
+(m:defservice slow-thing () ((value :initform 5 :accessor slow-value))
+  (:name :slow-thing))
+
+(defmethod m:handle ((service slow-thing) message)
+  (case (first message)
+    (:snapshot (sleep 1) (list :value (slow-value service)))
+    (:restore (setf (slow-value service) (getf (second message) :value)) t)
+    (:get (slow-value service))
+    (:set (setf (slow-value service) (second message)))
+    (t nil)))
+
+(test a-service-that-misses-the-deadline-is-unavailable-and-left-alone
+  (with-checkpoints (dir)
+    (m:mount *ckpt-context* 'slow-thing)
+    (set-thing 3)
+    (let ((start (get-internal-real-time)))
+      (multiple-value-bind (path interrupted unavailable)
+          (nyaa:checkpoint *ckpt-context* :dir dir :timeout 0.3)
+        (is (< (- (get-internal-real-time) start) (* 0.8 internal-time-units-per-second)))
+        (is (null interrupted))
+        (is (equal '(:slow-thing) unavailable))
+        (is (equal '(:slow-thing) (getf (first (nyaa:generations :dir dir)) :unavailable)))
+        (m:call (m:lookup :slow-thing) '(:set 9))
+        (set-thing 0)
+        (let ((result (second (nyaa:rollback *ckpt-context* path))))
+          (is (equal '(:slow-thing) (getf result :unavailable)))
+          (is (not (member :slow-thing (getf result :restored)))))
+        (is (eql 3 (thing)) "the service that answered is restored")
+        (is (eql 9 (m:call (m:lookup :slow-thing) '(:get))) "the unavailable one is untouched")))))
+
+(test a-slow-service-does-not-delay-the-others
+  (with-checkpoints (dir)
+    (m:mount *ckpt-context* 'slow-thing)
+    (set-thing 3)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir :timeout 0.3)))
+      (let ((entries (getf (nyaa::%read-generation path) :services)))
+        (is (equal '(:value 3)
+                   (getf (find :stateful-thing entries
+                               :key (lambda (e) (getf e :name)))
+                         :state)))))))
 
 ;;; --- tool-checkpoint --------------------------------------------------
 
@@ -206,6 +248,17 @@
       (set-thing 0)
       (nyaa:invoke-tool :tool-checkpoint :op :restore :path path)
       (is (eql 7 (thing))))))
+
+(test tool-checkpoint-save-marks-itself-unavailable-rather-than-hanging
+  ;; :save runs inside the tool's own process, so snapshotting it is a
+  ;; deadlock M:CALL-ALL refuses at once.
+  (with-checkpoints (dir)
+    (let* ((start (get-internal-real-time))
+           (save (nyaa:invoke-tool :tool-checkpoint :op :save)))
+      (is (< (- (get-internal-real-time) start) (* 5 internal-time-units-per-second)))
+      (is (eq :ok (first save)))
+      (is (equal '(:tool-checkpoint) (getf (second save) :unavailable)))
+      (is (null (getf (second save) :interrupted))))))
 
 (test tool-checkpoint-restore-requires-a-path
   (with-checkpoints (dir)

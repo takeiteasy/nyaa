@@ -155,8 +155,6 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   later `defmethod` in the same `:eval` whose `:eql` specializer hangs --
   still leaks its thread, the same way the whole-form deferral did before
   it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)).
-- The checkpoint taken before a write shares checkpoint.lisp's own
-  ceilings: it is not bounded by `:timeout`
-  ([#51](https://todo.sr.ht/~takeiteasy/nyaa/51)), and issued mid-run, the
-  way an agent's own call always is, it keeps the conversation but not the
-  turn in flight ([#50](https://todo.sr.ht/~takeiteasy/nyaa/50)).
+- The checkpoint taken before a write waits up to `checkpoint`'s own 30
+  second `:timeout` for a busy service, independent of `:timeout`, and
+  does not report which services it caught mid-run.
