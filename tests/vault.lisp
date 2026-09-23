@@ -219,3 +219,81 @@ after the message that triggered it has already returned."
       (let ((id (nyaa:vault-record path :assistant "drop me")))
         (vault :op :discard :id id)
         (is (equal :bad-request (first (nyaa:tool-error (vault :op :discard :id id)))))))))
+
+;;; --- compaction (~takeiteasy/nyaa#67) ---------------------------------------
+
+(defun append-raw-vault-line (path form)
+  (with-open-file (stream path :direction :output :if-exists :append :if-does-not-exist :create)
+    (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+      (prin1 form stream)
+      (terpri stream))))
+
+(defun record-old-consumed (path id at)
+  "A steer at PATH consumed at the iso8601 time AT."
+  (append-raw-vault-line path (list :kind :steer :id id :at at :agent :assistant :content id))
+  (append-raw-vault-line path (list :kind :consumed :id id :at at :how :folded)))
+
+(test vault-compact-drops-only-consumed-entries-past-max-age
+  (with-vault-path (path)
+    (record-old-consumed path "old" "2020-01-01T00:00:00Z")
+    (let ((recent (nyaa:vault-record path :assistant "recent"))
+          (pending (nyaa:vault-record path :assistant "pending")))
+      (nyaa:vault-consume path recent :folded)
+      (is (equal '(1 2) (multiple-value-list (nyaa:vault-compact path :max-age 3600))))
+      (is (equal (list recent pending)
+                 (mapcar (lambda (e) (getf e :id)) (nyaa:vault-entries path))))
+      (is (eq :folded (getf (first (nyaa:vault-entries path)) :status)))
+      (is (eq :pending (getf (second (nyaa:vault-entries path)) :status))))))
+
+(test vault-compact-keeps-a-pending-entry-consumable
+  (with-vault-path (path)
+    (record-old-consumed path "old" "2020-01-01T00:00:00Z")
+    (let ((id (nyaa:vault-record path :assistant "pending")))
+      (nyaa:vault-compact path)
+      (nyaa:vault-consume path id :discarded)
+      (is (eq :discarded (getf (first (nyaa:vault-entries path)) :status))))))
+
+(test vault-compact-max-age-zero-drops-every-consumed-entry
+  (with-vault-path (path)
+    (let ((a (nyaa:vault-record path :assistant "a"))
+          (b (nyaa:vault-record path :assistant "b")))
+      (nyaa:vault-consume path a :folded)
+      (is (equal '(1 1) (multiple-value-list (nyaa:vault-compact path :max-age 0))))
+      (is (equal (list b) (mapcar (lambda (e) (getf e :id)) (nyaa:vault-entries path)))))))
+
+(test vault-compact-refuses-a-malformed-log
+  (with-vault-path (path)
+    (record-old-consumed path "old" "2020-01-01T00:00:00Z")
+    (with-open-file (stream path :direction :output :if-exists :append)
+      (write-string "(torn" stream))
+    (let ((before (uiop:read-file-string path)))
+      (is (null (nyaa:vault-compact path)))
+      (is (equal before (uiop:read-file-string path))))))
+
+(test appending-past-the-size-threshold-compacts
+  (with-vault-path (path)
+    (record-old-consumed path "old" "2020-01-01T00:00:00Z")
+    (let ((nyaa:*vault-compact-size* 1))
+      (nyaa:vault-record path :assistant "new"))
+    (is (equal '("new") (mapcar (lambda (e) (getf e :content)) (nyaa:vault-entries path))))))
+
+(test tool-vault-compact-answers-counts
+  (with-vault-path (path)
+    (with-agent (nil)
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (let ((id (nyaa:vault-record path :assistant "a")))
+        (nyaa:vault-record path :assistant "b")
+        (vault :op :discard :id id)
+        (let ((result (vault :op :compact :max-age 0)))
+          (is (eq :ok (first result)))
+          (is (eql 1 (getf (second result) :dropped)))
+          (is (eql 1 (getf (second result) :kept))))))))
+
+(test tool-vault-compact-reports-a-malformed-log
+  (with-vault-path (path)
+    (with-agent (nil)
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (nyaa:vault-record path :assistant "a")
+      (with-open-file (stream path :direction :output :if-exists :append)
+        (write-string "(torn" stream))
+      (is (equal :bad-request (first (nyaa:tool-error (vault :op :compact))))))))

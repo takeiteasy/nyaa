@@ -27,7 +27,8 @@
    #:save-image #:relaunch #:save-recovery-image
    #:self-define
    ;; vault
-   #:vault-record #:vault-consume #:vault-entries #:*vault-log*
+   #:vault-record #:vault-consume #:vault-entries #:vault-compact #:*vault-log*
+   #:*vault-max-age* #:*vault-compact-size*
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema

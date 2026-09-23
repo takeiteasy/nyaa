@@ -63,8 +63,8 @@ whose name is nil (agent.lisp) -- is skipped, as is its own subtree."
     (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~6,'0d.generation"
             year month day hour min sec (random 1000000))))
 
-(defun %now-iso8601 ()
-  (multiple-value-bind (sec min hour day month year) (get-decoded-time)
+(defun %now-iso8601 (&optional (universal-time (get-universal-time)))
+  (multiple-value-bind (sec min hour day month year) (decode-universal-time universal-time 0)
     (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0dZ"
             year month day hour min sec)))
 

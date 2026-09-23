@@ -49,15 +49,27 @@ after the seed messages, on the first turn.
  :how :folded)
 ```
 
-Nothing is ever rewritten in place -- `vault-entries` folds the log into
-current state, the same way [`generations`](checkpoints.md) derives its
-list from files on disk rather than an index. `:how` is `:folded` or
-`:discarded`. Read with `*read-eval*` bound to nil, the same guard a
-generation and [`tool-self`'s log](self.md#checkpoint-and-log) both apply,
-through the same shared `%append-log`/`%read-log` helpers checkpoint.lisp
-declares -- so a vault entry can never run code merely by being read back,
-and appends to one log file serialise behind a lock of their own, keyed by
-the file's canonical name, so different logs never wait on each other.
+`vault-entries` folds the log into current state, the same way
+[`generations`](checkpoints.md) derives its list from files on disk rather
+than an index. `:how` is `:folded` or `:discarded`. Read with `*read-eval*`
+bound to nil, the same guard a generation and
+[`tool-self`'s log](self.md#checkpoint-and-log) both apply, through the
+same shared `%append-log`/`%read-log` helpers checkpoint.lisp declares -- so
+a vault entry can never run code merely by being read back. Appends to one
+log file serialise behind a lock of their own, keyed by the file's canonical
+name, so different logs never wait on each other.
+
+## Compaction
+
+`(nyaa:vault-compact path :max-age seconds)` rewrites the log without the
+steers consumed more than `max-age` seconds ago (default `*vault-max-age*`,
+7 days; `0` drops every consumed steer) and their `:consumed` lines.
+Pending steers are always kept. It answers the steers dropped and kept.
+
+An append also compacts once the file passes `*vault-compact-size*` (1 MiB)
+and has doubled since the last attempt. A log with a malformed entry is
+never rewritten -- that would lose everything past the entry -- so
+`vault-compact` answers nil and the file is left as it is.
 
 ## `tool-vault`
 
@@ -68,9 +80,10 @@ writes to harness state.
 
 | `:op` | Params | Answers |
 |---|---|---|
-| `:list` | `:status` (default `:pending`), `:agent`, `:limit` | `:entries`, `:total` |
+| `:list` | `:status` (default `:pending`), `:limit` | `:entries`, `:total` |
 | `:restore` | `:id` (required), `:agent` | `:agent`, `:id` |
 | `:discard` | `:id` (required) | `:id` |
+| `:compact` | `:max-age` (seconds, default `*vault-max-age*`) | `:dropped`, `:kept` |
 
 ```lisp
 (m:mount *ctx* 'nyaa:tool-vault)
@@ -92,6 +105,9 @@ agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
 
-- The log never shrinks and every read folds it in full, so both cost grow
-  without bound as entries pile up
-  ([#67](https://todo.sr.ht/~takeiteasy/nyaa/67)).
+- Compaction is safe within one process only; another process appending
+  during a compaction loses its entry
+  ([#84](https://todo.sr.ht/~takeiteasy/nyaa/84)).
+- `:restore` and `:discard` check an entry and consume it in two steps, so
+  two concurrent calls on one id can both succeed
+  ([#85](https://todo.sr.ht/~takeiteasy/nyaa/85)).

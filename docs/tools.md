@@ -117,7 +117,7 @@ kept running.
 | `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
 | `:tool-checkpoint` | `:op`, `:label`, `:keep`, `:path` | Save, list and roll back generations of the harness's declared state. See [checkpoints](checkpoints.md). |
 | `:tool-self` | `:op`, `:form`, `:package`, `:name`, `:label`, `:limit`, `:timeout` | Evaluate, redefine and reload in the host image, each write gated by `:enable`, checkpointed and logged. See [self-modification](self.md). |
-| `:tool-vault` | `:op`, `:id`, `:agent`, `:status`, `:limit` | List, restore and discard entries in the steering message vault. See [the vault](vault.md). |
+| `:tool-vault` | `:op`, `:id`, `:agent`, `:status`, `:limit`, `:max-age` | List, restore, discard and compact entries in the steering message vault. See [the vault](vault.md). |
 
 `:timeout` is in milliseconds and defaults to 30000. `tool-fs`, `tool-image`
 and `tool-services` bound no work of their own, so they declare no `:timeout`
@@ -230,6 +230,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).
-- The vault's log itself never shrinks
-  ([#67](https://todo.sr.ht/~takeiteasy/nyaa/67)). See
+- `tool-vault`'s compaction is safe within one process only
+  ([#84](https://todo.sr.ht/~takeiteasy/nyaa/84)). See
   [the vault](vault.md#limitations).
