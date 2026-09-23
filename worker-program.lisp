@@ -37,6 +37,10 @@
             (say (handler-case
                      (let ((form (read-from-string (second message))))
                        (handler-case
+                           ;; TODO: only the primary value is kept -- a form
+                           ;; returning (values 1 2) is seen as just "1".
+                           ;; Upgrade path: capture and render every value.
+                           ;; Tracked in ~takeiteasy/nyaa#105.
                            (let ((value (let ((*standard-output* out)
                                               (*error-output* out))
                                           (eval form))))

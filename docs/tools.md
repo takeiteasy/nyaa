@@ -151,9 +151,9 @@ and a `tool-repl` id starts empty again. A session inherited through a
 relaunched [image](images.md) is reported lost once, then starts empty.
 
 Each `tool-repl` id runs on its own session, mounted under the tool's
-context on first use, so a long evaluation on one id no longer blocks
-another, or the tool's own `:describe`. Calls on one id still run in order,
-since a session's own mailbox serialises them.
+context on first use, so each id evaluates independently of the others and
+of the tool's own `:describe`. Calls on one id still run in order, since a
+session's own mailbox serialises them.
 
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
@@ -245,6 +245,12 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
+- A `tool-repl` session lives for as long as its process does once mounted,
+  so an id that is never used again keeps its worker, if any, and its
+  effect entry around indefinitely ([#104](https://todo.sr.ht/~takeiteasy/nyaa/104)).
+- `tool-eval` and `tool-repl` only keep a form's primary value; a form
+  returning several loses the rest
+  ([#105](https://todo.sr.ht/~takeiteasy/nyaa/105)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

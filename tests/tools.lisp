@@ -51,6 +51,13 @@
 (defun result-value (result key)
   (getf (second result) key))
 
+(defun call-refused-p (reply status)
+  "True for either shape a queued call can fail with when tool-repl is torn
+down mid-eval: nyaa's own (:error ...) result, settled by the session, or a
+bare M:CALL failure (STATUS non-nil), settled by tool-repl's own process
+exiting first -- both mean the caller was not left hanging."
+  (or (nyaa:tool-error-p reply) (not (null status))))
+
 (defmacro tool-thread (&body body)
   ;; A plain BT:MAKE-THREAD does not inherit dynamic bindings, and
   ;; M:*REGISTRY* is one WITH-TOOLS establishes with a LET -- so a thread
@@ -655,17 +662,48 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
                                    :value))))))
 
 (test unmounting-tool-repl-answers-a-queued-call-promptly
+  ;; Whichever settles the caller's cell first -- the session replying
+  ;; (:error :unavailable), or tool-repl's own process exiting under it as
+  ;; an ordinary M:CALL failure -- the caller must not be left waiting out
+  ;; its full timeout.
   (with-tools
     (let* ((result nil)
            (thread (tool-thread
-                    (setf result (tool :tool-repl :id "a" :form "(sleep 5)")))))
+                    (setf result (multiple-value-list
+                                  (tool :tool-repl :id "a" :form "(sleep 5)"))))))
       (sleep 0.2) ;; let the session start its eval first
       (let ((start (get-internal-real-time)))
         (m:unmount *context* :tool-repl)
         (bt:join-thread thread)
         (is (< (- (get-internal-real-time) start)
                (* 2 internal-time-units-per-second))))
-      (is (eq :unavailable (nyaa:tool-error result))))))
+      (is-true (apply #'call-refused-p result)))))
+
+(test unmounting-tool-repl-refuses-an-eval-queued-behind-the-live-one
+  ;; The second call sits in the session's mailbox behind the first, so it
+  ;; is still there when the cleanup's own :stop reaches the session --
+  ;; it must not start a fresh worker for CLOSED to leave unkilled.
+  (with-tools
+    (let* ((first-result nil) (second-result nil)
+           (first (tool-thread
+                   (setf first-result
+                         (multiple-value-list
+                          (tool :tool-repl :id "a" :form "(sleep 5)")))))
+           (second (progn
+                     (sleep 0.1) ;; let the first eval actually start
+                     (tool-thread
+                      (setf second-result
+                            (multiple-value-list
+                             (tool :tool-repl :id "a" :form "1")))))))
+      (sleep 0.1) ;; let the second cast actually queue behind the first
+      (let ((start (get-internal-real-time)))
+        (m:unmount *context* :tool-repl)
+        (bt:join-thread first)
+        (bt:join-thread second)
+        (is (< (- (get-internal-real-time) start)
+               (* 2 internal-time-units-per-second))))
+      (is-true (apply #'call-refused-p first-result))
+      (is-true (apply #'call-refused-p second-result)))))
 
 ;;; --- elision and REPL history (~takeiteasy/nyaa#26) ---------------------
 

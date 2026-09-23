@@ -2,7 +2,7 @@
 
 ;;; One session per id, so successive forms see the state the last one left.
 ;;; Each session is its own meow service, mounted under tool-repl's context,
-;;; so a long evaluation on one id no longer blocks another: tool-repl only
+;;; so each id evaluates independently of the others: tool-repl only
 ;;; routes, handing its caller's reply cell to the session with
 ;;; M:DEFER-REPLY, and the session answers once its own worker replies.
 ;;; Calls on one id still run in order, since a session's own mailbox
@@ -15,12 +15,20 @@
 ;;;
 ;;; Trust posture: arbitrary evaluation. Trusted operator only, until the
 ;;; DSL gate (~takeiteasy/nyaa#6) can constrain what a form may do.
+;;;
+;;; TODO: an id's session lives for as long as the process does once
+;;; mounted; one that is never used again keeps its worker, if any, and its
+;;; effect entry around indefinitely. Upgrade path: an idle deadline, ticked
+;;; on cast activity, that drops the session once it lapses with nothing
+;;; in flight. Tracked in ~takeiteasy/nyaa#104.
 
 (defstruct worker-box
   "A session's current worker, boxed so tool-repl's cleanup can read and
 kill it directly rather than asking the session -- which would queue behind
-whatever call it is busy answering."
-  worker)
+whatever call it is busy answering. CLOSED is set by that same cleanup, so
+an eval already queued behind it when the session is torn down is refused
+rather than started against a worker with nothing left to kill it."
+  worker closed)
 
 ;;; Unnamed, like an M:AGENT: several ids each mount one, and none is meant
 ;;; to be looked up by name. Unnamed children are invisible to CHECKPOINT
@@ -52,23 +60,31 @@ across calls."
     (when pristine
       (kill-worker (worker-box-worker box))
       (setf (worker-box-worker box) nil))
-    (let ((worker (or (worker-box-worker box)
-                      (setf (worker-box-worker box) (start-worker)))))
-      (cond
-        ((null worker) (fail :unavailable))
-        ((worker-stale-p worker)
-         ;; KILL-WORKER unregisters it without signalling it -- it belongs
-         ;; to a process image that no longer exists here.
-         (kill-worker worker)
-         (setf (worker-box-worker box) nil)
-         (fail (list :error "session lost to an image relaunch; it starts empty on the next call")))
-        (t
-         (let ((result (worker-eval worker form timeout)))
-           ;; A worker that missed its deadline was killed; forget it so the
-           ;; id starts empty rather than answering :unavailable for ever.
-           (unless (worker-alive-p worker)
-             (setf (worker-box-worker box) nil))
-           result))))))
+    (cond
+      ;; The session's owning tool-repl was unmounted while this eval sat
+      ;; queued behind another on the same id; its cleanup already killed
+      ;; the worker, and starting a fresh one here would outlive tool-repl
+      ;; with nothing left to kill it.
+      ((worker-box-closed box) (fail :unavailable))
+      (t
+       (let ((worker (or (worker-box-worker box)
+                         (setf (worker-box-worker box) (start-worker)))))
+         (cond
+           ((null worker) (fail :unavailable))
+           ((worker-stale-p worker)
+            ;; KILL-WORKER unregisters it without signalling it -- it belongs
+            ;; to a process image that no longer exists here.
+            (kill-worker worker)
+            (setf (worker-box-worker box) nil)
+            (fail (list :error "session lost to an image relaunch; it starts empty on the next call")))
+           (t
+            (let ((result (worker-eval worker form timeout)))
+              ;; A worker that missed its deadline was killed; forget it so
+              ;; the id starts empty rather than answering :unavailable for
+              ;; ever.
+              (unless (worker-alive-p worker)
+                (setf (worker-box-worker box) nil))
+              result))))))))
 
 (define-tool :tool-repl
     (:trust :operator
@@ -105,6 +121,11 @@ session it has, and the worker each is holding along with it."
                         (m:effect service
                                   (lambda ()
                                     (lambda ()
+                                      ;; CLOSED first: an eval already
+                                      ;; queued behind this session's
+                                      ;; mailbox must not start a worker
+                                      ;; that nothing will be left to kill.
+                                      (setf (worker-box-closed box) t)
                                       (kill-worker (worker-box-worker box))
                                       (m:stop session)))
                                   :label (list :repl-session id))))

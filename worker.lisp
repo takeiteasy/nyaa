@@ -30,6 +30,9 @@
 ;;; A worker leads its own process group (see process.lisp), so a form that
 ;;; backgrounds a process is signalled along with the worker at kill time,
 ;;; the same as tools/shell.lisp's commands.
+;;;
+;;; TODO: "<value>" is EVAL's primary value only; a form returning multiple
+;;; values loses the rest. Tracked in ~takeiteasy/nyaa#105.
 
 (defmacro worker-program ()
   "The child's loop, read from worker-program.lisp as text when this file is
