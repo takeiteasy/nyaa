@@ -32,7 +32,10 @@
          (context (m:start-service (make-instance 'm:context :name :image-tools)
                                    :registry registry)))
     (unwind-protect (funcall body context dir)
-      (m:stop context))))
+      ;; M:STOP-AND-WAIT, not M:STOP: a plain STOP only sends the request,
+      ;; so the next test's own SAVE-IMAGE could still see this context's
+      ;; thread mid-unwind and refuse (~takeiteasy/nyaa#72).
+      (m:stop-and-wait context))))
 
 (defmacro with-image-context ((context &optional (dir-var (gensym))) &body body)
   `(with-generations-directory (,dir-var)
@@ -61,6 +64,34 @@
 
 (test relaunch-of-a-missing-core-is-refused
   (signals error (nyaa:relaunch "/no/such/file.core")))
+
+;;; --- a stray thread outside the tree (~takeiteasy/nyaa#72) ---------------
+
+(test save-image-refuses-and-resumes-when-a-stray-thread-outlives-its-timeout
+  (with-image-context (ctx dir)
+    (m:mount ctx 'image-test-thing)
+    (let* ((gate (bt:make-semaphore))
+           (stray (bt:make-thread (lambda () (bt:wait-on-semaphore gate)) :name "nyaa-test-stray")))
+      (unwind-protect
+           (let ((condition nil))
+             (handler-case (nyaa:save-image ctx :dir dir :timeout 0.2)
+               (error (e) (setf condition e)))
+             (is (typep condition 'error))
+             (is (search "nyaa-test-stray" (princ-to-string condition)))
+             ;; refused before ever forking, so the tree is still up and the
+             ;; context's own service still answers -- SAVE-IMAGE's
+             ;; UNWIND-PROTECT resumed it even though it never reached FORK
+             (is (eql 0 (m:call (m:lookup :image-test-thing) '(:get)))))
+        (bt:signal-semaphore gate)
+        (bt:join-thread stray)))))
+
+(test save-image-succeeds-once-a-stray-thread-exits-within-the-timeout
+  (with-image-context (ctx dir)
+    (m:mount ctx 'image-test-thing)
+    (let ((stray (bt:make-thread (lambda () (sleep 0.2)) :name "nyaa-test-stray-brief")))
+      (unwind-protect
+           (is-true (probe-file (nyaa:save-image ctx :dir dir :timeout 2)))
+        (bt:join-thread stray)))))
 
 ;;; --- generations' :image field ------------------------------------------
 
@@ -118,7 +149,7 @@
                              (is (zerop code) "relaunched core exited ~a: ~a" code err)
                              (is (equal "42" (uiop:read-file-string out-file))))
                         (ignore-errors (delete-file out-file)))))
-               (m:stop ctx)))
+               (m:stop-and-wait ctx)))
         (setf m:*registry* saved-registry)))))
 
 ;;; --- SELF-DEFINE and :require-image (~takeiteasy/nyaa#63) ---------------

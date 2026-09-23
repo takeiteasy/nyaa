@@ -74,6 +74,21 @@ leaving a truncated core, is never mistaken for one that finished."
                                  :if-exists :supersede))))
   (sb-ext:exit :code 1 :abort t))
 
+(defun %await-lone-thread (deadline)
+  "Wait until this thread is the only one running, or DEADLINE (an
+internal-real-time reading) passes. FORK's own check backs this up --
+newborn threads it can see that LIST-ALL-THREADS still hides -- but this
+turns the common case (a just-stopped context's thread still mid-unwind,
+~takeiteasy/nyaa#72) into a bounded wait instead of an outright refusal.
+Signals, naming every other thread by name, if any are still running once
+DEADLINE passes."
+  (loop for others = (remove sb-thread:*current-thread* (sb-thread:list-all-threads))
+        while others
+        do (if (> (get-internal-real-time) deadline)
+               (error "~d thread~:p other than the main thread still running, SAVE-IMAGE needs this one alone: ~{~a~^, ~}"
+                      (length others) (mapcar #'sb-thread:thread-name others))
+               (sleep 0.01))))
+
 (defun %require-clean-save (pid core-path)
   "PID's WAITPID status, checked against SAVE-LISP-AND-DIE's own contract
 (a clean exit :code 0): anything else -- a nonzero code, a signal -- means
@@ -90,26 +105,36 @@ naming the underlying condition (%SAVE-ERROR-PATH) if the child left one."
                     status (and (probe-file error-path) (uiop:read-file-string error-path)) core-path)
           (ignore-errors (delete-file error-path)))))))
 
-(defun save-image (context &key (dir *generations-directory*) label keep)
+(defun save-image (context &key (dir *generations-directory*) label keep (timeout 5))
   "Fork and SAVE-LISP-AND-DIE a full image of CONTEXT's tree, alongside a
 declared-state generation (checkpoint.lisp) of the same label. Must run on
 the main thread, the only one still standing once M:SUSPEND has parked
 every other. Refuses -- before suspending anything -- if a mounted
 PROVIDER holds an :API-KEY.
 
+TIMEOUT (seconds, default 5) bounds both M:SUSPEND and the wait for any
+thread outside CONTEXT's tree to exit on its own -- a just-stopped
+context's thread still mid-unwind (~takeiteasy/nyaa#72), say. Past that,
+SAVE-IMAGE refuses rather than let FORK's own single-threaded check do it
+less informatively.
+
 Returns (values core-path generation-path). The calling process is
 unaffected: every service is suspended for the fork and resumed again
-before this returns, whether or not the fork succeeded."
+before this returns, whether the fork succeeded, failed, or never ran
+because of a stray thread."
   (%require-main-thread)
   (%require-no-credentials context)
   (let* ((generation-path (checkpoint context :dir dir :label label :keep keep))
          (core-path (%image-path generation-path))
-         (suspension (m:suspend context))
-         (pid (sb-posix:fork)))
-    (if (zerop pid)
-        (%save-and-die suspension core-path)
-        (unwind-protect (%require-clean-save pid core-path)
-          (m:resume suspension)))
+         (suspension (m:suspend context :timeout timeout)))
+    (unwind-protect
+         (progn
+           (%await-lone-thread (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
+           (let ((pid (sb-posix:fork)))
+             (if (zerop pid)
+                 (%save-and-die suspension core-path)
+                 (%require-clean-save pid core-path))))
+      (m:resume suspension))
     (when keep (%prune-generations (uiop:pathname-directory-pathname generation-path) keep))
     (setf *last-image* (%canonical-path core-path) *self-dirty* nil)
     (values *last-image* (%canonical-path generation-path))))

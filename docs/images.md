@@ -11,7 +11,7 @@ can undo code, not only declared state.
 
 ## `save-image`
 
-`(save-image context &key dir label keep)`:
+`(save-image context &key dir label keep (timeout 5))`:
 
 1. Refuses unless called on the main thread.
 2. Refuses if a mounted [provider](providers.md) holds an `:api-key`
@@ -20,15 +20,20 @@ can undo code, not only declared state.
    and [`tool-image`](introspection.md) already hold for published state.
 3. Takes a declared-state [checkpoint](checkpoints.md) of `context`.
 4. [`m:suspend`](https://github.com/takeiteasy/meow/blob/trunk/docs/suspend.md)s
-   `context`'s whole tree, so only the calling thread is left --
-   `save-lisp-and-die` and `fork(2)` both refuse otherwise.
+   `context`'s whole tree, then waits up to `timeout` seconds for any
+   thread outside that tree to exit on its own -- a just-stopped
+   context's thread still mid-unwind, say
+   ([#72](https://todo.sr.ht/~takeiteasy/nyaa/72)). Past `timeout`,
+   refuses, naming the threads still running: `save-lisp-and-die` and
+   `fork(2)` both need this one alone.
 5. Forks. The child `save-lisp-and-die`s a `.core` next to the
    checkpoint's `.generation`; the parent waits for it and
    [resumes](https://github.com/takeiteasy/meow/blob/trunk/docs/suspend.md)
    the suspended tree.
 
 The calling process is unaffected either way: every service is suspended
-for the fork and resumed again before `save-image` returns.
+for the fork and resumed again before `save-image` returns, whether the
+fork succeeded, failed, or never ran because of a stray thread.
 
 ## Relaunching
 
@@ -76,8 +81,11 @@ model-reachable tool op.
 ## Limitations
 
 - Needs a current SBCL build. 2.2.9 (Debian's `apt` package as of this
-  writing) segfaults inside `save-lisp-and-die`'s own C runtime
-  ([#72](https://todo.sr.ht/~takeiteasy/nyaa/72)); 2.6.8 is known good.
+  writing) segfaults inside `save-lisp-and-die`'s own C runtime; 2.6.8 is
+  known good.
+- A thread `context`'s own tree doesn't own -- another mounted tree's,
+  meow's hmr watcher -- still blocks `save-image` for up to `timeout`
+  seconds, then refuses, naming it.
 - A relaunched core's other external handles -- open sockets, worker
   process handles, a `tool-repl` session -- are stale, not just `cl+ssl`'s
   context. `cl+ssl:reload` is the only one handled here
