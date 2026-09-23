@@ -333,6 +333,11 @@ or an :INTERRUPTED error where none has arrived."
           (%pending-order service)))
 
 (defun close-pending-calls (service)
+  (dolist (cell (%pending service))
+    (when (eq (cdr cell) :pending)
+      (setf (cdr cell) (fail :interrupted))
+      (emit-event (agent-sink service)
+                  (tool-result-event (m:agent-ref service) (car cell) (cdr cell)))))
   (dolist (message (pending-tool-messages service))
     (push-message service message))
   (setf (%pending service) nil

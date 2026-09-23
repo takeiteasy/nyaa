@@ -239,10 +239,17 @@ object)."
                      :test #'equal))))))))
 
 (test cancel-mid-tool-call-closes-the-call
-  (with-agent ((tool-call-reply "c1" "tool-hold" "{}") 'tool-hold)
+  ;; A sink makes the request stream, so the backend answers in SSE.
+  (with-agent ((sse-response
+                "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"tool-hold\",\"arguments\":\"{}\"}}]}}]}"
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"
+                "[DONE]")
+               'tool-hold)
     (m:with-process (runner)
-      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
-                               :tools '(:tool-hold))))
+      (let* ((events '())
+             (child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                :tools '(:tool-hold)
+                                :sink (lambda (event) (push event events)))))
         (m:cast child (list :run :messages '((:role :user :content "go"))))
         (loop repeat 100
               until (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls)
@@ -254,7 +261,10 @@ object)."
                  (last-message (car (last messages))))
             (is (eq :tool (getf last-message :role)))
             (is (equal "c1" (getf last-message :tool-call-id)))
-            (is (search "interrupted" (nyaa:content-text (getf last-message :content))))))))))
+            (is (search "interrupted" (nyaa:content-text (getf last-message :content))))
+            (let ((event (find :tool-result events :key (lambda (e) (getf e :type)))))
+              (is (equal "c1" (getf event :id)))
+              (is (equal '(:error :interrupted) (getf event :result))))))))))
 
 ;;; --- continuing a conversation ---------------------------------------
 

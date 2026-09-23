@@ -114,7 +114,8 @@ way. `:stop-reason` is one of:
 
 A `:cancelled` or `:timeout` run closes each tool call still awaiting a
 result with an `{"error":"interrupted"}` `:tool` message, so `:messages` is
-always well-formed to send back to a model.
+always well-formed to send back to a model. Each closed call also emits a
+`:tool-result` event carrying `(:error :interrupted)`.
 
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
 ends the run as that same `(:error reason)`, unwrapped.
