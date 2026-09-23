@@ -142,6 +142,9 @@ has."
                                               :by (%vault-owner)))
                :claimed))))
 
+;; TODO: each release reads and folds the whole log, so dropping n queued
+;; steers costs n reads. Upgrade path: a batch release under one lock hold.
+;; Tracked in ~takeiteasy/nyaa#90.
 (defun vault-release (path id)
   "Drop this image's claim on ID at PATH, if it still holds one."
   (with-log-lock (path)
