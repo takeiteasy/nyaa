@@ -198,13 +198,10 @@ immediately before the write."
 
 ;;; --- CLOS mutation latch (~takeiteasy/nyaa#79) -------------------------
 ;;;
-;;; #64 deferred interrupts across a whole CLOS-mutating :define, because
-;;; portable pre-emption (BT:INTERRUPT-THREAD deferred by the target
-;;; thread's own critical section) turned out not to hold on ECL. Now that
-;;; nyaa is SBCL-only (#78), SBCL's own PCL/DEFSTRUCT loaders can be hooked
-;;; directly to say exactly when a form's evaluation reaches its actual
-;;; CLOS mutation, rather than deferring across the whole form and leaking
-;;; a wedged :eql specializer or a slow compile's thread (#68).
+;;; SBCL's own PCL/DEFSTRUCT loaders are hooked to say exactly when a
+;;; form's evaluation reaches its actual CLOS mutation, so :DEFINE only
+;;; abandons cooperatively past that point instead of across the whole
+;;; form (#64, #68).
 ;;;
 ;;; *CLOS-MUTATION-LATCH*, bound fresh by RUN-IN-HOST for each evaluation,
 ;;; starts nil: an interrupt still lands pre-emptively, so a wedged form
@@ -214,9 +211,11 @@ immediately before the write."
 ;;; the same primitive TRACE and PROFILE use, so a rename here breaks
 ;;; loudly rather than silently stops latching. COMPILE-OR-LOAD-DEFGENERIC
 ;;; (a DEFMETHOD's own implicit ENSURE-GENERIC-FUNCTION, ahead of its :eql
-;;; specializers and method compile) doesn't latch -- it's wrapped in
-;;; SB-SYS:WITHOUT-INTERRUPTS instead, so it can only ever run to
-;;; completion or not start, no cooperative check needed.
+;;; specializers and method compile) doesn't latch -- it defers interrupts
+;;; for the duration of the call instead, so it can only ever run to
+;;; completion or not start, no cooperative check needed. That deferral is
+;;; itself gated on *CLOS-MUTATION-LATCH* being bound, so a DEFMETHOD
+;;; anywhere else in the image (the REPL, ASDF, hmr) is unaffected.
 ;;;
 ;;; TODO: a form that wedges *after* reaching its own mutation -- a second,
 ;;; later DEFMETHOD in the same :eval whose :eql specializer hangs -- still
@@ -243,7 +242,14 @@ the thread to waiting for it, since nothing past here can run long.")
   (apply next args))
 
 (defun %atomic-clos-mutation (next &rest args)
-  (sb-sys:without-interrupts (apply next args)))
+  "Only defers interrupts inside a RUN-IN-HOST evaluation -- *CLOS-MUTATION-
+LATCH* bound means one is in progress. Elsewhere (the REPL, ASDF, hmr) this
+must stay a no-op: deferring interrupts for every DEFMETHOD in the image,
+on any thread, is a far bigger change than RUN-IN-HOST's own contract asks
+for."
+  (if *clos-mutation-latch*
+      (sb-sys:without-interrupts (apply next args))
+      (apply next args)))
 
 (defun %install-clos-mutation-hooks ()
   "Idempotent: UNENCAPSULATEs first, so reloading this file (or SBCL
