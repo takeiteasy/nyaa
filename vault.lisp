@@ -68,6 +68,54 @@ rewritten through a temporary file, so the original survives one."
         (bt:with-lock-held (*log-locks-lock*)
           (setf (gethash key *vault-compacted-sizes*) after))))))
 
+;;; A steer sitting in an agent's in-memory queue, or one a :RESTORE has cast
+;;; at an agent, is claimed: still :PENDING in the log, but no second delivery
+;;; may be started for it. The claim ends when the entry is consumed, or when
+;;; the agent drops its queue.
+;;;
+;;; TODO: claims live in this process only, so two processes restoring one
+;;; entry can both deliver it. Upgrade path: a persisted :claimed entry with
+;;; a TTL, appended under the log's flock. Tracked in ~takeiteasy/nyaa#88.
+
+(defvar *vault-claims* (make-hash-table :test 'equal)
+  "(canonical log namestring . id) -> T. Guarded by *LOG-LOCKS-LOCK*.")
+
+(defun %claim-key (path id)
+  (cons (%log-key path) id))
+
+(defun vault-claim (path id)
+  "Claim ID at PATH. Returns nil when it was already claimed."
+  (let ((key (%claim-key path id)))
+    (bt:with-lock-held (*log-locks-lock*)
+      (unless (gethash key *vault-claims*)
+        (setf (gethash key *vault-claims*) t)))))
+
+(defun vault-release (path id)
+  "Drop ID's claim at PATH, if any."
+  (let ((key (%claim-key path id)))
+    (bt:with-lock-held (*log-locks-lock*)
+      (remhash key *vault-claims*))))
+
+(defun %vault-claimed-p (key)
+  (bt:with-lock-held (*log-locks-lock*)
+    (gethash key *vault-claims*)))
+
+(defun vault-claim-pending (path id)
+  "Claim ID at PATH if it is a :PENDING steer nobody has claimed, checked and
+claimed under PATH's lock. Returns :CLAIMED, :UNKNOWN for an id with no
+:STEER entry, :HELD when it is already claimed, or the status it already
+has."
+  (with-log-lock (path)
+    (let* ((log (%read-log path))
+           (steer (find-if (lambda (e) (and (eq (getf e :kind) :steer)
+                                            (equal (getf e :id) id)))
+                           log))
+           (done (gethash id (%consumed-by-id log))))
+      (cond ((null steer) :unknown)
+            (done (getf done :how))
+            ((vault-claim path id) :claimed)
+            (t :held)))))
+
 (defun vault-record (path agent content)
   "Append a :STEER entry to PATH and return its id. AGENT, a keyword or nil,
 names the target agent when it is registered under one; a delegated
@@ -81,14 +129,18 @@ explicitly."
     id))
 
 (defun vault-consume (path id how)
-  "Append a :CONSUMED entry marking ID as HOW (:FOLDED or :DISCARDED)."
-  (%append-log path (list :kind :consumed :id id :at (%now-iso8601) :how how))
+  "Append a :CONSUMED entry marking ID as HOW (:FOLDED or :DISCARDED) and
+release its claim, under PATH's lock."
+  (with-log-lock (path)
+    (%append-log-locked path (list :kind :consumed :id id :at (%now-iso8601) :how how))
+    (vault-release path id))
   (%vault-maybe-compact path))
 
 (defun vault-consume-pending (path id how)
   "Append a :CONSUMED entry marking ID as HOW, only if ID is a :PENDING
-steer, checked and appended under PATH's lock. Returns :CONSUMED, :UNKNOWN
-for an id with no :STEER entry, or the status it already has."
+steer nobody has claimed, checked and appended under PATH's lock. Returns
+:CONSUMED, :UNKNOWN for an id with no :STEER entry, :HELD when it is claimed,
+or the status it already has."
   (let ((result
           (with-log-lock (path)
             (let* ((log (%read-log path))
@@ -98,6 +150,7 @@ for an id with no :STEER entry, or the status it already has."
                    (done (gethash id (%consumed-by-id log))))
               (cond ((null steer) :unknown)
                     (done (getf done :how))
+                    ((%vault-claimed-p (%claim-key path id)) :held)
                     (t (%append-log-locked
                         path (list :kind :consumed :id id :at (%now-iso8601) :how how))
                        :consumed))))))
@@ -115,18 +168,22 @@ for an id with no :STEER entry, or the status it already has."
 (defun vault-entries (path)
   "Every :STEER entry logged at PATH, oldest first, folded against any
 :CONSUMED entries that followed it: (:id :at :agent :content :status
-(:PENDING :FOLDED or :DISCARDED) :consumed-at). An id with no :STEER entry
+(:PENDING :FOLDED or :DISCARDED) :consumed-at :claimed), :CLAIMED true for a
+pending steer held by an agent's queue or a restore. An id with no :STEER entry
 -- a :CONSUMED line with nothing to consume -- is dropped rather than
 surfaced, since it names nothing a caller could act on."
   (let* ((log (%read-log path))
-         (consumed (%consumed-by-id log)))
+         (consumed (%consumed-by-id log))
+         (key (ignore-errors (%log-key path))))
     (loop for entry in log
           when (eq (getf entry :kind) :steer)
             collect (let ((done (gethash (getf entry :id) consumed)))
                       (list :id (getf entry :id) :at (getf entry :at)
                             :agent (getf entry :agent) :content (getf entry :content)
                             :status (if done (getf done :how) :pending)
-                            :consumed-at (and done (getf done :at)))))))
+                            :consumed-at (and done (getf done :at))
+                            :claimed (and key (not done)
+                                          (%vault-claimed-p (cons key (getf entry :id))) t))))))
 
 (defun vault-compact (path &key (max-age *vault-max-age*))
   "Rewrite PATH without the steers consumed more than MAX-AGE seconds ago

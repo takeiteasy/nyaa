@@ -26,8 +26,9 @@ string or pathname records there instead.
 A steer records before it queues, and is marked `:folded` at the point
 `issue-turn` actually pushes it onto the conversation -- not when `:steer`
 is sent. A steer queued while a turn is already in flight, with no further
-turn to fold it into before the run ends, stays `:pending`: nothing marks
-it consumed, so it is still there to restore later.
+turn to fold it into before the run ends, stays `:pending` and is folded on
+the agent's next turn; nothing marks it consumed until then. It is
+[claimed](#claims) while it waits.
 
 A delegated sub-agent (agent.lisp's `agent-task`) inherits its parent's
 `:vault`, the same way it inherits the model and allow-list. It has no
@@ -61,6 +62,16 @@ name, so different logs never wait on each other. The lock is also an
 `flock` on a sidecar `<log>.lock` file, so other nyaa processes appending to
 or compacting the same log serialise too.
 
+## Claims
+
+A steer waiting in an agent's queue, or one `:restore` has cast at an agent,
+is claimed: still `:pending` in the log, with `:claimed t` in
+`vault-entries`, but it cannot be restored or discarded. The claim is taken
+under the log's lock and ends when the entry is consumed, or when the agent
+is rolled back or stopped and its queue is dropped. A claimed steer that
+is dropped that way can be restored again. Claims are held in memory, per
+process.
+
 ## Compaction
 
 `(nyaa:vault-compact path :max-age seconds)` rewrites the log without the
@@ -92,14 +103,16 @@ writes to harness state.
 (nyaa:invoke-tool :tool-vault :op :restore :id "20260923-140501-822931")
 ```
 
-`:restore` casts `(:steer :content ... :vault-id id)` at the named agent --
-the id travels with it, so the agent's own fold marks the *original* entry
-consumed rather than this tool recording a second one for the same steer.
-It is not consumed at the point of the call; only once the target agent
-actually folds it in. `:agent`, a string, picks the target: the entry's own
+`:restore` claims the entry under the log's lock, then casts
+`(:steer :content ... :vault-id id :vault-path path)` at the named agent --
+the id and log path travel with it, so the agent's own fold marks the
+*original* entry consumed, in the log it came from, rather than this tool
+recording a second one for the same steer. It is not consumed at the point
+of the call; only once the target agent actually folds it in. Concurrent
+restores of one id deliver it once. `:agent`, a string, picks the target: the entry's own
 recorded agent by default, or an override -- required when the entry was
 recorded with no agent, as a delegated sub-agent's always is. Restoring or
-discarding an id that is unknown or already consumed is a
+discarding an id that is unknown, already consumed or claimed is a
 `(:bad-request ...)`. `:discard` checks and consumes under the log's lock,
 so concurrent discards of one id consume it once.
 
@@ -108,6 +121,5 @@ agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
 
-- `:restore` checks an entry is pending, then casts it; two concurrent
-  calls on one id can both deliver it
-  ([#87](https://todo.sr.ht/~takeiteasy/nyaa/87)).
+- Claims are per process; two processes restoring one entry can both
+  deliver it ([#88](https://todo.sr.ht/~takeiteasy/nyaa/88)).

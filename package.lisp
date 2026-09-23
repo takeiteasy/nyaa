@@ -27,7 +27,8 @@
    #:save-image #:relaunch #:save-recovery-image
    #:self-define
    ;; vault
-   #:vault-record #:vault-consume #:vault-consume-pending #:vault-entries #:vault-compact #:*vault-log*
+   #:vault-record #:vault-consume #:vault-consume-pending
+   #:vault-claim #:vault-claim-pending #:vault-release #:vault-entries #:vault-compact #:*vault-log*
    #:*vault-max-age* #:*vault-compact-size*
    ;; parameter schemas
    #:validate-schema #:coerce-args

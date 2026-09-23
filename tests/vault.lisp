@@ -335,3 +335,87 @@ after the message that triggered it has already returned."
       (is-true (blocks-on-foreign-flock-p
                 path (lambda () (nyaa:vault-consume-pending path id :discarded))))
       (is (eq :discarded (getf (first (nyaa:vault-entries path)) :status))))))
+
+;;; --- single-delivery restore (~takeiteasy/nyaa#87) ----------------------------
+
+(defun wait-for-claimed (path &optional (deadline 3.0))
+  (loop repeat (ceiling deadline 0.05)
+        for entries = (nyaa:vault-entries path)
+        when (getf (first entries) :claimed) return entries
+        do (sleep 0.05)
+        finally (return (nyaa:vault-entries path))))
+
+(test concurrent-claims-of-one-id-succeed-once
+  (with-vault-path (path)
+    (let* ((id (nyaa:vault-record path :assistant "a"))
+           (results '())
+           (rlock (bt:make-lock))
+           (threads (loop repeat 8
+                          collect (bt:make-thread
+                                   (lambda ()
+                                     (let ((r (nyaa:vault-claim-pending path id)))
+                                       (bt:with-lock-held (rlock) (push r results))))))))
+      (mapc #'bt:join-thread threads)
+      (is (eql 1 (count :claimed results)))
+      (is (eql 7 (count :held results))))))
+
+(test tool-vault-restore-of-a-claimed-entry-is-refused
+  (with-vault-path (path)
+    (with-agent ((lambda (&rest request) (declare (ignore request)) (final-reply "done")))
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed :vault path)
+      (let ((id (nyaa:vault-record path :assistant "once")))
+        (is (eq :ok (first (vault :op :restore :id id))))
+        (is (eq :bad-request (first (nyaa:tool-error (vault :op :restore :id id)))))
+        (is (eq :bad-request (first (nyaa:tool-error (vault :op :discard :id id)))))
+        (is (eq :pending (getf (first (nyaa:vault-entries path)) :status)))
+        (is-true (getf (first (nyaa:vault-entries path)) :claimed))))))
+
+(test a-restore-is-delivered-once
+  (let ((n 0))
+    (with-vault-path (path)
+      (with-agent ((lambda (&rest request)
+                     (declare (ignore request))
+                     (incf n)
+                     (final-reply "done")))
+        (m:mount *ctx* 'nyaa:tool-vault :path path)
+        (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed :vault path)
+        (let ((id (nyaa:vault-record path :assistant "once")))
+          (vault :op :restore :id id)
+          (vault :op :restore :id id)
+          (m:call (m:lookup :assistant) (list :run :messages '((:role :user :content "go"))))
+          (wait-for-vault-status path :folded)
+          (is (eql 1 (length (remove-if-not (lambda (e) (eq (getf e :kind) :consumed))
+                                            (nyaa::%read-log path))))))))))
+
+(test a-queued-steer-is-claimed-until-it-folds
+  (with-vault-path (path)
+    (with-agent ((lambda (&rest request) (declare (ignore request)) (final-reply "done")))
+      (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed :vault path)
+      (m:cast (m:lookup :assistant) '(:steer :content "queued"))
+      (is-true (getf (first (wait-for-claimed path)) :claimed))
+      (m:call (m:lookup :assistant) (list :run :messages '((:role :user :content "go"))))
+      (let ((entry (first (wait-for-vault-status path :folded))))
+        (is (eq :folded (getf entry :status)))
+        (is-false (getf entry :claimed))))))
+
+(test rolling-an-agent-back-releases-its-queued-claims
+  (with-vault-path (path)
+    (with-agent (nil)
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed :vault path)
+      (m:cast (m:lookup :assistant) '(:steer :content "queued"))
+      (is-true (getf (first (wait-for-claimed path)) :claimed))
+      (m:call (m:lookup :assistant) (list :restore '(:messages nil :turns 0)))
+      (is-false (getf (first (nyaa:vault-entries path)) :claimed))
+      (is (eq :ok (first (vault :op :discard :id (getf (first (nyaa:vault-entries path)) :id))))))))
+
+(test restoring-into-an-agent-with-no-vault-folds-into-the-tools-log
+  (with-vault-path (path)
+    (with-agent ((lambda (&rest request) (declare (ignore request)) (final-reply "done")))
+      (m:mount *ctx* 'nyaa:tool-vault :path path)
+      (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-test-keyed)
+      (let ((id (nyaa:vault-record path :assistant "hi")))
+        (vault :op :restore :id id)
+        (m:call (m:lookup :assistant) (list :run :messages '((:role :user :content "go"))))
+        (is (eq :folded (getf (first (wait-for-vault-status path :folded)) :status)))))))

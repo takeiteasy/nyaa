@@ -136,16 +136,29 @@ whose :TRUST is :AGENT."
 (defun queue-steer (service args)
   "Queue a :USER message from ARGS' :CONTENT. When the vault is on
 (AGENT-VAULT) and ARGS names no :VAULT-ID, this is a fresh steer and gets
-recorded there first; a :VAULT-ID names an entry already in the vault --
-TOOL-VAULT's :RESTORE redelivers one this way rather than double-recording
-it. The id travels in the queue cell, never in the message plist pushed
-onto %MESSAGES, so it can never reach a provider's request."
+recorded there first and claimed; a :VAULT-ID names an entry already in the
+vault, claimed by TOOL-VAULT's :RESTORE, which redelivers one this way
+rather than double-recording it, with :VAULT-PATH the log it lives in. The
+id and path travel in the queue cell, never in the message plist pushed onto
+%MESSAGES, so they can never reach a provider's request."
   (let* ((content (getf args :content))
+         (path (or (getf args :vault-path) (%vault-path (agent-vault service))))
          (id (or (getf args :vault-id)
-                 (a:when-let ((path (%vault-path (agent-vault service))))
-                   (vault-record path (m:service-name service) content)))))
-    (push (cons id (list :role :user :content content)) (%steer-queue service)))
+                 (and path
+                      (let ((id (vault-record path (m:service-name service) content)))
+                        (vault-claim path id)
+                        id)))))
+    (push (list* id path (list :role :user :content content)) (%steer-queue service)))
   :ok)
+
+(defun release-steer-claims (service)
+  "Release the vault claim of every steer queued at SERVICE."
+  (dolist (cell (%steer-queue service))
+    (when (car cell) (vault-release (cadr cell) (car cell)))))
+
+(defmethod m:dispose ((service agent) reason)
+  (declare (ignore reason))
+  (release-steer-claims service))
 
 (defun cancel-run (service)
   (if (%running-p service)
@@ -168,9 +181,9 @@ onto %MESSAGES, so it can never reach a provider's request."
   ;; Steering only folds in here, between turns, so a message queued mid-turn
   ;; never lands ahead of the assistant reply or tool results already owed.
   (dolist (cell (nreverse (shiftf (%steer-queue service) nil)))
-    (push-message service (cdr cell))
+    (push-message service (cddr cell))
     (a:when-let ((id (car cell)))
-      (vault-consume (%vault-path (agent-vault service)) id :folded)))
+      (vault-consume (cadr cell) id :folded)))
   (incf (%turns service))
   (emit-event (agent-sink service) (turn-event (m:agent-ref service) (%turns service)))
   (let ((ref (incf (%step-ref service)))
@@ -393,6 +406,7 @@ here but not assumed of the caller's own services)."
 
 (defmethod restore ((service agent) state)
   (cancel-deadline service)
+  (release-steer-claims service)
   (setf (%messages service) (getf state :messages)
         (%turns service) (getf state :turns)
         (%pending service) nil
