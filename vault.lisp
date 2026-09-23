@@ -188,17 +188,22 @@ has."
                                               :by (%vault-owner)))
                :claimed))))
 
-;; TODO: each release reads and folds the whole log, so dropping n queued
-;; steers costs n reads. Upgrade path: a batch release under one lock hold.
-;; Tracked in ~takeiteasy/nyaa#90.
+(defun vault-release-all (path ids)
+  "Drop this image's claim on each of IDS at PATH that it still holds, under
+one lock hold and one read of the log."
+  (with-log-lock (path)
+    (let* ((log (%read-log path))
+           (consumed (%consumed-by-id log))
+           (claims (%claims-by-id log))
+           (token (getf (%vault-owner) :token)))
+      (dolist (id (remove-duplicates ids :test #'equal))
+        (when (and (not (gethash id consumed))
+                   (equal (getf (gethash id claims) :token) token))
+          (%append-log-locked path (list :kind :released :id id :at (%now-iso8601))))))))
+
 (defun vault-release (path id)
   "Drop this image's claim on ID at PATH, if it still holds one."
-  (with-log-lock (path)
-    (let ((log (%read-log path)))
-      (when (and (not (gethash id (%consumed-by-id log)))
-                 (equal (getf (gethash id (%claims-by-id log)) :token)
-                        (getf (%vault-owner) :token)))
-        (%append-log-locked path (list :kind :released :id id :at (%now-iso8601)))))))
+  (vault-release-all path (list id)))
 
 (defun vault-record (path agent content &key claim)
   "Append a :STEER entry to PATH and return its id, claimed by this image

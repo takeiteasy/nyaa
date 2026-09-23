@@ -551,6 +551,33 @@ after the message that triggered it has already returned."
       (nyaa:vault-release path id)
       (is (eq :held (nyaa:vault-claim-pending path id))))))
 
+(test releasing-many-claims-appends-one-line-each-and-skips-the-rest
+  (with-vault-path (path)
+    (let ((mine-a (nyaa:vault-record path :assistant "a" :claim t))
+          (mine-b (nyaa:vault-record path :assistant "b" :claim t))
+          (theirs (nyaa:vault-record path :assistant "c"))
+          (done (nyaa:vault-record path :assistant "d" :claim t)))
+      (append-claim path theirs (foreign-owner))
+      (nyaa:vault-consume path done :discarded)
+      (nyaa:vault-release-all path (list mine-a mine-b mine-b theirs done "no-such-id"))
+      (is (equal (sort (loop for e in (nyaa::%read-log path)
+                             when (eq (getf e :kind) :released) collect (getf e :id))
+                       #'string<)
+                 (sort (list mine-a mine-b) #'string<)))
+      (is (eq :claimed (nyaa:vault-claim-pending path mine-a)))
+      (is (eq :held (nyaa:vault-claim-pending path theirs))))))
+
+(test dropping-an-agent-releases-all-its-queued-claims
+  (with-vault-path (path)
+    (let ((agent (make-instance 'nyaa:agent))
+          (ids (loop for content in '("a" "b" "c")
+                     collect (nyaa:vault-record path :assistant content :claim t))))
+      (setf (nyaa::%steer-queue agent)
+            (append (mapcar (lambda (id) (queue-cell path id "x")) ids)
+                    (list (queue-cell nil nil "plain"))))
+      (nyaa::release-steer-claims agent)
+      (is (notany (lambda (e) (getf e :claimed)) (nyaa:vault-entries path))))))
+
 (test a-recorded-agent-steer-carries-its-claim
   (with-vault-path (path)
     (let ((id (nyaa:vault-record path :assistant "hi" :claim t)))

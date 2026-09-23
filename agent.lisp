@@ -151,8 +151,10 @@ id and path travel in the queue cell, never in the message plist pushed onto
 
 (defun release-steer-claims (service)
   "Release the vault claim of every steer queued at SERVICE."
-  (dolist (cell (%steer-queue service))
-    (when (car cell) (vault-release (cadr cell) (car cell)))))
+  (let ((by-path (make-hash-table :test 'equal)))
+    (dolist (cell (%steer-queue service))
+      (when (car cell) (push (car cell) (gethash (cadr cell) by-path))))
+    (maphash #'vault-release-all by-path)))
 
 (defun reclaim-steer-claims (service)
   "Claim, as this image, every steer queued at SERVICE, dropping any that

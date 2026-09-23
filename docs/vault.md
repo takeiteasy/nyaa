@@ -77,7 +77,8 @@ the log's lock:
 
 A steer an agent records for itself carries the same owner as `:claimed-by`
 on its `:steer` line, so recording and claiming are one append. The latest
-claim or release wins, and `:consumed` ends it. A claim is released when the
+claim or release wins, and `:consumed` ends it. `vault-release-all` releases
+several claims of this image under one read of the log. A claim is released when the
 agent is rolled back or stopped and its queue is dropped; that steer can be
 restored again.
 
