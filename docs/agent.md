@@ -40,7 +40,9 @@ convention), and mount's default restart is `:transient`, which restarts on
 anything but `:normal` or `:shutdown` — so `:assistant` comes back as a
 fresh instance under the same name, ready for another `:run`, but with no
 memory of the last one. A caller wanting the conversation to continue passes
-the previous result's `:messages` back in as the next `:run`'s. Mount with
+the previous result's `:messages` back in as the next `:run`'s, or, on an
+agent that already holds a conversation (a [restored](checkpoints.md) one),
+sends `:run` with `:continue t` to carry on from it. Mount with
 `:restart :temporary` for a one-shot agent that stays gone after it finishes.
 
 ## Mount options
@@ -80,7 +82,7 @@ end a plain `complete` turn early inside a working conversation.
 | Message | Effect |
 |---|---|
 | `(:describe)` | the metadata plist |
-| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys |
+| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero |
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
 
@@ -109,6 +111,10 @@ way. `:stop-reason` is one of:
 | `:max-turns` | `:max-turns` model turns were reached |
 | `:timeout` | `:deadline` lapsed |
 | `:cancelled` | `:cancel` was sent |
+
+A `:cancelled` or `:timeout` run closes each tool call still awaiting a
+result with an `{"error":"interrupted"}` `:tool` message, so `:messages` is
+always well-formed to send back to a model.
 
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
 ends the run as that same `(:error reason)`, unwrapped.
@@ -151,8 +157,9 @@ policy (the orchestrator DSL), not this loop's.
 
 An agent's `snapshot` keeps `:messages` and `:turns`, not the turn or tool
 calls in flight — see [checkpoints](checkpoints.md). A checkpoint taken
-mid-run keeps the conversation and drops the abandoned turn; `restore`
-always lands a not-running agent, ready for another `:run`.
+mid-run keeps the conversation, closes each unanswered tool call as
+`interrupted` and drops the abandoned turn; `restore` always lands a
+not-running agent, ready for `(:run :continue t)`.
 
 ## Limitations
 

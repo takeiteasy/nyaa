@@ -105,8 +105,10 @@ pathname: record there instead.")
       (bad-request "agent is already running")
       (progn
         (setf (%messages service)
-              (append (and (agent-system service)
-                           (list (list :role :system :content (agent-system service))))
+              (append (if (and (getf args :continue) (%messages service))
+                          (%messages service)
+                          (and (agent-system service)
+                               (list (list :role :system :content (agent-system service)))))
                       (getf args :messages))
               (%turns service) 0
               (%pending service) nil
@@ -171,12 +173,15 @@ another process holds or that is already consumed."
 
 (defun cancel-run (service)
   (if (%running-p service)
-      (finish-run service (ok :messages (%messages service) :content nil
-                              :turns (%turns service) :stop-reason :cancelled))
+      (progn
+        (close-pending-calls service)
+        (finish-run service (ok :messages (%messages service) :content nil
+                                :turns (%turns service) :stop-reason :cancelled)))
       :ok))
 
 (defun deadline-run (service)
   (when (%running-p service)
+    (close-pending-calls service)
     (finish-run service (ok :messages (%messages service) :content nil
                             :turns (%turns service) :stop-reason :timeout))))
 
@@ -315,13 +320,23 @@ ticket's."
       (setf (cdr cell) result)
       (emit-event (agent-sink service) (tool-result-event (m:agent-ref service) id result))
       (when (every (lambda (c) (not (eq (cdr c) :pending))) (%pending service))
-        (dolist (pid (%pending-order service))
-          (push-message service
-                        (tool-message pid (cdr (assoc pid (%pending service)
-                                                      :test #'equal)))))
-        (setf (%pending service) nil (%pending-order service) nil)
+        (close-pending-calls service)
         (m:cast (m:self) '(:step))))
     nil))
+
+(defun pending-tool-messages (service)
+  "A :TOOL message for each call dispatched this turn, in order: its result,
+or an :INTERRUPTED error where none has arrived."
+  (mapcar (lambda (id)
+            (let ((result (cdr (assoc id (%pending service) :test #'equal))))
+              (tool-message id (if (eq result :pending) (fail :interrupted) result))))
+          (%pending-order service)))
+
+(defun close-pending-calls (service)
+  (dolist (message (pending-tool-messages service))
+    (push-message service message))
+  (setf (%pending service) nil
+        (%pending-order service) nil))
 
 (defun tool-message (id result)
   (list :role :tool :tool-call-id id :content (render-tool-result result)))
@@ -404,10 +419,12 @@ here but not assumed of the caller's own services)."
 ;;; The turn and tool calls in flight reference spawned processes a restore
 ;;; cannot bring back, so only their ids are recorded, under :IN-FLIGHT, for
 ;;; a caller to see the checkpoint was taken mid-run. RESTORE lands a
-;;; not-running agent and ignores it.
+;;; not-running agent and ignores it. A call with no result yet is recorded
+;;; closed as :INTERRUPTED, so the restored conversation is well-formed.
 
 (defmethod snapshot ((service agent))
-  (append (list :messages (%messages service) :turns (%turns service))
+  (append (list :messages (append (%messages service) (pending-tool-messages service))
+                :turns (%turns service))
           (when (%running-p service)
             (list :in-flight (list :turn (%turns service)
                                    :tool-calls (copy-list (%pending-order service)))))))

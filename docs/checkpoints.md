@@ -41,8 +41,11 @@ restart. The agent is the one service with a method today — it keeps
 `:messages` and `:turns`. While a run is in progress it also reports
 `:in-flight (:turn n :tool-calls (ids...))`. Only the ids are kept: the turn
 and tool calls reference processes a restore cannot bring back, so they are
-not retried. `restore` always lands a not-running agent, so a further `:run`
-is accepted at once.
+not retried. A tool call with no result yet is recorded as an
+`{"error":"interrupted"}` `:tool` message, so the saved conversation can be
+sent to a provider as it is; results that had arrived are kept. `restore`
+always lands a not-running agent; `(:run :continue t)` carries on from the
+restored conversation.
 
 Any service whose state is a plist with a non-nil `:in-flight` is reported
 as interrupted.

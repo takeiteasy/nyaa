@@ -185,6 +185,34 @@
       (m:stop context)
       (stop-fake-http server))))
 
+(test agent-snapshot-mid-tool-call-closes-pending-calls
+  (let* ((registry (make-instance 'm:registry))
+         (m:*registry* registry)
+         (context (m:start-service (make-instance 'm:context :name :agents)
+                                   :registry registry))
+         (server (start-fake-http (lambda (&rest r) (declare (ignore r))
+                                    (tool-call-reply "c1" "tool-hold" "{}")))))
+    (unwind-protect
+         (progn
+           (m:mount context 'nyaa:protocol-openai)
+           (apply #'m:mount context (first (keyed)) :base-url (fake-http-url server) (rest (keyed)))
+           (m:mount context 'tool-hold)
+           (m:mount context 'nyaa:agent :name :assistant :model :provider-test-keyed
+                                        :tools '(:tool-hold))
+           (m:cast (m:lookup :assistant) (list :run :messages '((:role :user :content "go"))))
+           (let ((snap (loop repeat 100
+                             for s = (agent-snapshot :assistant)
+                             when (getf (getf s :in-flight) :tool-calls) return s
+                             do (sleep 0.02))))
+             (is (equal '("c1") (getf (getf snap :in-flight) :tool-calls)))
+             (let ((last-message (car (last (getf snap :messages)))))
+               (is (eq :tool (getf last-message :role)))
+               (is (equal "c1" (getf last-message :tool-call-id)))
+               (is (search "interrupted"
+                           (nyaa:content-text (getf last-message :content)))))))
+      (m:stop context)
+      (stop-fake-http server))))
+
 ;;; --- unavailable services -------------------------------------------------
 
 (m:defservice slow-thing () ((value :initform 5 :accessor slow-value))

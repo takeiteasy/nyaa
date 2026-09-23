@@ -28,6 +28,19 @@
   args
   (nyaa::fail (list :error "boom")))
 
+;;; Holds a call in flight long enough to cancel or snapshot around it.
+
+(m:defservice tool-hold () () (:name :tool-hold))
+
+(defmethod m:metadata ((service tool-hold))
+  (list :kind :tool :name :tool-hold :trust :agent
+        :summary "Hold the call open, then answer" :params nil))
+
+(nyaa::define-tool-handler tool-hold (service args)
+  args
+  (sleep 0.5)
+  (nyaa::ok :slept t))
+
 ;;; --- the harness --------------------------------------------------------
 
 (defun call-with-agent (answer tool-classes body)
@@ -224,6 +237,61 @@ object)."
             (is (find "also do this" (getf (second (fourth message)) :messages)
                      :key (lambda (m) (nyaa:content-text (getf m :content)))
                      :test #'equal))))))))
+
+(test cancel-mid-tool-call-closes-the-call
+  (with-agent ((tool-call-reply "c1" "tool-hold" "{}") 'tool-hold)
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :tools '(:tool-hold))))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (loop repeat 100
+              until (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls)
+              do (sleep 0.02))
+        (m:cast child '(:cancel))
+        (multiple-value-bind (message received) (m:receive :timeout 5)
+          (is-true received)
+          (let* ((messages (getf (second (fourth message)) :messages))
+                 (last-message (car (last messages))))
+            (is (eq :tool (getf last-message :role)))
+            (is (equal "c1" (getf last-message :tool-call-id)))
+            (is (search "interrupted" (nyaa:content-text (getf last-message :content))))))))))
+
+;;; --- continuing a conversation ---------------------------------------
+
+(defun restored-conversation ()
+  '((:role :system :content "be brief")
+    (:role :user :content "first")
+    (:role :assistant :content "earlier answer")))
+
+(defun run-on-restored (&rest run-args)
+  "Restore a three-message conversation onto a fresh agent, :RUN it with
+RUN-ARGS and return the run's result."
+  (m:with-process (runner)
+    (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                             :system "be brief")))
+      (m:call child (list :restore (list :messages (restored-conversation) :turns 3)))
+      (m:cast child (list* :run run-args))
+      (multiple-value-bind (message received) (m:receive :timeout 5)
+        (is-true received)
+        (fourth message)))))
+
+(test continue-runs-on-the-restored-conversation
+  (with-agent ((final-reply "ok"))
+    (let* ((result (run-on-restored :continue t
+                                    :messages '((:role :user :content "more"))))
+           (messages (getf (second result) :messages)))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (is (= 1 (getf (second result) :turns)))
+      (is (equal '(:system :user :assistant :user :assistant)
+                 (mapcar (lambda (m) (getf m :role)) messages)))
+      (is (search "earlier answer" (getf (first (requests)) :body)))
+      (is (search "more" (getf (first (requests)) :body))))))
+
+(test run-without-continue-replaces-the-conversation
+  (with-agent ((final-reply "ok"))
+    (run-on-restored :messages '((:role :user :content "fresh")))
+    (is (not (search "earlier answer" (getf (first (requests)) :body))))
+    (is (search "fresh" (getf (first (requests)) :body)))))
 
 ;;; --- events ---------------------------------------------------------
 
