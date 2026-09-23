@@ -220,10 +220,9 @@ immediately before the write."
 ;;; PROFILE use, so a rename breaks loudly. They are gated on the latch
 ;;; being bound, so a DEFMETHOD elsewhere in the image is unaffected.
 ;;;
-;;; TODO: the forced throw cannot land where SBCL holds a system lock with
-;;; interrupts off (a user REMOVE-METHOD method during a DEFGENERIC
-;;; redefinition), so a wedge there still leaks its thread. Tracked in
-;;; ~takeiteasy/nyaa#103.
+;;; A DEFGENERIC redefinition removes the old initial methods under a system
+;;; lock with interrupts off, where a user REMOVE-METHOD method could wedge
+;;; uninterruptibly; %HOLD-DEFGENERIC removes them first, outside it.
 
 (defstruct clos-latch
   (depth 0 :type fixnum)
@@ -238,7 +237,7 @@ evaluated.")
   "How long a lapsed deadline waits for one CLOS mutation before tearing it.")
 
 (a:define-constant +clos-held-hooks+
-    '(sb-pcl::load-defclass sb-pcl::load-defmethod sb-pcl::load-defgeneric
+    '(sb-pcl::load-defclass sb-pcl::load-defmethod
       sb-pcl::set-initial-methods sb-pcl::compile-or-load-defgeneric)
   :test #'equal
   :documentation "SBCL internals each of which is one whole mutation:
@@ -277,8 +276,29 @@ interrupt is deferred across the span so a struct is never torn.")
           (decf (clos-latch-depth latch))
           (%finish-clos-mutation latch)))))
 
+(defun %remove-initial-methods (name)
+  "Removes the initial methods of the generic function NAME that a
+redefinition would remove itself, but under a system lock with interrupts
+off, where a user REMOVE-METHOD method could not be interrupted."
+  (when (fboundp name)
+    (let ((function (fdefinition name)))
+      (when (typep function 'generic-function)
+        (dolist (method (copy-list (sb-pcl::generic-function-initial-methods function)))
+          (remove-method function method))
+        (setf (sb-pcl::generic-function-initial-methods function) '())))))
+
+(defun %hold-defgeneric (next &rest args)
+  (if (null *clos-mutation-latch*)
+      (apply next args)
+      (apply #'%hold-clos-mutation
+             (lambda (&rest args)
+               (%remove-initial-methods (first args))
+               (apply next args))
+             args)))
+
 (defun %clos-hook-alist ()
   (append (mapcar (lambda (name) (cons name #'%hold-clos-mutation)) +clos-held-hooks+)
+          (list (cons 'sb-pcl::load-defgeneric #'%hold-defgeneric))
           (mapcar (lambda (entry)
                     (cons (car entry) (if (eq :begin (cdr entry))
                                           #'%begin-clos-mutation

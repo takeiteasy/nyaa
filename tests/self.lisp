@@ -263,6 +263,22 @@ interrupt still has to land and unwind."
        (is-true (eventually #'late-outcome-entry))
        (is (equal '(:error :torn) (getf (late-outcome-entry) :outcome)))))))
 
+(test self-eval-a-wedge-in-remove-method-during-a-redefinition-is-torn-not-leaked
+  (with-self ()
+    (self :define :package "NYAA-SELF-TEST"
+                  :form "(defclass self-test-slow-gf (standard-generic-function) () (:metaclass sb-mop:funcallable-standard-class))")
+    (self :define :package "NYAA-SELF-TEST"
+                  :form "(defgeneric self-test-redefined (x) (:generic-function-class self-test-slow-gf) (:method ((x integer)) 1))")
+    (self :define :package "NYAA-SELF-TEST"
+                  :form "(defmethod remove-method :after ((gf self-test-slow-gf) method) (sleep 5))")
+    (call-with-grace
+     100
+     (lambda ()
+       (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                           :form "(defgeneric self-test-redefined (x) (:generic-function-class self-test-slow-gf) (:method ((x string)) 2))")))
+         (is (equal :timeout (nyaa:tool-error result))))
+       (is-true (no-nyaa-self-eval-thread-p))))))
+
 (test self-eval-a-slow-span-inside-its-grace-still-completes
   (with-self ()
     (define-slow-metaclass "SELF-TEST-SLOW-META" 0.3)
