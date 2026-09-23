@@ -422,8 +422,8 @@ after the message that triggered it has already returned."
 
 ;;; --- claims across processes (~takeiteasy/nyaa#88) ------------------------------
 
-(defun foreign-owner (&key (pid 1) (host (machine-instance)))
-  (list :pid pid :host host :token "another-image"))
+(defun foreign-owner (&key (pid 1) (host (machine-instance)) start)
+  (list* :pid pid :host host :token "another-image" (and start (list :start start))))
 
 (defun append-claim (path id owner)
   (nyaa::%append-log path (list :kind :claimed :id id :at (nyaa::%now-iso8601) :by owner)))
@@ -461,6 +461,27 @@ after the message that triggered it has already returned."
       (is-false (getf (first (nyaa:vault-entries path)) :claimed))
       (is (eq :claimed (nyaa:vault-claim-pending path id))))))
 
+(test process-start-time-reads-this-process
+  (let ((start (nyaa::%process-start-time (sb-posix:getpid))))
+    (is (integerp start))
+    (is (eql start (nyaa::%process-start-time (sb-posix:getpid)))))
+  (is (null (nyaa::%process-start-time (dead-pid)))))
+
+(test a-claim-whose-pid-was-reused-is-restorable
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once"))
+          (start (nyaa::%process-start-time (sb-posix:getpid))))
+      (append-claim path id (foreign-owner :pid (sb-posix:getpid) :start (1- start)))
+      (is-false (getf (first (nyaa:vault-entries path)) :claimed))
+      (is (eq :claimed (nyaa:vault-claim-pending path id))))))
+
+(test a-claim-with-a-matching-start-time-is-live
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "once")))
+      (append-claim path id (foreign-owner :pid (sb-posix:getpid)
+                                           :start (nyaa::%process-start-time (sb-posix:getpid))))
+      (is (eq :held (nyaa:vault-claim-pending path id))))))
+
 (test a-released-claim-can-be-claimed-again
   (with-vault-path (path)
     (let ((id (nyaa:vault-record path :assistant "once")))
@@ -481,6 +502,8 @@ after the message that triggered it has already returned."
     (let ((id (nyaa:vault-record path :assistant "hi" :claim t)))
       (is (equal (getf (nyaa::%vault-owner) :token)
                  (getf (getf (first (nyaa::%read-log path)) :claimed-by) :token)))
+      (is (eql (nyaa::%process-start-time (sb-posix:getpid))
+               (getf (getf (first (nyaa::%read-log path)) :claimed-by) :start)))
       (is (eq :held (nyaa:vault-claim-pending path id))))))
 
 (test compaction-keeps-a-live-claim-and-drops-claim-lines

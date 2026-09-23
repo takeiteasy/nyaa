@@ -79,33 +79,75 @@ rewritten through a temporary file, so the original survives one."
 ;;;
 ;;; A steer an agent records for itself carries :CLAIMED-BY on its :STEER
 ;;; entry instead, so recording and claiming are one append.
-;;;
-;;; TODO: a claim whose owner pid has been reused by another process on the
-;;; same host reads as live until that process exits. Upgrade path: record
-;;; the owner's start time and compare it too. Tracked in
-;;; ~takeiteasy/nyaa#89.
 
+;; TODO: a saved core carries this token to every process launched from it,
+;; and a relaunch keeps claims made before it. Upgrade path: reset it in
+;; sb-ext:*save-hooks* and release claims on relaunch. Tracked in
+;; ~takeiteasy/nyaa#91.
 (defvar *vault-token* nil
   "A random string naming this image, so its claims are recognised as its own
 even when a pid is reused.")
 
+#+linux
+(defun %proc-stat-fields (line)
+  "The whitespace-separated fields of /proc/<pid>/stat after its command name."
+  (let ((start (+ 2 (position #\) line :from-end t)))
+        (fields '()))
+    (loop with from = start
+          for end = (position #\Space line :start from)
+          do (push (subseq line from end) fields)
+          while end do (setf from (1+ end)))
+    (nreverse fields)))
+
+(defun %process-start-time (pid)
+  "An opaque integer that changes when PID is reused by a new process, or nil
+when it cannot be read."
+  (ignore-errors
+   #+darwin
+   (sb-alien:with-alien ((mib (array sb-alien:int 4))
+                         (buf (array (sb-alien:unsigned 8) 1024))
+                         (len sb-alien:unsigned-long 1024))
+     (loop for i from 0 for v in (list 1 14 1 pid) do (setf (sb-alien:deref mib i) v))
+     (when (and (zerop (sb-alien:alien-funcall
+                        (sb-alien:extern-alien
+                         "sysctl" (function sb-alien:int (* sb-alien:int) sb-alien:unsigned-int
+                                            (* t) (* sb-alien:unsigned-long) (* t) sb-alien:unsigned-long))
+                        (sb-alien:cast mib (* sb-alien:int)) 4
+                        (sb-alien:cast buf (* t)) (sb-alien:addr len) nil 0))
+                (plusp len))
+       (let ((sap (sb-alien:alien-sap buf)))
+         (+ (* 1000000 (sb-sys:signed-sap-ref-64 sap 0))
+            (sb-sys:signed-sap-ref-32 sap 8)))))
+   #+linux
+   (with-open-file (stream (format nil "/proc/~d/stat" pid))
+     (let* ((line (read-line stream))
+            (fields (%proc-stat-fields line)))
+       (parse-integer (nth 19 fields))))))
+
 (defun %vault-owner ()
-  "This image's claim owner: (:pid :host :token)."
-  (list :pid (sb-posix:getpid) :host (machine-instance)
-        :token (or *vault-token*
-                   (setf *vault-token*
-                         (format nil "~36r" (random (expt 2 64) (make-random-state t)))))))
+  "This image's claim owner: (:pid :host :start :token). The start time is
+read on every call, never cached: a saved core would carry it to a process
+with a different one."
+  (let ((pid (sb-posix:getpid)))
+    (list :pid pid :host (machine-instance) :start (%process-start-time pid)
+          :token (or *vault-token*
+                     (setf *vault-token*
+                           (format nil "~36r" (random (expt 2 64) (make-random-state t))))))))
 
 (defun %claim-live-p (owner)
   "True when OWNER, a :CLAIMED-BY plist, is this image, on another host
 (flock is host-local, so it cannot be probed), or a process still running
-here."
-  (let ((pid (getf owner :pid)))
+here that started when the claim was made. A claim or process with no
+readable start time is judged by its pid alone."
+  (let ((pid (getf owner :pid))
+        (start (getf owner :start)))
     (or (equal (getf owner :token) (getf (%vault-owner) :token))
         (not (equal (getf owner :host) (machine-instance)))
         (not (integerp pid))
-        (handler-case (progn (sb-posix:kill pid 0) t)
-          (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm))))))
+        (and (handler-case (progn (sb-posix:kill pid 0) t)
+               (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm)))
+             (let ((now (and start (%process-start-time pid))))
+               (or (null now) (eql start now)))))))
 
 (defun %claims-by-id (log)
   "LOG's current claim owner by id, the latest entry winning."

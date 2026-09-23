@@ -71,7 +71,7 @@ persisted in the log, so other nyaa processes see them, and are taken under
 the log's lock:
 
 ```lisp
-(:kind :claimed  :id "..." :at "..." :by (:pid 4242 :host "box" :token "..."))
+(:kind :claimed  :id "..." :at "..." :by (:pid 4242 :host "box" :start 1790178586000000 :token "..."))
 (:kind :released :id "..." :at "...")
 ```
 
@@ -81,9 +81,11 @@ claim or release wins, and `:consumed` ends it. A claim is released when the
 agent is rolled back or stopped and its queue is dropped; that steer can be
 restored again.
 
-The owner is a pid, a host and a random per-image token. A claim is live
-when its token is this image's, its host is another machine, or its pid is
-still running on this one. A claim whose owner has exited is ignored, so a
+The owner is a pid, a host, the process start time and a random per-image
+token. A claim is live when its token is this image's, its host is another
+machine, or its pid is still running on this one and, when both are known,
+started at the recorded time. A claim or process with no readable start time
+(an unsupported OS) is judged by its pid alone. A claim whose owner has exited is ignored, so a
 crashed process never strands an entry.
 
 ## Compaction
@@ -135,7 +137,8 @@ so concurrent discards of one id consume it once.
 agent's `:vault t` uses), read once at mount time.
 
 ## Limitations
+.
 
-- A claim whose owner's pid has been reused by another process on the same
-  host stays live until that process exits
-  ([#89](https://todo.sr.ht/~takeiteasy/nyaa/89)).
+- A saved image carries its claim token to every process launched from it,
+  and a relaunch keeps the claims made before it
+  ([#91](https://todo.sr.ht/~takeiteasy/nyaa/91)).
