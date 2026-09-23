@@ -68,12 +68,15 @@ macro interns while expanding -- a `defstruct`'s accessors -- land there too.
 
 A lapsed `:timeout` interrupts pre-emptively, except while SBCL is
 mid-way through one class, method, generic-function or struct definition:
-the interrupt waits for that definition to finish, then lands, so a
-deadline never tears a mutation. A wedged `:eql` specializer or slow compile
-is killed, not leaked, whether or not the form mutated something earlier.
+the interrupt waits for that definition to finish, then lands. A definition
+that outlasts a 2 second grace period -- user code it calls, such as a MOP
+method or a `defstruct` constructor macro, has wedged -- is torn: the
+interrupt throws out of it and that one definition may be half applied. A wedged `:eql` specializer or
+slow compile is killed, not leaked, whether or not the form mutated something earlier.
 The caller gets `:timeout`; a form killed after landing one or more
 mutations is left partially applied and logged as a `:late-outcome` entry
-with `:outcome (:error :abandoned)`.
+with `:outcome (:error :abandoned)`, or `(:error :torn)` if killed inside
+a definition.
 
 ## Checkpoint and log
 
@@ -91,7 +94,7 @@ points at what to roll back to -- and an outcome entry after:
 A write that finishes, or is killed after mutating, after its caller
 received `:timeout` adds a third entry,
 `(:kind :late-outcome ... :checkpoint "..." :outcome :ok)` or
-`:outcome (:error :abandoned)`, whose
+`:outcome (:error :abandoned)` or `(:error :torn)`, whose
 `:checkpoint` matches its intent entry's. The log always reads intent,
 `:timeout` outcome, then `:late-outcome`.
 
@@ -155,10 +158,9 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   way back; `self-define`'s image generation is the code-exact one, but
   only tracks tool-self's own writes -- code loaded any other way is not
   reflected in `:require-image`'s staleness check.
-- User code a definition itself calls -- a MOP method, a macro in a
-  `defstruct` constructor -- runs with the interrupt deferred, so a wedge
-  there still leaks its thread
-  ([#101](https://todo.sr.ht/~takeiteasy/nyaa/101)).
+- A wedge under an SBCL system lock -- a user `remove-method` method during
+  a `defgeneric` redefinition -- cannot be interrupted and still leaks its
+  thread ([#103](https://todo.sr.ht/~takeiteasy/nyaa/103)).
 - The checkpoint taken before a write waits up to `checkpoint`'s own 30
   second `:timeout` for a busy service, independent of `:timeout`, and
   does not report which services it caught mid-run.

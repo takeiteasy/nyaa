@@ -211,13 +211,19 @@ immediately before the write."
 ;;; mutation's own exit throws once the count returns to zero. A form killed
 ;;; after landing a mutation is partially applied and reports :ABANDONED.
 ;;;
+;;; A mutation gets *CLOS-MUTATION-GRACE-MS* to finish. If user code inside
+;;; it (a MOP method, a defstruct constructor macro) outlasts that, the
+;;; interrupt throws out of it anyway and the form reports :TORN: that one
+;;; definition may be half applied.
+;;;
 ;;; The hooks are installed with SB-INT:ENCAPSULATE, the primitive TRACE and
 ;;; PROFILE use, so a rename breaks loudly. They are gated on the latch
 ;;; being bound, so a DEFMETHOD elsewhere in the image is unaffected.
 ;;;
-;;; TODO: user code a loader itself calls (a MOP method, a constructor
-;;; macro in a defstruct) runs with the interrupt deferred, so a wedge there
-;;; still leaks its thread. Tracked in ~takeiteasy/nyaa#101.
+;;; TODO: the forced throw cannot land where SBCL holds a system lock with
+;;; interrupts off (a user REMOVE-METHOD method during a DEFGENERIC
+;;; redefinition), so a wedge there still leaks its thread. Tracked in
+;;; ~takeiteasy/nyaa#103.
 
 (defstruct clos-latch
   (depth 0 :type fixnum)
@@ -227,6 +233,9 @@ immediately before the write."
 (defvar *clos-mutation-latch* nil
   "Nil outside RUN-IN-HOST; bound there to a CLOS-LATCH for the form being
 evaluated.")
+
+(defvar *clos-mutation-grace-ms* 2000
+  "How long a lapsed deadline waits for one CLOS mutation before tearing it.")
 
 (a:define-constant +clos-held-hooks+
     '(sb-pcl::load-defclass sb-pcl::load-defmethod sb-pcl::load-defgeneric
@@ -310,10 +319,11 @@ pre-emptive-only."
 
 (defun run-in-host (form timeout-ms &key package on-late)
   "FORM evaluated on its own thread, with *PACKAGE* bound to the package
-named PACKAGE, interrupted at TIMEOUT-MS. Once
-the interrupt lands between CLOS mutations (see above), never inside one.
-A form killed after mutating reports (fail :abandoned) to ON-LATE, if
-given, after the caller has already received :TIMEOUT."
+named PACKAGE, interrupted at TIMEOUT-MS. The
+interrupt lands between CLOS mutations, or inside one only after the
+grace deadline (see above). A form killed after mutating reports
+(fail :abandoned), or (fail :torn) if killed inside a mutation, to
+ON-LATE, if given, after the caller has already received :TIMEOUT."
   (let* ((result nil)
          (in-region (list nil))
          (state (list :running))
@@ -339,9 +349,9 @@ given, after the caller has already received :TIMEOUT."
     (if (or (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
             (not (eq :running (sb-ext:compare-and-swap (car state) :running :timed-out))))
         result
-        (progn (abandon-self-eval worker in-region latch) (fail :timeout)))))
+        (progn (abandon-self-eval worker in-region latch done) (fail :timeout)))))
 
-(defun abandon-self-eval (worker in-region latch)
+(defun abandon-self-eval (worker in-region latch done)
   (ignore-errors
    (when (bt:thread-alive-p worker)
      (bt:interrupt-thread
@@ -350,7 +360,25 @@ given, after the caller has already received :TIMEOUT."
                  (if (plusp (clos-latch-depth latch))
                      (setf (clos-latch-pending latch) t)
                      (throw 'self-abandoned
-                       (and (clos-latch-mutated latch) (fail :abandoned))))))))))
+                       (and (clos-latch-mutated latch) (fail :abandoned)))))))
+     (tear-after-grace worker in-region latch done (/ *clos-mutation-grace-ms* 1000)))))
+
+(defun tear-after-grace (worker in-region latch done grace)
+  "Once GRACE seconds pass without WORKER exiting, throws it out of the
+mutation it is still in. GRACE is read by the caller: a binding is not
+visible on the helper thread."
+  (bt:make-thread
+   (lambda ()
+     (unless (bt:wait-on-semaphore done :timeout grace)
+       (ignore-errors
+        (when (bt:thread-alive-p worker)
+          (bt:interrupt-thread
+           worker (lambda ()
+                    (when (car in-region)
+                      (throw 'self-abandoned
+                        (cond ((plusp (clos-latch-depth latch)) (fail :torn))
+                              ((clos-latch-mutated latch) (fail :abandoned)))))))))))
+   :name "nyaa-self-grace"))
 
 (defun eval-in-host (form package)
   (let ((out (make-string-output-stream)))

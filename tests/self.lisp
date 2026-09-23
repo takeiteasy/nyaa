@@ -221,6 +221,61 @@ interrupt still has to land and unwind."
     (is-true (fboundp (find-symbol "MAKE-SELF-TEST-STRUCT-B" "NYAA-SELF-TEST")))
     (is-true (fboundp (find-symbol "SELF-TEST-STRUCT-B-A" "NYAA-SELF-TEST")))))
 
+(defun call-with-grace (ms body)
+  (let ((old nyaa::*clos-mutation-grace-ms*))
+    (setf nyaa::*clos-mutation-grace-ms* ms)
+    (unwind-protect (funcall body)
+      (setf nyaa::*clos-mutation-grace-ms* old))))
+
+(defun define-slow-metaclass (name seconds)
+  "Defines metaclass NAME in NYAA-SELF-TEST whose class initialisation sleeps SECONDS."
+  (self :define :package "NYAA-SELF-TEST"
+                :form (format nil "(defclass ~a (standard-class) ())" name))
+  (self :define :package "NYAA-SELF-TEST"
+                :form (format nil "(defmethod sb-mop:validate-superclass ((c ~a) (s standard-class)) t)" name))
+  (self :define :package "NYAA-SELF-TEST"
+                :form (format nil "(defmethod shared-initialize :after ((c ~a) slots &key) (sleep ~a))" name seconds)))
+
+(test self-eval-a-wedge-in-a-defstruct-span-is-torn-not-leaked
+  (with-self ()
+    (self :define :package "NYAA-SELF-TEST"
+                  :form "(defmacro self-test-slow-macro () (sleep 5) 1)")
+    (call-with-grace
+     100
+     (lambda ()
+       (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                           :form "(defstruct (self-test-wedged-struct (:constructor make-self-test-wedged-struct (&aux (a (self-test-slow-macro))))) a)")))
+         (is (equal :timeout (nyaa:tool-error result))))
+       (is-true (no-nyaa-self-eval-thread-p))
+       (is-true (eventually #'late-outcome-entry))
+       (is (equal '(:error :torn) (getf (late-outcome-entry) :outcome)))))))
+
+(test self-eval-a-wedge-in-a-mop-method-is-torn-not-leaked
+  (with-self ()
+    (define-slow-metaclass "SELF-TEST-WEDGED-META" 5)
+    (call-with-grace
+     100
+     (lambda ()
+       (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                           :form "(defclass self-test-wedged-instance () () (:metaclass self-test-wedged-meta))")))
+         (is (equal :timeout (nyaa:tool-error result))))
+       (is-true (no-nyaa-self-eval-thread-p))
+       (is-true (eventually #'late-outcome-entry))
+       (is (equal '(:error :torn) (getf (late-outcome-entry) :outcome)))))))
+
+(test self-eval-a-slow-span-inside-its-grace-still-completes
+  (with-self ()
+    (define-slow-metaclass "SELF-TEST-SLOW-META" 0.3)
+    (call-with-grace
+     2000
+     (lambda ()
+       (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                   :form "(defclass self-test-slow-instance () () (:metaclass self-test-slow-meta))")
+       (is-true (no-nyaa-self-eval-thread-p))
+       (is-true (class-named "SELF-TEST-SLOW-INSTANCE"))
+       (is-true (eventually #'late-outcome-entry))
+       (is (equal '(:error :abandoned) (getf (late-outcome-entry) :outcome)))))))
+
 (test self-write-abandoned-after-its-timeout-logs-a-late-outcome
   (with-self ()
     (self :eval :timeout 50 :package "NYAA-SELF-TEST"
