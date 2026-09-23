@@ -57,21 +57,6 @@ performs, regardless of :op.")
 call -- is :EVAL's job instead, so :DEFINE's checkpoint label and
 :previous-source logging always describe an actual definition.")
 
-(a:define-constant +clos-definition-heads+
-    '(defclass defmethod defgeneric defstruct m:defservice nyaa:define-tool)
-  :test #'equal
-  :documentation "Heads of +DEFINITION-HEADS+ that expand into several
-sub-forms mutating CLOS (a DEFCLASS's class-defining code, method-adding
-forms for DEFMETHOD) -- M:DEFSERVICE and NYAA:DEFINE-TOOL both macroexpand
-to DEFCLASS plus DEFMETHOD. An interrupt landing between those sub-forms can
-leave CLOS mid-update, so :DEFINE abandons these cooperatively instead of
-pre-emptively (RUN-IN-HOST, below), waiting for the form to finish rather
-than risking a torn redefinition. DEFUN, DEFMACRO, DEFPARAMETER and DEFVAR
-each end in one store and cannot tear this way, so they stay pre-emptively
-interruptible -- treating them the same way would also make their init
-forms uninterruptible, turning a wedged (defparameter *x* (loop)) into a
-leaked thread instead of a killable one.")
-
 (define-tool :tool-self
     (:trust :operator
      :summary "Evaluate, redefine and reload in the host image; every write checkpointed and logged"
@@ -199,13 +184,8 @@ immediately before the write."
 
 (defun perform-self-write (service op parsed timeout)
   (ecase op
-    ((:eval :define) (run-in-host parsed timeout (self-write-defers-p op parsed)))
+    ((:eval :define) (run-in-host parsed timeout))
     (:reload (op-self-reload service parsed timeout))))
-
-(defun self-write-defers-p (op parsed)
-  "T when PARSED's head is one of +CLOS-DEFINITION-HEADS+, so RUN-IN-HOST
-defers interrupts across the whole form instead of leaving it abandonable."
-  (and (eq op :define) (member (first parsed) +clos-definition-heads+ :test #'eq)))
 
 (defun op-self-reload (service name timeout)
   (declare (ignore timeout))
@@ -216,63 +196,127 @@ defers interrupts across the whole form instead of leaving it abandonable."
           (bad-request "no child named ~(~a~)" name))
       (error (e) (fail (list :error (princ-to-string e)))))))
 
+;;; --- CLOS mutation latch (~takeiteasy/nyaa#79) -------------------------
+;;;
+;;; #64 deferred interrupts across a whole CLOS-mutating :define, because
+;;; portable pre-emption (BT:INTERRUPT-THREAD deferred by the target
+;;; thread's own critical section) turned out not to hold on ECL. Now that
+;;; nyaa is SBCL-only (#78), SBCL's own PCL/DEFSTRUCT loaders can be hooked
+;;; directly to say exactly when a form's evaluation reaches its actual
+;;; CLOS mutation, rather than deferring across the whole form and leaking
+;;; a wedged :eql specializer or a slow compile's thread (#68).
+;;;
+;;; *CLOS-MUTATION-LATCH*, bound fresh by RUN-IN-HOST for each evaluation,
+;;; starts nil: an interrupt still lands pre-emptively, so a wedged form
+;;; before its own CLOS mutation is killed, not leaked. The latching hooks
+;;; below set it once evaluation reaches one of SBCL's own class, method,
+;;; generic-function or struct loaders -- installed with SB-INT:ENCAPSULATE,
+;;; the same primitive TRACE and PROFILE use, so a rename here breaks
+;;; loudly rather than silently stops latching. COMPILE-OR-LOAD-DEFGENERIC
+;;; (a DEFMETHOD's own implicit ENSURE-GENERIC-FUNCTION, ahead of its :eql
+;;; specializers and method compile) doesn't latch -- it's wrapped in
+;;; SB-SYS:WITHOUT-INTERRUPTS instead, so it can only ever run to
+;;; completion or not start, no cooperative check needed.
+;;;
+;;; TODO: a form that wedges *after* reaching its own mutation -- a second,
+;;; later DEFMETHOD in the same :eval whose :eql specializer hangs -- still
+;;; leaks its thread, the same way the whole-form deferral did. Tracked in
+;;; ~takeiteasy/nyaa#81.
+
+(defvar *clos-mutation-latch* nil
+  "Nil outside RUN-IN-HOST. Bound there to a fresh cons for the form being
+evaluated; the hooks below set its CAR once that form's own evaluation
+reaches SBCL's CLOS or DEFSTRUCT machinery.")
+
+(a:define-constant +clos-latching-hooks+
+    '(sb-pcl::load-defclass sb-pcl::load-defmethod sb-pcl::load-defgeneric
+      sb-kernel::%defstruct)
+  :test #'equal
+  :documentation "SBCL internals that apply a class, method, generic
+function or struct definition once its own form has already evaluated
+every part a user's code could still wedge on (an :eql specializer, a
+slow compile) -- the point RUN-IN-HOST's interrupt switches from killing
+the thread to waiting for it, since nothing past here can run long.")
+
+(defun %latch-clos-mutation (next &rest args)
+  (when *clos-mutation-latch* (setf (car *clos-mutation-latch*) t))
+  (apply next args))
+
+(defun %atomic-clos-mutation (next &rest args)
+  (sb-sys:without-interrupts (apply next args)))
+
+(defun %install-clos-mutation-hooks ()
+  "Idempotent: UNENCAPSULATEs first, so reloading this file (or SBCL
+recompiling it in a running image) never stacks a second copy of the same
+hook."
+  (dolist (name +clos-latching-hooks+)
+    (sb-int:unencapsulate name 'nyaa-self)
+    (sb-int:encapsulate name 'nyaa-self #'%latch-clos-mutation))
+  (sb-int:unencapsulate 'sb-pcl::compile-or-load-defgeneric 'nyaa-self)
+  (sb-int:encapsulate 'sb-pcl::compile-or-load-defgeneric 'nyaa-self #'%atomic-clos-mutation))
+
+(defun clos-mutation-hooks-installed-p ()
+  "T if every hook %INSTALL-CLOS-MUTATION-HOOKS installs is still in
+place -- checked by a test, so a future SBCL rename of one of these
+internals fails loudly instead of silently reverting :DEFINE to
+pre-emptive-only."
+  (and (every (lambda (name) (sb-int:encapsulated-p name 'nyaa-self)) +clos-latching-hooks+)
+       (sb-int:encapsulated-p 'sb-pcl::compile-or-load-defgeneric 'nyaa-self)))
+
+(eval-when (:load-toplevel :execute) (%install-clos-mutation-hooks))
+
 ;;; --- host eval, bounded and interruptible ------------------------------
 
 ;;; Same shape as TOOLS/HTTP.LISP's ABANDON-REQUEST: a worker thread, a
 ;;; semaphore for the caller's wait, and an IN-REGION box guarding the
 ;;; interrupt so it only ever throws to a catch tag that is actually there.
 ;;;
-;;; A :DEFINE whose head is one of +CLOS-DEFINITION-HEADS+ (~takeiteasy/
-;;; nyaa#64) abandons cooperatively instead of pre-emptively: an interrupt
-;;; landing inside a DEFCLASS or DEFMETHOD expansion can leave CLOS
-;;; mid-update, unlike TOOLS/HTTP.LISP's socket, which has one resource to
-;;; release on the way out. ABANDON-SELF-EVAL never interrupts a deferred
-;;; write; it only raises the ABANDON flag, which the worker checks itself,
+;;; A deadline's interrupt lands pre-emptively (THROW straight to
+;;; SELF-ABANDONED) until *CLOS-MUTATION-LATCH* is set, then abandons
+;;; cooperatively instead -- the worker checks the ABANDON flag itself,
 ;;; from its own thread, right after EVAL-IN-HOST returns, and throws only
-;;; then. A deadline during a deferred write therefore always waits for the
-;;; form to finish rather than risking tearing it.
-;;;
-;;; TODO: a form that never finishes -- a wedged :eql specializer, a slow
-;;; compile -- leaks its thread instead of being killed, since it is never
-;;; interrupted at all. Upgrade path: defer only around the CLOS mutation
-;;; itself, once an implementation exposes where that starts relative to
-;;; the form's own evaluation, rather than around the whole form. Tracked
-;;; in ~takeiteasy/nyaa#68.
+;;; then, so a deadline landing inside SBCL's own CLOS mutation always
+;;; waits for it to finish rather than risking a torn redefinition.
 
-(defun run-in-host (form timeout-ms &optional defer-p)
-  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS -- or, when
-DEFER-P, abandoned cooperatively (see above) so a lapsed deadline waits one
-form longer instead of tearing a CLOS-mutating :define."
+(defun run-in-host (form timeout-ms)
+  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS -- or,
+once evaluation reaches SBCL's own CLOS/DEFSTRUCT machinery (see above),
+abandoned cooperatively so a lapsed deadline waits for the mutation to
+finish instead of tearing it."
   (let* ((result nil)
          (in-region (list nil))
          (abandon (list nil))
+         (latch (list nil))
          (done (bt:make-semaphore))
          (registry m:*registry*)
          (worker (bt:make-thread
                   (lambda ()
-                    (let ((m:*registry* registry))
+                    (let ((m:*registry* registry)
+                          (*clos-mutation-latch* latch))
                       (unwind-protect
                            (setf result
                                  (catch 'self-abandoned
                                    (setf (car in-region) t)
                                    (unwind-protect
                                         (prog1 (eval-in-host form)
-                                          (when (and defer-p (car abandon))
+                                          (when (car abandon)
                                             (throw 'self-abandoned nil)))
                                      (setf (car in-region) nil))))
                         (bt:signal-semaphore done))))
                   :name "nyaa-self-eval")))
     (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
         result
-        (progn (abandon-self-eval worker in-region abandon defer-p) (fail :timeout)))))
+        (progn (abandon-self-eval worker in-region abandon latch) (fail :timeout)))))
 
-(defun abandon-self-eval (worker in-region abandon defer-p)
-  (if defer-p
-      (setf (car abandon) t)
-      (ignore-errors
-       (when (bt:thread-alive-p worker)
-         (bt:interrupt-thread
-          worker (lambda () (when (car in-region) (throw 'self-abandoned nil))))))))
+(defun abandon-self-eval (worker in-region abandon latch)
+  (ignore-errors
+   (when (bt:thread-alive-p worker)
+     (bt:interrupt-thread
+      worker (lambda ()
+               (when (car in-region)
+                 (if (car latch)
+                     (setf (car abandon) t)
+                     (throw 'self-abandoned nil))))))))
 
 (defun eval-in-host (form)
   (let ((out (make-string-output-stream)))

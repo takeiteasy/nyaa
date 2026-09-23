@@ -63,15 +63,17 @@ so a wedged form costs a timeout, not a wedged service. A value is printed
 under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 8, a 4000-character cap.
 
-A `:define` whose head mutates CLOS across several sub-forms -- `defclass`,
-`defmethod`, `defgeneric`, `defstruct`, `m:defservice` or
-`nyaa:define-tool` -- abandons cooperatively rather than pre-emptively: the
-worker checks an abandon flag itself, from its own thread, right after
-`eval` returns, so a lapsed `:timeout` there waits for the definition to
-finish rather than tearing it. The caller still gets `:timeout`; the
-definition can still have landed. `defun`, `defmacro`, `defparameter` and
-`defvar` each end in one store, so they stay pre-emptively interruptible as
-before.
+A lapsed `:timeout` interrupts pre-emptively until evaluation reaches
+SBCL's own class, method, generic-function or struct loader -- past an
+`:eql` specializer's own form and a method's compile, the parts a wedged
+or slow form could still be caught in -- then abandons cooperatively
+instead: the worker checks an abandon flag itself, from its own thread,
+right after `eval` returns, so the interrupt waits for that mutation to
+finish rather than tearing it. The caller still gets `:timeout`; a
+`:define` that reached its mutation can still have landed. A form that
+wedges before that point -- a wedged `:eql` specializer, a slow compile --
+is still killed, not leaked
+([#79](https://todo.sr.ht/~takeiteasy/nyaa/79)).
 
 ## Checkpoint and log
 
@@ -146,14 +148,13 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   way back; `self-define`'s image generation is the code-exact one, but
   only tracks tool-self's own writes -- code loaded any other way is not
   reflected in `:require-image`'s staleness check.
-- A cooperatively-abandoned CLOS `:define`
-  ([#64](https://todo.sr.ht/~takeiteasy/nyaa/64)) closes the tearing window
-  over the whole form, not just its CLOS mutation: a wedged `:eql`
-  specializer form or a slow compile inside one now leaks its thread
-  instead of being killed
-  ([#68](https://todo.sr.ht/~takeiteasy/nyaa/68)). The outcome log also
-  still records `(:error :timeout)` even when the deferred form went on to
-  complete ([#69](https://todo.sr.ht/~takeiteasy/nyaa/69)).
+- A form that wedges *after* reaching its own CLOS mutation -- a second,
+  later `defmethod` in the same `:eval` whose `:eql` specializer hangs --
+  still leaks its thread, the same way the whole-form deferral did before
+  it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)). The outcome log also
+  still records `(:error :timeout)` even when a cooperatively-abandoned
+  write went on to complete
+  ([#69](https://todo.sr.ht/~takeiteasy/nyaa/69)).
 - The checkpoint taken before a write shares checkpoint.lisp's own
   ceilings: it is not bounded by `:timeout`
   ([#51](https://todo.sr.ht/~takeiteasy/nyaa/51)), and issued mid-run, the

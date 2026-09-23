@@ -116,29 +116,68 @@
             :form "(defclass thing () ((x :initform 1 :accessor thing-x) (y :initform 2 :accessor thing-y)))")
       (is (= 2 (funcall (find-symbol "THING-Y" "NYAA-SELF-TEST") instance))))))
 
-;;; --- deferred interrupts around a CLOS :define (~takeiteasy/nyaa#64) --
+;;; --- the CLOS mutation latch (~takeiteasy/nyaa#79) --------------------
+;;;
+;;; #64's whole-form deferral (~takeiteasy/nyaa#68's own ceiling) is gone:
+;;; RUN-IN-HOST now only abandons cooperatively once SBCL's own loaders say
+;;; a form has reached its actual CLOS mutation, so a wedged :eql
+;;; specializer or a slow compile ahead of that point is still killed.
 
-(test self-define-clos-form-completes-past-its-timeout
+(defun no-nyaa-self-eval-thread-p ()
+  "T once every RUN-IN-HOST worker has actually exited -- polled rather
+than asserted immediately after :TIMEOUT, since ABANDON-SELF-EVAL's
+interrupt still has to land and unwind."
+  (eventually (lambda () (notany (lambda (thread) (equal "nyaa-self-eval" (sb-thread:thread-name thread)))
+                                 (sb-thread:list-all-threads)))))
+
+(test clos-mutation-hooks-are-installed
+  (is-true (nyaa::clos-mutation-hooks-installed-p)))
+
+(test self-define-a-wedged-eql-specializer-is-killed-not-leaked
   (with-self ()
-    (self :define :package "NYAA-SELF-TEST" :form "(defgeneric self-test-defer (x))")
+    (self :define :package "NYAA-SELF-TEST" :form "(defgeneric self-test-wedged-eql (x))")
     (let ((result (self :define :package "NYAA-SELF-TEST" :timeout 50
-                        :form "(defmethod self-test-defer ((x (eql (progn (sleep 0.3) 1)))) :done)")))
-      ;; the caller still gets :timeout ...
+                        :form "(defmethod self-test-wedged-eql ((x (eql (progn (sleep 5) 1)))) :done)")))
       (is (equal :timeout (nyaa:tool-error result))))
-    ;; ... but the deferred method landed rather than being torn
-    (sleep 0.5)
-    (is (eq :done (funcall (find-symbol "SELF-TEST-DEFER" "NYAA-SELF-TEST") 1)))))
+    ;; the :eql specializer's own form runs ahead of SBCL's method loader,
+    ;; so the interrupt still lands pre-emptively: no method landed, and
+    ;; the worker thread that was running it is gone, not leaked
+    (is-true (no-nyaa-self-eval-thread-p))
+    (signals error (funcall (find-symbol "SELF-TEST-WEDGED-EQL" "NYAA-SELF-TEST") 1))))
+
+(test self-define-a-slow-method-compile-is-killed-not-leaked
+  (with-self ()
+    (self :define :package "NYAA-SELF-TEST" :form "(defgeneric self-test-slow-compile (x))")
+    (let ((result (self :define :package "NYAA-SELF-TEST" :timeout 50
+                        :form "(defmethod self-test-slow-compile ((x integer)) (macrolet ((slow () (sleep 5) 1)) (slow)))")))
+      (is (equal :timeout (nyaa:tool-error result))))
+    ;; compiling the method's own lambda -- SLOW's macroexpansion runs
+    ;; here -- also runs ahead of the method loader that would latch, so
+    ;; this is killed the same way
+    (is-true (no-nyaa-self-eval-thread-p))))
 
 (test self-define-non-clos-form-still-interruptible-past-its-timeout
   (with-self ()
     (let ((result (self :define :package "NYAA-SELF-TEST" :timeout 50
                         :form "(defparameter *self-test-wedged* (progn (sleep 1) :never))")))
       (is (equal :timeout (nyaa:tool-error result))))
-    ;; a non-CLOS head (defun, defmacro, defparameter, defvar) never defers,
-    ;; so the interrupt still lands mid-eval and the definition never
-    ;; completes
+    ;; a non-CLOS head (defun, defmacro, defparameter, defvar) never
+    ;; latches, so the interrupt still lands mid-eval and the definition
+    ;; never completes
     (sleep 1.2)
     (is (not (boundp (find-symbol "*SELF-TEST-WEDGED*" "NYAA-SELF-TEST"))))))
+
+(test self-eval-a-clos-mutation-past-its-timeout-still-lands
+  (with-self ()
+    (let ((result (self :eval :timeout 50 :package "NYAA-SELF-TEST"
+                        :form "(progn (defclass self-test-latched-a () ()) (sleep 0.3) (defclass self-test-latched-b () ()))")))
+      ;; the timeout lands after the first DEFCLASS has already reached
+      ;; SBCL's own loader, latching -- so this waits for the whole form
+      ;; rather than tearing it mid-way
+      (is (equal :timeout (nyaa:tool-error result))))
+    (sleep 0.5)
+    (is-true (find-class (find-symbol "SELF-TEST-LATCHED-A" "NYAA-SELF-TEST") nil))
+    (is-true (find-class (find-symbol "SELF-TEST-LATCHED-B" "NYAA-SELF-TEST") nil))))
 
 ;;; --- :reload ---------------------------------------------------------
 
