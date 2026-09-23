@@ -70,14 +70,13 @@ and overrides the recorded one otherwise")
                 (ok :agent target :id id)))))))
 
 (defun op-vault-discard (path id)
-  (cond
-    ((null id) (bad-request ":id is required for :discard"))
-    (t (let ((entry (%vault-find path id)))
-         (cond
-           ((null entry) (bad-request "no vault entry ~a" id))
-           ((not (eq (getf entry :status) :pending))
-            (bad-request "vault entry ~a is already ~(~a~)" id (getf entry :status)))
-           (t (vault-consume path id :discarded) (ok :id id)))))))
+  (if (null id)
+      (bad-request ":id is required for :discard")
+      (let ((result (vault-consume-pending path id :discarded)))
+        (case result
+          (:consumed (ok :id id))
+          (:unknown (bad-request "no vault entry ~a" id))
+          (t (bad-request "vault entry ~a is already ~(~a~)" id result))))))
 
 (defun op-vault-compact (path max-age)
   (multiple-value-bind (dropped kept)

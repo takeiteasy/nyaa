@@ -89,6 +89,25 @@ explicitly."
   (%append-log path (list :kind :consumed :id id :at (%now-iso8601) :how how))
   (%vault-maybe-compact path))
 
+(defun vault-consume-pending (path id how)
+  "Append a :CONSUMED entry marking ID as HOW, only if ID is a :PENDING
+steer, checked and appended under PATH's lock. Returns :CONSUMED, :UNKNOWN
+for an id with no :STEER entry, or the status it already has."
+  (let ((result
+          (bt:with-lock-held ((%log-lock path))
+            (let* ((log (%read-log path))
+                   (steer (find-if (lambda (e) (and (eq (getf e :kind) :steer)
+                                                    (equal (getf e :id) id)))
+                                   log))
+                   (done (gethash id (%consumed-by-id log))))
+              (cond ((null steer) :unknown)
+                    (done (getf done :how))
+                    (t (%append-log-locked
+                        path (list :kind :consumed :id id :at (%now-iso8601) :how how))
+                       :consumed))))))
+    (when (eq result :consumed) (%vault-maybe-compact path))
+    result))
+
 (defun %consumed-by-id (log)
   "LOG's :CONSUMED entries by id, the first one winning."
   (let ((table (make-hash-table :test 'equal)))

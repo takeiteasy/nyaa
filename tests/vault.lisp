@@ -297,3 +297,26 @@ after the message that triggered it has already returned."
       (with-open-file (stream path :direction :output :if-exists :append)
         (write-string "(torn" stream))
       (is (equal :bad-request (first (nyaa:tool-error (vault :op :compact))))))))
+
+;;; --- atomic discard (~takeiteasy/nyaa#85) -------------------------------------
+
+(test vault-consume-pending-answers-the-existing-status
+  (with-vault-path (path)
+    (let ((id (nyaa:vault-record path :assistant "a")))
+      (is (eq :unknown (nyaa:vault-consume-pending path "nope" :discarded)))
+      (is (eq :consumed (nyaa:vault-consume-pending path id :discarded)))
+      (is (eq :discarded (nyaa:vault-consume-pending path id :folded))))))
+
+(test concurrent-discards-of-one-id-consume-it-once
+  (with-vault-path (path)
+    (let* ((id (nyaa:vault-record path :assistant "a"))
+           (results '())
+           (rlock (bt:make-lock))
+           (threads (loop repeat 8
+                          collect (bt:make-thread
+                                   (lambda ()
+                                     (let ((r (nyaa:vault-consume-pending path id :discarded)))
+                                       (bt:with-lock-held (rlock) (push r results))))))))
+      (mapc #'bt:join-thread threads)
+      (is (eql 1 (count :consumed results)))
+      (is (eql 2 (length (nyaa::%read-log path)))))))

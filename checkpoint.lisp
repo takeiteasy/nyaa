@@ -114,17 +114,20 @@ worker applies to a submitted form."
       (or (gethash key *log-locks*)
           (setf (gethash key *log-locks*) (bt:make-lock :name key))))))
 
+(defun %append-log-locked (path entry)
+  "%APPEND-LOG's write, for a caller already holding PATH's %LOG-LOCK."
+  (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+    (with-open-file (stream path :direction :output :if-exists :append
+                                  :if-does-not-exist :create)
+      (prin1 entry stream)
+      (terpri stream))))
+
 (defun %append-log (path entry)
   "Append ENTRY, a plist, to PATH as one printed form per line. *PRINT-CASE*
 downcase and the keyword package, so the file reads back the same way
 regardless of the caller's own *PACKAGE*."
-  (let ((lock (%log-lock path))
-        (*package* (find-package "KEYWORD")) (*print-case* :downcase))
-    (bt:with-lock-held (lock)
-      (with-open-file (stream path :direction :output :if-exists :append
-                                    :if-does-not-exist :create)
-        (prin1 entry stream)
-        (terpri stream)))))
+  (bt:with-lock-held ((%log-lock path))
+    (%append-log-locked path entry)))
 
 (defun %read-log (path)
   "Every entry in PATH, oldest first, read with *READ-EVAL* nil -- the same

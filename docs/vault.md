@@ -98,7 +98,8 @@ actually folds it in. `:agent`, a string, picks the target: the entry's own
 recorded agent by default, or an override -- required when the entry was
 recorded with no agent, as a delegated sub-agent's always is. Restoring or
 discarding an id that is unknown or already consumed is a
-`(:bad-request ...)`.
+`(:bad-request ...)`. `:discard` checks and consumes under the log's lock,
+so concurrent discards of one id consume it once.
 
 `:path` is a mount option (default nil, meaning the same default an
 agent's `:vault t` uses), read once at mount time.
@@ -108,6 +109,6 @@ agent's `:vault t` uses), read once at mount time.
 - Compaction is safe within one process only; another process appending
   during a compaction loses its entry
   ([#84](https://todo.sr.ht/~takeiteasy/nyaa/84)).
-- `:restore` and `:discard` check an entry and consume it in two steps, so
-  two concurrent calls on one id can both succeed
-  ([#85](https://todo.sr.ht/~takeiteasy/nyaa/85)).
+- `:restore` checks an entry is pending, then casts it; two concurrent
+  calls on one id can both deliver it
+  ([#87](https://todo.sr.ht/~takeiteasy/nyaa/87)).
