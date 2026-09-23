@@ -204,16 +204,22 @@ interrupt still has to land and unwind."
     (is-true (no-nyaa-self-eval-thread-p))))
 
 (test self-eval-a-struct-is-never-torn-by-its-deadline
+  ;; Weak: nothing here can reliably land the deadline inside the struct's
+  ;; span, so a run may pass without exercising the deferral at all. It only
+  ;; asserts the outcome is never a half-defined struct.
   (with-self ()
     (self :eval :timeout 20 :package "NYAA-SELF-TEST"
-                :form "(defstruct (self-test-struct-a (:conc-name nil) (:constructor make-self-test-struct-a)) self-test-sa self-test-sb self-test-sh)")
+                :form "(defstruct self-test-struct-a a b c d e f g h)")
     (is-true (no-nyaa-self-eval-thread-p))
-    ;; whether the deadline landed before, or waited for the whole span,
-    ;; the struct is either absent or fully defined
-    (let ((class (class-named "SELF-TEST-STRUCT-A")))
-      (when class
-        (is-true (fboundp (find-symbol "MAKE-SELF-TEST-STRUCT-A" "NYAA-SELF-TEST")))
-        (is-true (fboundp (find-symbol "SELF-TEST-SH" "NYAA-SELF-TEST")))))))
+    (when (class-named "SELF-TEST-STRUCT-A")
+      (is-true (fboundp (find-symbol "MAKE-SELF-TEST-STRUCT-A" "NYAA-SELF-TEST")))
+      (is-true (fboundp (find-symbol "SELF-TEST-STRUCT-A-H" "NYAA-SELF-TEST"))))))
+
+(test self-eval-interns-macroexpansion-symbols-in-the-requested-package
+  (with-self ()
+    (self :eval :package "NYAA-SELF-TEST" :form "(defstruct self-test-struct-b a)")
+    (is-true (fboundp (find-symbol "MAKE-SELF-TEST-STRUCT-B" "NYAA-SELF-TEST")))
+    (is-true (fboundp (find-symbol "SELF-TEST-STRUCT-B-A" "NYAA-SELF-TEST")))))
 
 (test self-write-abandoned-after-its-timeout-logs-a-late-outcome
   (with-self ()

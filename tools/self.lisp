@@ -109,7 +109,7 @@ before this one."
         (:reload (parse-reload-name name)))
     (if problem
         (bad-request "~a" problem)
-        (run-checkpointed-write service op parsed label timeout))))
+        (run-checkpointed-write service op parsed label timeout package))))
 
 (defun parse-self-form (form package)
   (if (null form)
@@ -148,7 +148,7 @@ exist is a problem, never created on the operator's behalf."
 
 ;;; --- checkpoint, log, then the op --------------------------------------
 
-(defun run-checkpointed-write (service op parsed label timeout)
+(defun run-checkpointed-write (service op parsed label timeout package)
   (let ((context (m:service-context service)))
     (if (null context)
         (fail (list :error "not mounted under a context"))
@@ -162,7 +162,7 @@ exist is a problem, never created on the operator's behalf."
               (log-self-entry service :intent op parsed label checkpoint-path previous)
               (let* ((outcome-logged (bt:make-semaphore))
                      (result (perform-self-write
-                              service op parsed timeout
+                              service op parsed timeout package
                               (lambda (late-result)
                                 (bt:wait-on-semaphore outcome-logged)
                                 (log-self-outcome service op parsed late-result
@@ -183,9 +183,9 @@ immediately before the write."
   (when (and (eq op :define) (second parsed) (symbolp (second parsed)))
     (symbol-source (second parsed))))
 
-(defun perform-self-write (service op parsed timeout on-late)
+(defun perform-self-write (service op parsed timeout package on-late)
   (ecase op
-    ((:eval :define) (run-in-host parsed timeout :on-late on-late))
+    ((:eval :define) (run-in-host parsed timeout :package package :on-late on-late))
     (:reload (op-self-reload service parsed timeout))))
 
 (defun op-self-reload (service name timeout)
@@ -308,8 +308,9 @@ pre-emptive-only."
 ;;; (:DONE) and the caller (:TIMED-OUT) claims it first by
 ;;; COMPARE-AND-SWAP decides who reports the result.
 
-(defun run-in-host (form timeout-ms &key on-late)
-  "FORM evaluated on its own thread, interrupted at TIMEOUT-MS. Once
+(defun run-in-host (form timeout-ms &key package on-late)
+  "FORM evaluated on its own thread, with *PACKAGE* bound to the package
+named PACKAGE, interrupted at TIMEOUT-MS. Once
 the interrupt lands between CLOS mutations (see above), never inside one.
 A form killed after mutating reports (fail :abandoned) to ON-LATE, if
 given, after the caller has already received :TIMEOUT."
@@ -328,7 +329,7 @@ given, after the caller has already received :TIMEOUT."
                              (setf result
                                    (catch 'self-abandoned
                                      (setf (car in-region) t)
-                                     (unwind-protect (eval-in-host form)
+                                     (unwind-protect (eval-in-host form package)
                                        (setf (car in-region) nil))))
                              (when (and (not (eq :running (sb-ext:compare-and-swap (car state) :running :done)))
                                         result on-late)
@@ -351,13 +352,12 @@ given, after the caller has already received :TIMEOUT."
                      (throw 'self-abandoned
                        (and (clos-latch-mutated latch) (fail :abandoned))))))))))
 
-(defun eval-in-host (form)
-  ;; TODO: *package* is not bound to the request's :package here, so symbols
-  ;; interned at macroexpansion (a defstruct's accessors) land in the worker's
-  ;; default package. Tracked in ~takeiteasy/nyaa#102.
+(defun eval-in-host (form package)
   (let ((out (make-string-output-stream)))
     (handler-case
-        (let ((value (let ((*standard-output* out) (*error-output* out))
+        (let ((value (let ((*standard-output* out) (*error-output* out)
+                           (*package* (or (and package (find-package (string-upcase package)))
+                                          *package*)))
                        (eval form))))
           (ok :value (render-self-value value) :out (get-output-stream-string out)))
       (error (e) (fail (list :error (princ-to-string e)))))))

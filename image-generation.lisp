@@ -172,7 +172,7 @@ reports through tool-self."
           (multiple-value-bind (image-path checkpoint-path)
               (save-image context :label (or label (format nil "self-define ~(~a~)" (first parsed))))
             (%log-self-define-entry log :intent parsed label checkpoint-path previous image-path)
-            (let ((result (eval-in-host parsed)))
+            (let ((result (eval-in-host parsed package)))
               ;; SAVE-IMAGE cleared *SELF-DIRTY* for the image it just
               ;; took, before this write -- the write itself still counts,
               ;; the same as any other tool-self write, so :REQUIRE-IMAGE

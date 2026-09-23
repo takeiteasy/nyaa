@@ -63,6 +63,9 @@ so a wedged form costs a timeout, not a wedged service. A value is printed
 under the same caps a worker applies: `*print-length*` 100, `*print-level*`
 8, a 4000-character cap.
 
+The form is evaluated with `*package*` bound to `:package`, so symbols a
+macro interns while expanding -- a `defstruct`'s accessors -- land there too.
+
 A lapsed `:timeout` interrupts pre-emptively, except while SBCL is
 mid-way through one class, method, generic-function or struct definition:
 the interrupt waits for that definition to finish, then lands, so a
