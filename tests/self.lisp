@@ -192,7 +192,9 @@ interrupt still has to land and unwind."
            (late (late-outcome-entry))
            (intent (find :intent entries :key (lambda (e) (getf e :kind)) :from-end t)))
       (is (eq :ok (getf late :outcome)))
-      (is (equal (getf intent :checkpoint) (getf late :checkpoint))))))
+      (is (equal (getf intent :checkpoint) (getf late :checkpoint)))
+      (is (equal '(:intent :outcome :late-outcome)
+                 (mapcar (lambda (e) (getf e :kind)) (last entries 3)))))))
 
 (test self-write-killed-at-its-timeout-logs-no-late-outcome
   (with-self ()

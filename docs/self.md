@@ -88,7 +88,8 @@ points at what to roll back to -- and an outcome entry after:
 
 A write that finishes after its caller received `:timeout` adds a third
 entry, `(:kind :late-outcome ... :checkpoint "..." :outcome :ok)`, whose
-`:checkpoint` matches its intent entry's.
+`:checkpoint` matches its intent entry's. The log always reads intent,
+`:timeout` outcome, then `:late-outcome`.
 
 `:previous-source` is `:define`'s defined name's `symbol-source`
 ([introspection](introspection.md)) as it stood before the write --
@@ -154,9 +155,6 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
   later `defmethod` in the same `:eval` whose `:eql` specializer hangs --
   still leaks its thread, the same way the whole-form deferral did before
   it ([#81](https://todo.sr.ht/~takeiteasy/nyaa/81)).
-- A `:late-outcome` entry can reach the log before the caller's `:timeout`
-  outcome; `:at` still orders them
-  ([#83](https://todo.sr.ht/~takeiteasy/nyaa/83)).
 - The checkpoint taken before a write shares checkpoint.lisp's own
   ceilings: it is not bounded by `:timeout`
   ([#51](https://todo.sr.ht/~takeiteasy/nyaa/51)), and issued mid-run, the

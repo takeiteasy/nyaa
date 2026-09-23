@@ -166,12 +166,15 @@ exist is a problem, never created on the operator's behalf."
                    (previous (self-write-previous-source op parsed)))
               (setf *self-dirty* t)
               (log-self-entry service :intent op parsed label checkpoint-path previous)
-              (let ((result (perform-self-write
-                             service op parsed timeout
-                             (lambda (late-result)
-                               (log-self-outcome service op parsed late-result
-                                                 :kind :late-outcome :checkpoint checkpoint-path)))))
-                (log-self-outcome service op parsed result)
+              (let* ((outcome-logged (bt:make-semaphore))
+                     (result (perform-self-write
+                              service op parsed timeout
+                              (lambda (late-result)
+                                (bt:wait-on-semaphore outcome-logged)
+                                (log-self-outcome service op parsed late-result
+                                                  :kind :late-outcome :checkpoint checkpoint-path)))))
+                (unwind-protect (log-self-outcome service op parsed result)
+                  (bt:signal-semaphore outcome-logged))
                 result))
           (file-error (e) (fail (list :error (princ-to-string e))))))))
 
