@@ -61,16 +61,26 @@ a core loads without actually reviving its services."
          (sb-impl::toplevel-init)))))
 
 #+sbcl
+(defun %save-error-path (core-path)
+  (make-pathname :type "save-error" :defaults core-path))
+
+#+sbcl
 (defun %save-and-die (suspension core-path)
   "Runs in the forked child, which SAVE-IMAGE has already confirmed is
 down to its own single thread. Never returns: SAVE-LISP-AND-DIE exits the
 process on success (SAVE-IMAGE reads that exit status, not this return,
-since the child's own further execution is moot either way), and this
-EXITs it with :code 1 on failure, so a save that raised partway through
--- leaving a truncated core -- is never mistaken for one that finished."
-  (ignore-errors
-   (sb-ext:save-lisp-and-die (namestring core-path)
-                             :toplevel (%make-image-toplevel suspension)))
+since the child's own further execution is moot either way). On failure
+this writes the condition to a sibling .save-error file -- the child's
+own return value can't otherwise reach the parent past WAITPID's exit
+code -- then EXITs :code 1, so a save that raised partway through,
+leaving a truncated core, is never mistaken for one that finished."
+  (handler-case
+      (sb-ext:save-lisp-and-die (namestring core-path)
+                                :toplevel (%make-image-toplevel suspension))
+    (error (e)
+      (ignore-errors
+       (a:write-string-into-file (princ-to-string e) (%save-error-path core-path)
+                                 :if-exists :supersede))))
   (sb-ext:exit :code 1 :abort t))
 
 #+sbcl
@@ -78,12 +88,17 @@ EXITs it with :code 1 on failure, so a save that raised partway through
   "PID's WAITPID status, checked against SAVE-LISP-AND-DIE's own contract
 (a clean exit :code 0): anything else -- a nonzero code, a signal -- means
 CORE-PATH is truncated or absent, not a generation to hand back as if it
-were whole. Deletes it and signals rather than returning a broken path."
+were whole. Deletes it and signals rather than returning a broken path,
+naming the underlying condition (%SAVE-ERROR-PATH) if the child left one."
   (multiple-value-bind (reported-pid status) (sb-posix:waitpid pid 0)
     (declare (ignore reported-pid))
     (unless (and (sb-posix:wifexited status) (zerop (sb-posix:wexitstatus status)))
       (ignore-errors (delete-file core-path))
-      (error "save-lisp-and-die did not finish cleanly (status ~a); ~a was not written" status core-path))))
+      (let ((error-path (%save-error-path core-path)))
+        (unwind-protect
+             (error "save-lisp-and-die did not finish cleanly (status ~a)~@[: ~a~]; ~a was not written"
+                    status (and (probe-file error-path) (uiop:read-file-string error-path)) core-path)
+          (ignore-errors (delete-file error-path)))))))
 
 (defun save-image (context &key (dir *generations-directory*) label keep)
   "Fork and SAVE-LISP-AND-DIE a full image of CONTEXT's tree, alongside a
