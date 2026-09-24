@@ -73,6 +73,7 @@ to COMPLETE, e.g. :TEMPERATURE.")
 record to the default vault log (~takeiteasy/nyaa#14). A string or
 pathname: record there instead.")
    ;; Run state, reset by START-RUN.
+   ;; Newest first, so adding one is O(1); CONVERSATION reads it in order.
    (messages :initform nil :accessor %messages)
    (turns :initform 0 :accessor %turns)
    (allow-list :initform nil :accessor %allow-list)
@@ -149,11 +150,11 @@ pathname: record there instead.")
       (bad-request "agent is already running")
       (progn
         (setf (%messages service)
-              (append (if (and (getf args :continue) (%messages service))
-                          (%messages service)
-                          (and (agent-system service)
-                               (list (list :role :system :content (agent-system service)))))
-                      (getf args :messages))
+              (revappend (getf args :messages)
+                         (if (and (getf args :continue) (%messages service))
+                             (%messages service)
+                             (and (agent-system service)
+                                  (list (list :role :system :content (agent-system service))))))
               (%turns service) 0
               (%pending service) nil
               (%pending-order service) nil
@@ -259,19 +260,19 @@ another process holds or that is already consumed."
   (if (%running-p service)
       (progn
         (close-pending-calls service)
-        (finish-run service (ok :messages (%messages service) :content nil
+        (finish-run service (ok :messages (conversation service) :content nil
                                 :turns (%turns service) :stop-reason :cancelled)))
       :ok))
 
 (defun deadline-run (service)
   (when (%running-p service)
     (close-pending-calls service)
-    (finish-run service (ok :messages (%messages service) :content nil
+    (finish-run service (ok :messages (conversation service) :content nil
                             :turns (%turns service) :stop-reason :timeout))))
 
 (defun step-agent (service)
   (if (>= (%turns service) (agent-max-turns service))
-      (finish-run service (ok :messages (%messages service) :content nil
+      (finish-run service (ok :messages (conversation service) :content nil
                               :turns (%turns service) :stop-reason :max-turns))
       (issue-turn service)))
 
@@ -322,7 +323,7 @@ status). A call that cannot be sent is answered at once."
 (defun build-request (service token stream)
   (let ((tools (request-tools service)))
     (multiple-value-bind (messages record chars)
-        (fit-conversation (%messages service)
+        (fit-conversation (conversation service)
                           :max-context (agent-max-context service)
                           :max-tool-result (agent-max-tool-result service)
                           :chars-per-token (%chars-per-token service)
@@ -377,7 +378,7 @@ tools, and get back its final answer."
              ((and (%steer-queue service)
                    (< (%turns service) (agent-max-turns service)))
               (issue-turn service))
-             (t (finish-run service (ok :messages (%messages service)
+             (t (finish-run service (ok :messages (conversation service)
                                         :content (getf reply :content)
                                         :turns (%turns service)
                                         :stop-reason :stop))))))))))
@@ -718,10 +719,12 @@ one that reads implausibly, leaves the last ratio."
         (when (<= +min-chars-per-token+ ratio +max-chars-per-token+)
           (setf (%chars-per-token service) ratio))))))
 
-;; TODO: appending copies the whole conversation, O(n) per message
-;; (~takeiteasy/nyaa#144).
+(defun conversation (service)
+  "SERVICE's messages, oldest first, in a list of its own."
+  (reverse (%messages service)))
+
 (defun push-message (service message)
-  (setf (%messages service) (append (%messages service) (list message))))
+  (push message (%messages service)))
 
 ;;; --- the sink -----------------------------------------------------------
 
@@ -869,7 +872,7 @@ here but not assumed of the caller's own services)."
 ;;; closed as :INTERRUPTED, so the restored conversation is well-formed.
 
 (defmethod snapshot ((service agent))
-  (append (list :messages (append (%messages service) (pending-tool-messages service))
+  (append (list :messages (append (conversation service) (pending-tool-messages service))
                 :turns (%turns service))
           (when (%running-p service)
             (list :in-flight (list :turn (%turns service)
@@ -882,7 +885,7 @@ here but not assumed of the caller's own services)."
   (cancel-turn service)
   (cancel-pending-calls service)
   (release-steer-claims service)
-  (setf (%messages service) (getf state :messages)
+  (setf (%messages service) (reverse (getf state :messages))
         (%turns service) (getf state :turns)
         (%pending service) nil
         (%pending-order service) nil

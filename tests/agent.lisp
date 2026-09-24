@@ -664,6 +664,18 @@ RUN-ARGS and return the run's result."
       (is (search "earlier answer" (getf (first (requests)) :body)))
       (is (search "more" (getf (first (requests)) :body))))))
 
+(test a-snapshot-keeps-its-messages-when-the-conversation-grows
+  (with-agent ((final-reply "ok"))
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed)))
+        (m:call child (list :restore (list :messages (restored-conversation) :turns 3)))
+        (let* ((snapshot (getf (m:call child (list :snapshot)) :messages))
+               (before (copy-tree snapshot)))
+          (is (equal (restored-conversation) snapshot))
+          (m:cast child (list :run :continue t :messages '((:role :user :content "more"))))
+          (is-true (nth-value 1 (m:receive :timeout 5)))
+          (is (equal before snapshot)))))))
+
 (test run-without-continue-replaces-the-conversation
   (with-agent ((final-reply "ok"))
     (run-on-restored :messages '((:role :user :content "fresh")))
