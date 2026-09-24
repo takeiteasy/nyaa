@@ -204,7 +204,8 @@ An agent's `snapshot` keeps `:messages` and `:turns`, not the turn or tool
 calls in flight — see [checkpoints](checkpoints.md). A checkpoint taken
 mid-run keeps the conversation, closes each unanswered tool call as
 `interrupted` and drops the abandoned turn; `restore` always lands a
-not-running agent, ready for `(:run :continue t)`.
+not-running agent, ready for `(:run :continue t)`, and nothing more from the
+abandoned turn reaches the sink.
 
 ## Limitations
 

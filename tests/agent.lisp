@@ -741,6 +741,25 @@ RUN-ARGS and return the run's result."
                           (event-types (recorded-events recorder))))))
         (setf (car release) t)))))
 
+(test a-restore-mid-turn-streams-nothing-more-from-that-turn
+  (let ((release (list nil))
+        (recorder (make-recorder)))
+    (with-agent ((interruptible-backend release))
+      (unwind-protect
+           (m:with-process (runner)
+             (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                      :sink (recorder-sink recorder))))
+               (m:cast child (list :run :messages '((:role :user :content "go"))))
+               (is-true (eventually (lambda () (recorder-has recorder :text-delta))))
+               (m:call child (list :restore (list :messages '((:role :user :content "go"))
+                                                  :turns 0)))
+               (setf (car release) t)
+               (m:cast child (list :run :continue t))
+               (is-true (nth-value 1 (m:receive :timeout 5)))
+               (is (equal '(:turn :text-delta :turn :text-delta :done :run-done)
+                          (event-types (recorded-events recorder))))))
+        (setf (car release) t)))))
+
 ;;; --- sub-agents ----------------------------------------------------
 
 (test a-sub-agent-result-reaches-the-parent-as-a-tool-message
