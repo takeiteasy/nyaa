@@ -87,8 +87,10 @@ vocabulary: `:timeout`, `:unavailable` for the tool's process being gone, and
 
 `(tools)` scans registration props for `:kind :tool`. Props are a snapshot taken
 at registration — there is no setter — so a tool's advertised `:params` change
-only when it is reloaded. `invoke-tool` reads the schema from there, which costs
-no message to the tool.
+only when it is reloaded. `invoke-tool` reads the schema from there, and
+`tool-metadata` the whole plist, neither costing a message to the tool, so a
+tool busy with a long call never holds them up. `describe-tool` asks the tool
+itself.
 
 ```lisp
 (nyaa:tools)  ; => (:tool-fs :tool-http :tool-shell)

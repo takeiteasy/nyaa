@@ -84,7 +84,7 @@ end a plain `complete` turn early inside a working conversation.
 | `(:describe)` | the metadata plist |
 | `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero |
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
-| `(:steer :content text :interrupt t)` | as `:steer`, but a model turn in flight is abandoned and the steer folds in at once |
+| `(:steer :content text :interrupt t)` | as `:steer`, but a model turn or tool calls in flight are abandoned and the steer folds in at once |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
 
 `:steer` takes an optional `:vault-id`, naming an entry already in the
@@ -98,9 +98,14 @@ straight away. Text the turn had already streamed to the `:sink` is kept as
 an assistant message ahead of the steer; a half-streamed tool call is
 dropped, and with no `:sink` nothing is kept. The abandoned turn counts
 against `:max-turns`, so an interrupt on the last allowed turn finishes the
-run as `:max-turns` and leaves the steer queued. Outside a model turn -- tool
-calls outstanding, between turns, or before `:run` -- `:interrupt` does
-nothing extra and the steer waits for the next turn.
+run as `:max-turns` and leaves the steer queued.
+
+With tool calls outstanding instead, an interrupting steer
+[cancels](#cancelling-tool-calls) each call still running and closes it with
+an `{"error":"interrupted"}` `:tool` message, keeps the results already in,
+and issues the next turn with the steer folded in, without waiting on the
+slowest call. Between turns or before `:run`, `:interrupt` does nothing extra
+and the steer waits for the next turn.
 
 The rest — `:step`, `:turn-reply`, `:tool-reply`, `:deadline` — are internal,
 driving the machine between spawned work and the agent's own mailbox.

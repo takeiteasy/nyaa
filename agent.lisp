@@ -137,7 +137,7 @@ whose :TRUST is :AGENT."
         (registry (m:service-registry service)))
     (if (eq spec :default)
         (remove-if-not (lambda (name)
-                          (eq (tool-trust (describe-tool name :registry registry))
+                          (eq (tool-trust (tool-metadata name :registry registry))
                               :agent))
                         (tools :registry registry))
         spec)))
@@ -150,18 +150,21 @@ vault, claimed by TOOL-VAULT's :RESTORE, which redelivers one this way
 rather than double-recording it, with :VAULT-PATH the log it lives in. The
 id and path travel in the queue cell, never in the message plist pushed onto
 %MESSAGES, so they can never reach a provider's request. :INTERRUPT true
-also abandons a model turn in flight (INTERRUPT-TURN); otherwise the steer
-waits for the next turn as usual."
+also abandons a model turn in flight (INTERRUPT-TURN) or the tool calls
+outstanding (INTERRUPT-TOOLS); otherwise the steer waits for the next turn as
+usual."
   (let* ((content (getf args :content))
          (path (or (getf args :vault-path) (%vault-path (agent-vault service))))
          (id (or (getf args :vault-id)
                  (and path
                       (vault-record path (m:service-name service) content :claim t)))))
     (push (list* id path (list :role :user :content content)) (%steer-queue service)))
-  (if (and (getf args :interrupt) (%turn-in-flight service))
+  (if (getf args :interrupt)
       ;; An interrupt on the last allowed turn finishes the run, and
       ;; (VALUES :DONE result) is how HANDLE ends it.
-      (multiple-value-bind (value result) (interrupt-turn service)
+      (multiple-value-bind (value result)
+          (cond ((%turn-in-flight service) (interrupt-turn service))
+                ((%pending service) (interrupt-tools service)))
         (if (eq value :done) (values :done result) :ok))
       :ok))
 
@@ -178,6 +181,14 @@ STEP-AGENT keeps :MAX-TURNS in force, so the abandoned turn counts."
     (cancel-turn service)
     (when (plusp (length partial))
       (push-message service (list :role :assistant :content partial))))
+  (step-agent service))
+
+(defun interrupt-tools (service)
+  "Close the tool calls outstanding for the steer just queued: each still
+running is cancelled and closed as :INTERRUPTED, the results already in are
+kept, and the next turn folds the steer in, as INTERRUPT-TURN does."
+  (close-pending-calls service)
+  (incf (%step-ref service))
   (step-agent service))
 
 (defun release-steer-claims (service)
@@ -254,7 +265,7 @@ another process holds or that is already consumed."
 
 (defun request-tools (service)
   (append (mapcar (lambda (name)
-                     (describe-tool name :registry (m:service-registry service)))
+                     (tool-metadata name :registry (m:service-registry service)))
                    (%allow-list service))
           (when (agent-sub-agents service) (list (sub-agent-tool-metadata)))))
 

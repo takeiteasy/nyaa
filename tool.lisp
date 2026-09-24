@@ -28,6 +28,11 @@ PROTOCOLS, PROVIDERS and AGENTS, one per :KIND."
   "NAME's metadata plist."
   (m:call (%tool-process name :registry registry) '(:describe)))
 
+(defun tool-metadata (name &key (registry m:*registry*))
+  "NAME's metadata as registered, read without a call to the tool, so a tool
+busy with a long call cannot hold up the caller."
+  (nth-value 1 (%tool-process name :registry registry)))
+
 (defun tool-schema (metadata)
   "METADATA's parameter schema."
   (getf metadata :params))
@@ -175,9 +180,9 @@ DEFSERVICE, as for TOOL-FS's sandbox root.
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
 anaphorically, as TOOL-FS and TOOL-REPL both need, and so is CANCEL-TOKEN,
-the call's cancel token or NIL. A tool needing another
-HANDLE clause -- %UPDATE-CONFIG and friends stay off limits regardless --
-falls back to DEFSERVICE and DEFINE-TOOL-HANDLER directly."
+the call's cancel token or NIL. A tool needing another HANDLE clause --
+%UPDATE-CONFIG and friends stay off limits regardless -- falls back to
+DEFSERVICE and DEFINE-TOOL-HANDLER directly."
   (validate-schema params)
   (destructuring-bind (head arg-names &body body) (first invoke)
     (unless (eq head :invoke)

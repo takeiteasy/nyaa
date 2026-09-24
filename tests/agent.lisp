@@ -59,6 +59,19 @@
         (progn (setf *tool-wait-cancelled* t) (nyaa::fail :cancelled))
         (nyaa::ok :waited t))))
 
+;;; Slower than a turn's round trip, faster than TOOL-WAIT.
+
+(m:defservice tool-slow () () (:name :tool-slow))
+
+(defmethod m:metadata ((service tool-slow))
+  (list :kind :tool :name :tool-slow :trust :agent
+        :summary "Answer after a second" :params nil))
+
+(nyaa::define-tool-handler tool-slow (service args)
+  args
+  (sleep 1)
+  (nyaa::ok :slow t))
+
 ;;; --- the harness --------------------------------------------------------
 
 (defun call-with-agent (answer tool-classes body)
@@ -378,28 +391,150 @@ sink's events, oldest first."
           (is (eql 1 (length (requests))))
           (is (search "early" (getf (first (requests)) :body))))))))
 
-(test an-interrupt-during-the-tool-phase-waits-for-the-calls
+(defun tool-calls-reply (&rest calls)
+  "A reply calling each of CALLS, (id name arguments-json) lists."
+  (json-response
+   (format nil "{\"choices\":[{\"message\":{\"role\":\"assistant\",
+     \"tool_calls\":[~{~a~^,~}]},\"finish_reason\":\"tool_calls\"}]}"
+           (mapcar (lambda (call)
+                     (destructuring-bind (id name arguments) call
+                       (format nil "{\"id\":\"~a\",\"type\":\"function\",
+                         \"function\":{\"name\":\"~a\",\"arguments\":~s}}"
+                               id name arguments)))
+                   calls))))
+
+(defun in-tool-phase-p (snapshot)
+  (getf (getf snapshot :in-flight) :tool-calls))
+
+(defun interrupt-tool-phase (answer tool-classes delegate-args &key (ready #'in-tool-phase-p))
+  "Run an agent against ANSWER with TOOL-CLASSES mounted, send an interrupting
+steer once READY is true of its snapshot, and return the :agent-done result
+and the seconds from the steer to it."
+  (call-with-agent
+   answer tool-classes
+   (lambda (*ctx*)
+     (m:with-process (runner)
+       (let ((child (apply #'m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                           delegate-args)))
+         (m:cast child (list :run :messages '((:role :user :content "go"))))
+         (is-true (eventually (lambda () (funcall ready (m:call child '(:snapshot))))))
+         (let ((start (get-internal-real-time)))
+           (m:cast child (list :steer :content "change of plan" :interrupt t))
+           (multiple-value-bind (message received) (m:receive :timeout 5)
+             (is-true received)
+             (values (fourth message)
+                     (/ (- (get-internal-real-time) start)
+                        internal-time-units-per-second)))))))))
+
+(defun message-texts (result)
+  (mapcar (lambda (m) (cons (getf m :role) (nyaa:content-text (getf m :content))))
+          (getf (second result) :messages)))
+
+(test an-interrupt-during-the-tool-phase-closes-the-calls
+  (setf *tool-wait-cancelled* nil)
   (let ((n 0))
-    (with-agent ((lambda (&rest request)
-                   (declare (ignore request))
-                   (if (= (incf n) 1)
-                       (tool-call-reply "c1" "tool-hold" "{}")
-                       (final-reply "done")))
-                'tool-hold)
-      (m:with-process (runner)
-        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
-                                 :tools '(:tool-hold))))
-          (m:cast child (list :run :messages '((:role :user :content "go"))))
-          (is-true (eventually
-                    (lambda ()
-                      (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls))))
-          (m:cast child (list :steer :content "change of plan" :interrupt t))
-          (multiple-value-bind (message received) (m:receive :timeout 5)
-            (is-true received)
-            (let ((messages (getf (second (fourth message)) :messages)))
-              (is (eq :tool (getf (nth 2 messages) :role)))
-              (is (search "slept" (nyaa:content-text (getf (nth 2 messages) :content))))
-              (is (equal "change of plan" (nyaa:content-text (getf (nth 3 messages) :content)))))))))))
+    (multiple-value-bind (result seconds)
+        (interrupt-tool-phase (lambda (&rest request)
+                                (declare (ignore request))
+                                (if (= (incf n) 1)
+                                    (tool-call-reply "c1" "tool-wait" "{}")
+                                    (final-reply "done")))
+                              '(tool-wait)
+                              '(:tools (:tool-wait)))
+      (is (< seconds 2))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (is (equal '((:tool . "{\"error\":\"interrupted\"}")
+                   (:user . "change of plan")
+                   (:assistant . "done"))
+                 (last (message-texts result) 3)))
+      (is-true (eventually (lambda () *tool-wait-cancelled*))))))
+
+(test an-interrupt-keeps-the-tool-results-already-in
+  (let ((n 0))
+    (multiple-value-bind (result seconds)
+        (interrupt-tool-phase (lambda (&rest request)
+                                (declare (ignore request))
+                                (if (= (incf n) 1)
+                                    (tool-calls-reply '("c1" "tool-echo" "{\"text\":\"kept\"}")
+                                                      '("c2" "tool-wait" "{}"))
+                                    (final-reply "done")))
+                              '(tool-echo tool-wait)
+                              '(:tools (:tool-echo :tool-wait))
+                              :ready (lambda (snapshot)
+                                       (and (in-tool-phase-p snapshot)
+                                            (search "kept" (format nil "~s" (getf snapshot :messages))))))
+      (is (< seconds 2))
+      (let ((tools (remove :tool (getf (second result) :messages)
+                           :key (lambda (m) (getf m :role)) :test-not #'eq)))
+        (is (equal '("c1" "c2") (mapcar (lambda (m) (getf m :tool-call-id)) tools)))
+        (is (search "kept" (nyaa:content-text (getf (first tools) :content))))
+        (is (search "interrupted" (nyaa:content-text (getf (second tools) :content))))))))
+
+(test an-interrupt-in-the-last-turns-tool-phase-finishes-the-run
+  (multiple-value-bind (result seconds)
+      (interrupt-tool-phase (tool-call-reply "c1" "tool-wait" "{}")
+                            '(tool-wait)
+                            '(:tools (:tool-wait) :max-turns 1))
+    (is (< seconds 2))
+    (is (eq :max-turns (getf (second result) :stop-reason)))
+    (is (not (find "change of plan" (message-texts result) :key #'cdr :test #'equal)))))
+
+(test a-busy-tool-does-not-hold-up-the-turn-after-an-interrupt
+  ;; TOOL-SLOW ignores its cancel; the next turn must not wait on it.
+  (let ((n 0))
+    (multiple-value-bind (result seconds)
+        (interrupt-tool-phase (lambda (&rest request)
+                                (declare (ignore request))
+                                (if (= (incf n) 1)
+                                    (tool-call-reply "c1" "tool-slow" "{}")
+                                    (final-reply "done")))
+                              '(tool-slow)
+                              '(:tools (:tool-slow)))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (is (< seconds 0.8)))))
+
+(test a-late-reply-from-an-interrupted-call-does-not-answer-a-reused-id
+  ;; Turn 2 reuses c1, as Ollama's call_N ids do; turn 1's TOOL-SLOW reply
+  ;; lands while turn 2's TOOL-WAIT c1 is still outstanding.
+  (let ((n 0))
+    (let ((result (interrupt-tool-phase (lambda (&rest request)
+                                          (declare (ignore request))
+                                          (case (incf n)
+                                            (1 (tool-call-reply "c1" "tool-slow" "{}"))
+                                            (2 (tool-call-reply "c1" "tool-wait" "{}"))
+                                            (t (final-reply "done"))))
+                                        '(tool-slow tool-wait)
+                                        '(:tools (:tool-slow :tool-wait)))))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (let ((answer (find :tool (reverse (getf (second result) :messages))
+                          :key (lambda (m) (getf m :role)))))
+        (is (search "waited" (nyaa:content-text (getf answer :content))))))))
+
+(test an-interrupt-cancels-a-sub-agent-in-flight
+  (let ((n 0))
+    (call-with-agent
+     (lambda (&rest request)
+       (declare (ignore request))
+       (case (incf n)
+         (1 (tool-call-reply "c1" "agent-task" "{\"task\":\"help\"}"))
+         (2 (sleep 1) (final-reply "sub-answer"))
+         (t (final-reply "done"))))
+     '()
+     (lambda (*ctx*)
+       (m:with-process (runner)
+         (let ((parent (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                   :sub-agents t)))
+           (m:cast parent (list :run :messages '((:role :user :content "go"))))
+           (let ((sub (other-agent-child *ctx* parent)))
+             (is-true sub)
+             (m:cast parent (list :steer :content "change of plan" :interrupt t))
+             (is-true (eventually (lambda () (not (m:process-alive-p sub)))))
+             (multiple-value-bind (message received) (m:receive :timeout 5)
+               (is-true received)
+               (let ((texts (message-texts (fourth message))))
+                 (is (not (find "sub-answer" texts :key #'cdr :test #'search)))
+                 (is (equal '(:tool . "{\"error\":\"interrupted\"}")
+                            (find :tool texts :key #'car))))))))))))
 
 (test cancel-stops-a-dispatched-tool-call
   (setf *tool-wait-cancelled* nil)
