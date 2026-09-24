@@ -329,6 +329,50 @@ interrupt still has to land and unwind."
     (sleep 0.3)
     (is (null (late-outcome-entry)))))
 
+;;; A cancel lands as a lapsed deadline does, once the form is running --
+;;; not while the checkpoint ahead of it is still being taken.
+
+(defvar *self-eval-started* nil)
+
+(defun cancel-self-eval-once (started form)
+  "Invoke :eval FORM on a thread of its own, cancel it once STARTED answers
+true, and return its result."
+  (let* ((token (nyaa:make-cancel-token))
+         (registry m:*registry*)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (let ((m:*registry* registry))
+                      (self :eval :form form :package "NYAA-SELF-TEST"
+                                  :timeout 30000 :cancel token))))))
+    (is-true (eventually started 5))
+    (nyaa:cancel token)
+    (bt:join-thread thread)))
+
+(defun last-entry (kind)
+  (find kind (getf (second (self :log)) :entries)
+        :key (lambda (e) (getf e :kind)) :from-end t))
+
+(test self-eval-cancelled-mid-run-stops-at-once
+  (with-self ()
+    (setf *self-eval-started* nil)
+    (let* ((started (get-internal-real-time))
+           (result (cancel-self-eval-once
+                    (lambda () *self-eval-started*)
+                    "(progn (setf nyaa/tests::*self-eval-started* t) (sleep 5))")))
+      (is (equal :cancelled (nyaa:tool-error result)))
+      (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4))
+      (is-true (no-nyaa-self-eval-thread-p))
+      (is (equal '(:error :cancelled) (getf (last-entry :outcome) :outcome))))))
+
+(test self-eval-cancelled-after-a-mutation-logs-it-abandoned
+  (with-self ()
+    (let ((result (cancel-self-eval-once
+                   (lambda () (class-named "SELF-TEST-CANCEL-A"))
+                   "(progn (defclass self-test-cancel-a () ()) (sleep 5))")))
+      (is (equal :cancelled (nyaa:tool-error result)))
+      (is-true (eventually #'late-outcome-entry))
+      (is (equal '(:error :abandoned) (getf (late-outcome-entry) :outcome))))))
+
 ;;; --- :reload ---------------------------------------------------------
 
 (test self-reload-restarts-a-named-child

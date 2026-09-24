@@ -87,6 +87,9 @@ mutations is left partially applied and logged as a `:late-outcome` entry
 with `:outcome (:error :abandoned)`, or `(:error :torn)` if killed inside
 a definition.
 
+Cancelling the call's [cancel token](tools.md#cancelling-a-call) interrupts a
+running `:eval` or `:define` the same way, and the caller gets `:cancelled`.
+
 ## Checkpoint and log
 
 Every write takes a [checkpoint](checkpoints.md) first, then writes an
@@ -170,3 +173,5 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
 - The checkpoint taken before a write waits up to `checkpoint`'s own 30
   second `:timeout` for a busy service, independent of `:timeout`, and
   does not report which services it caught mid-run.
+- A cancelled `:reload` still finishes
+  ([#124](https://todo.sr.ht/~takeiteasy/nyaa/124)).

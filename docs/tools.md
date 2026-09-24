@@ -129,8 +129,9 @@ Every tool refuses a call whose token is already cancelled, without running
 it -- a call queued behind another on the same tool included. Cancelling one
 already running stops its work, as a lapsed `:timeout` does, in `tool-shell`
 (the whole process group), `tool-http` (the connection), `tool-eval` and
-`tool-repl` (the worker, so that `:id` starts empty) and `tool-plan` (the step
-in flight, and none after it). The other tools finish what they started.
+`tool-repl` (the worker, so that `:id` starts empty), `tool-plan` (the step
+in flight, and none after it) and `tool-self` (an `:eval` or `:define`; see
+[self-modification](self.md)). The other tools finish what they started.
 
 ## The standard tools
 
@@ -291,9 +292,6 @@ cannot surface through either. Seeing a value stays `tool-eval`, `tool-repl`
 or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
-
-- `tool-self` finishes an `:eval` or `:define` already running when its call
-  is cancelled ([#123](https://todo.sr.ht/~takeiteasy/nyaa/123)).
 
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).

@@ -86,7 +86,7 @@ then the only way an operator can still redefine anything, and every
            ((and (member op '(:eval :define)) (self-require-image-p service)
                  (%image-required-refusal))
             (bad-request "~a" (%image-required-refusal)))
-           (t (op-self-write service op form package name label timeout)))))))
+           (t (op-self-write service op form package name label timeout cancel-token)))))))
 
 (defun %image-required-refusal ()
   "Why :REQUIRE-IMAGE refuses right now, or nil if it wouldn't. A generation
@@ -101,7 +101,7 @@ before this one."
 
 ;;; --- dispatch, ahead of any checkpoint --------------------------------
 
-(defun op-self-write (service op form package name label timeout)
+(defun op-self-write (service op form package name label timeout cancel)
   (multiple-value-bind (parsed problem)
       (case op
         (:eval (parse-self-form form package))
@@ -109,7 +109,7 @@ before this one."
         (:reload (parse-reload-name name)))
     (if problem
         (bad-request "~a" problem)
-        (run-checkpointed-write service op parsed label timeout package))))
+        (run-checkpointed-write service op parsed label timeout package cancel))))
 
 (defun parse-self-form (form package)
   (if (null form)
@@ -148,7 +148,7 @@ exist is a problem, never created on the operator's behalf."
 
 ;;; --- checkpoint, log, then the op --------------------------------------
 
-(defun run-checkpointed-write (service op parsed label timeout package)
+(defun run-checkpointed-write (service op parsed label timeout package cancel)
   (let ((context (m:service-context service)))
     (if (null context)
         (fail (list :error "not mounted under a context"))
@@ -162,7 +162,7 @@ exist is a problem, never created on the operator's behalf."
               (log-self-entry service :intent op parsed label checkpoint-path previous)
               (let* ((outcome-logged (bt:make-semaphore))
                      (result (perform-self-write
-                              service op parsed timeout package
+                              service op parsed timeout package cancel
                               (lambda (late-result)
                                 (bt:wait-on-semaphore outcome-logged)
                                 (log-self-outcome service op parsed late-result
@@ -183,11 +183,15 @@ immediately before the write."
   (when (and (eq op :define) (second parsed) (symbolp (second parsed)))
     (symbol-source (second parsed))))
 
-(defun perform-self-write (service op parsed timeout package on-late)
+(defun perform-self-write (service op parsed timeout package cancel on-late)
   (ecase op
-    ((:eval :define) (run-in-host parsed timeout :package package :on-late on-late))
+    ((:eval :define) (run-in-host parsed timeout :package package :cancel cancel
+                                                 :on-late on-late))
     (:reload (op-self-reload service parsed timeout))))
 
+;;; TODO: M:RELOAD runs on this tool's own process, so a cancel cannot stop
+;;; it. Upgrade path: run it off the process, as RUN-IN-HOST does. Tracked
+;;; in ~takeiteasy/nyaa#124.
 (defun op-self-reload (service name timeout)
   (declare (ignore timeout))
   (let ((context (m:service-context service)))
@@ -328,27 +332,31 @@ pre-emptive-only."
 ;;; semaphore for the caller's wait, and an IN-REGION box guarding the
 ;;; interrupt so it only ever throws to a catch tag that is actually there.
 ;;;
-;;; A deadline's interrupt lands pre-emptively (THROW straight to
-;;; SELF-ABANDONED) except inside a CLOS mutation, where it waits for that
-;;; mutation to finish. The caller has already been told :TIMEOUT by then,
-;;; so a form abandoned after mutating reports :ABANDONED through ON-LATE.
+;;; A deadline's or a cancel's interrupt lands pre-emptively (THROW
+;;; straight to SELF-ABANDONED) except inside a CLOS mutation, where it waits
+;;; for that mutation to finish. The caller has already been told :TIMEOUT
+;;; or :CANCELLED by then, so a form abandoned after mutating reports
+;;; :ABANDONED through ON-LATE.
 ;;;
 ;;; STATE is the hand-off between the two threads: whichever of the worker
-;;; (:DONE) and the caller (:TIMED-OUT) claims it first by
-;;; COMPARE-AND-SWAP decides who reports the result.
+;;; (:DONE) and the caller (:STOPPED) claims it first by COMPARE-AND-SWAP
+;;; decides who reports the result. The worker checks it again once inside
+;;; the region, so an interrupt that landed before it got there is not lost.
 
-(defun run-in-host (form timeout-ms &key package on-late)
+(defun run-in-host (form timeout-ms &key package cancel on-late)
   "FORM evaluated on its own thread, with *PACKAGE* bound to the package
-named PACKAGE, interrupted at TIMEOUT-MS. The
-interrupt lands between CLOS mutations, or inside one only after the
-grace deadline (see above). A form killed after mutating reports
-(fail :abandoned), or (fail :torn) if killed inside a mutation, to
-ON-LATE, if given, after the caller has already received :TIMEOUT."
+named PACKAGE, interrupted at TIMEOUT-MS or when CANCEL, a cancel token or
+NIL, is cancelled. The interrupt lands between CLOS mutations, or inside one
+only after the grace deadline (see above). A form killed after mutating
+reports (fail :abandoned), or (fail :torn) if killed inside a mutation, to
+ON-LATE, if given, after the caller has already received :TIMEOUT or
+:CANCELLED."
   (let* ((result nil)
          (in-region (list nil))
          (state (list :running))
          (latch (make-clos-latch))
          (done (bt:make-semaphore))
+         (wake (bt:make-semaphore))
          (registry m:*registry*)
          (worker (bt:make-thread
                   (lambda ()
@@ -359,17 +367,25 @@ ON-LATE, if given, after the caller has already received :TIMEOUT."
                              (setf result
                                    (catch 'self-abandoned
                                      (setf (car in-region) t)
+                                     (unless (eq :running (car state))
+                                       (throw 'self-abandoned nil))
                                      (unwind-protect (eval-in-host form package)
                                        (setf (car in-region) nil))))
                              (when (and (not (eq :running (sb-ext:compare-and-swap (car state) :running :done)))
                                         result on-late)
                                (ignore-errors (funcall on-late result))))
-                        (bt:signal-semaphore done))))
+                        (bt:signal-semaphore done)
+                        (bt:signal-semaphore wake))))
                   :name "nyaa-self-eval")))
-    (if (or (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
-            (not (eq :running (sb-ext:compare-and-swap (car state) :running :timed-out))))
+    ;; A cancel only wakes the wait: DONE stays the worker's, which
+    ;; TEAR-AFTER-GRACE waits on.
+    (when cancel
+      (on-cancel cancel (lambda () (bt:signal-semaphore wake))))
+    (bt:wait-on-semaphore wake :timeout (/ timeout-ms 1000))
+    (if (not (eq :running (sb-ext:compare-and-swap (car state) :running :stopped)))
         result
-        (progn (abandon-self-eval worker in-region latch done) (fail :timeout)))))
+        (progn (abandon-self-eval worker in-region latch done)
+               (fail (if (and cancel (cancelled-p cancel)) :cancelled :timeout))))))
 
 (defun abandon-self-eval (worker in-region latch done)
   (ignore-errors

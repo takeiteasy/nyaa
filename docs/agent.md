@@ -217,6 +217,3 @@ not-running agent, ready for `(:run :continue t)`.
   concurrency cap ([#41](https://todo.sr.ht/~takeiteasy/nyaa/41)).
 - No retry or backoff on a transient backend error — the run ends on the
   first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).
-- A cancelled `tool-self` call finishes the `:eval` or `:define` it started,
-  though the model is told the call was interrupted
-  ([#123](https://todo.sr.ht/~takeiteasy/nyaa/123)).
