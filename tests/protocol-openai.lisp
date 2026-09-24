@@ -369,6 +369,54 @@ needs and a user message."
         (is (equal '(:text-delta :done)
                    (mapcar (lambda (event) (getf event :type)) (reverse events))))))))
 
+(defun cancel-after (token seconds)
+  (bt:make-thread (lambda () (sleep seconds) (nyaa:cancel token))
+                  :name "test-canceller"))
+
+(test cancelling-a-stalled-stream-ends-in-one-cancelled-done-and-frees-its-threads
+  (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
+    (with-hold
+      (let* ((events '())
+             (lock (bt:make-lock))
+             (token (nyaa:make-cancel-token))
+             (started (get-internal-real-time))
+             (canceller (cancel-after token 0.3))
+             (result (ask :ref :r1 :timeout 30000 :cancel token
+                            :stream (lambda (event)
+                                      (bt:with-lock-held (lock) (push event events)))))
+             (elapsed (/ (- (get-internal-real-time) started)
+                         internal-time-units-per-second)))
+        (bt:join-thread canceller)
+        (is (eq :cancelled (nyaa:tool-error result)))
+        (is (< elapsed 5))
+        (is (equal '(:text-delta :done)
+                   (mapcar (lambda (event) (getf event :type)) (reverse events))))
+        (is (equal '(:error :cancelled) (getf (first events) :reason)))
+        (is-true (eventually (lambda () (null (stream-threads)))))))))
+
+(test a-request-cancelled-beforehand-never-reaches-the-backend
+  (with-openai ((json-response +hello-reply+))
+    (let ((token (nyaa:make-cancel-token))
+          (events '()))
+      (nyaa:cancel token)
+      (let ((result (ask :ref :r1 :cancel token
+                           :stream (lambda (event) (push event events)))))
+        (is (eq :cancelled (nyaa:tool-error result)))
+        (is (null (fake-http-requests *backend*)))
+        (is (equal '(:done) (mapcar (lambda (event) (getf event :type)) events)))))))
+
+(test cancelling-after-the-reply-changes-nothing
+  (with-openai ((sse-response
+                 "{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}"))
+    (let* ((token (nyaa:make-cancel-token))
+           (events '())
+           (result (ask :ref :r1 :cancel token
+                          :stream (lambda (event) (push event events)))))
+      (is (eq :ok (first result)))
+      (nyaa:cancel token)
+      (sleep 0.1)
+      (is (= 2 (length events))))))
+
 (test a-streamed-non-ok-status-ends-in-one-failed-done
   (with-openai ('(429 ("Content-Type" "application/json") "{\"error\":\"slow down\"}"))
     (multiple-value-bind (events result) (collect-stream)

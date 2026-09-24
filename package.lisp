@@ -15,6 +15,7 @@
    #:define-protocol-handler #:backend-error
    #:normalize-content #:content-text #:text-block
    #:text-delta #:tool-call-delta #:done #:emit-event
+   #:make-cancel-token #:cancel #:cancelled-p
    ;; provider convention
    #:define-provider #:providers #:describe-provider #:provider
    ;; agent convention

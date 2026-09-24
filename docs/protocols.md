@@ -55,6 +55,7 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
               (:role :tool      :tool-call-id "c1" :content "a.lisp b.lisp"))
   :tools (list (nyaa:describe-tool :tool-shell))
   :stream sink :ref :turn-3
+  :cancel token
   :timeout 30000
   :temperature 0.2)
 ```
@@ -143,6 +144,7 @@ add:
 | Reason | Meaning |
 |---|---|
 | `(:backend-error status detail)` | The backend was reached and the exchange broke down: a non-OK status, a malformed payload, a stream cut short. |
+| `:cancelled` | The request's `:cancel` token was cancelled. |
 
 `(:bad-request msg)` is pre-flight, so a malformed request never reaches the
 network and "your ask was wrong" stays distinguishable from "the backend
@@ -150,10 +152,29 @@ misbehaved". `check-request` runs in `complete` and again in the handler, so a
 protocol reached by a bare `m:call` sees the same checked request.
 `tool-error-p` and `tool-error` take a result apart.
 
-A protocol bounds its own work by the request's timeout and cancels what is in
-flight, as tools do, so a wedged backend costs a timeout rather than a wedged
-service. The deadline closes the connection, so the reader thread unwinds
-rather than waiting on the backend.
+A protocol bounds its own work by the request's timeout, as tools do, so a
+wedged backend costs a timeout rather than a wedged service. The deadline
+closes the connection, so the reader thread unwinds rather than waiting on the
+backend.
+
+## Cancelling
+
+A caller that no longer wants a completion passes a cancel token in the request
+and cancels it from any thread:
+
+```lisp
+(let ((token (nyaa:make-cancel-token)))
+  (bt:make-thread (lambda () (sleep 5) (nyaa:cancel token)))
+  (nyaa:complete :protocol-openai ... :cancel token))
+; => (:error :cancelled)
+```
+
+Cancelling closes the connection and ends the call at once with
+`(:error :cancelled)`; a streamed turn ends with `(:type :done :reason (:error
+:cancelled))`. A token already cancelled fails the call before it reaches the
+network, and cancelling after the reply has arrived changes nothing.
+`cancelled-p` reads the token, and `cancel` answers true the first time. A
+provider passes `:cancel` through to its protocol.
 
 ## The OpenAI protocol
 
@@ -271,8 +292,6 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- A completion in flight can only be abandoned at its deadline; there is no
-  cancel message ([#32](https://todo.sr.ht/~takeiteasy/nyaa/32)).
 - A protocol service handles one completion at a time: meow's service loop runs
   one message to completion before the next, so concurrent turns queue. This
   now applies to both protocol services and to a provider layered on either

@@ -217,6 +217,22 @@ object)."
           (is (eq :agent-done (first message)))
           (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))))))
 
+(test cancel-stops-the-completion-in-flight
+  ;; The backend never finishes its answer, so the turn's thread can only
+  ;; end because :cancel closed its connection.
+  (with-agent ((stalled-stream "application/json" "{\"choices\":["))
+    (with-hold
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :turn-timeout 30000)))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually (lambda () (stream-threads))))
+          (m:cast child '(:cancel))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
+          (is-true (eventually (lambda () (null (stream-threads))))))))))
+
 (test steer-reaches-the-next-request
   (let ((n 0))
     (with-agent ((lambda (&rest request)

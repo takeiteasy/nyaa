@@ -233,11 +233,6 @@ is what COERCE-ARGS matches a schema on."
   (unless (and (listp call) (getf call :id) (getf call :name))
     (format nil "a tool call must carry :id and :name, got ~s" call)))
 
-;;; TODO: a completion in flight can only be abandoned at its deadline; there
-;;; is no cancel message, so an interrupted caller pays the full timeout.
-;;; Upgrade path: (:cancel ref), which makes :REF load-bearing rather than
-;;; merely echoed. Tracked in ~takeiteasy/nyaa#32.
-
 (defun complete (name &rest request)
   "Perform one turn against protocol or provider NAME. Returns (:ok plist) or
 (:error reason)."
@@ -287,6 +282,36 @@ across deltas."
 malformed payload, a stream cut short."
   (fail (list :backend-error status detail)))
 
+;;; --- cancelling ---------------------------------------------------------
+
+;;; A caller-held handle rather than a message: a protocol answers one message
+;;; at a time, so a cancel sent to it would wait behind the completion it
+;;; means to stop.
+
+(defstruct (cancel-token (:constructor make-cancel-token ()))
+  (lock (bt:make-lock)) cancelled actions)
+
+(defun cancelled-p (token)
+  (bt:with-lock-held ((cancel-token-lock token))
+    (cancel-token-cancelled token)))
+
+(defun on-cancel (token function)
+  "Call FUNCTION when TOKEN is cancelled, at once if it already is."
+  (when (bt:with-lock-held ((cancel-token-lock token))
+          (or (cancel-token-cancelled token)
+              (progn (push function (cancel-token-actions token)) nil)))
+    (funcall function)))
+
+(defun cancel (token)
+  "Cancel whatever TOKEN was passed to as :CANCEL. Idempotent; true the first
+time."
+  (let ((actions (bt:with-lock-held ((cancel-token-lock token))
+                   (unless (cancel-token-cancelled token)
+                     (setf (cancel-token-cancelled token) t)
+                     (shiftf (cancel-token-actions token) nil)))))
+    (mapc #'funcall actions)
+    (and actions t)))
+
 ;;; --- the exchange -------------------------------------------------------
 
 ;;; Shared by every protocol that talks to a backend over a socket: the
@@ -302,27 +327,46 @@ malformed payload, a stream cut short."
   (loop for (name value) on headers by #'cddr
         collect (cons (string-downcase name) value)))
 
-(defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange"))
+(defstruct (exchange (:conc-name exchange-))
+  socket cancelled finished (lock (bt:make-lock)))
+
+(defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange") cancel)
   "Run FUNCTION on a worker thread, bounded by TIMEOUT-MS. FUNCTION takes
 CONNECT, a function of a URL answering a stream ready for drakma's :STREAM.
-Answers (values result timed-out-p). At the deadline the connection is closed,
-so the worker unwinds instead of running until the backend answers or hangs
-up."
+Answers (values result reason), REASON being :TIMEOUT or, when CANCEL -- a
+cancel token -- fired, :CANCELLED. At either the connection is closed, so the
+worker unwinds instead of running until the backend answers or hangs up."
+  (when (and cancel (cancelled-p cancel))
+    (return-from call-with-deadline (values nil :cancelled)))
   (let* ((result nil)
-         (socket-box (list nil))
+         (exchange (make-exchange))
          (done (bt:make-semaphore))
-         (connect (lambda (url) (open-connection url socket-box timeout-ms))))
+         (connect (lambda (url) (open-connection url exchange timeout-ms))))
+    (when cancel
+      (on-cancel cancel (lambda () (cancel-exchange exchange done name))))
     (bt:make-thread
      (lambda ()
        (unwind-protect
             (setf result (funcall function connect))
-         (close-socket (car socket-box))
+         (close-socket (exchange-socket exchange))
          (bt:signal-semaphore done)))
      :name (format nil "~a-request" name))
-    (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
-        (values result nil)
-        (progn (abandon-connection (car socket-box) name)
-               (values nil t)))))
+    (let ((finished (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))))
+      (bt:with-lock-held ((exchange-lock exchange))
+        (setf (exchange-finished exchange) t)
+        (cond ((eq t (exchange-cancelled exchange)) (values nil :cancelled))
+              (finished (values result nil))
+              (t ;; Marked so a connect still in progress closes its socket.
+               (setf (exchange-cancelled exchange) :timeout)
+               (abandon-connection (exchange-socket exchange) name)
+               (values nil :timeout)))))))
+
+(defun cancel-exchange (exchange done name)
+  (bt:with-lock-held ((exchange-lock exchange))
+    (unless (exchange-finished exchange)
+      (setf (exchange-cancelled exchange) t)
+      (abandon-connection (exchange-socket exchange) name)
+      (bt:signal-semaphore done))))
 
 (defun close-socket (socket)
   (when socket (ignore-errors (usocket:socket-close socket))))
@@ -334,7 +378,7 @@ blocked read."
     (bt:make-thread (lambda () (close-socket socket))
                     :name (format nil "~a-close" name))))
 
-(defun open-connection (url socket-box timeout-ms)
+(defun open-connection (url exchange timeout-ms)
   (let* ((uri (puri:parse-uri url))
          (securep (eq (puri:uri-scheme uri) :https))
          (socket (with-immediate-connect-refusal
@@ -345,7 +389,12 @@ blocked read."
                     ;; exchange deadline.
                     :timeout (max 1 (ceiling timeout-ms 1000))
                     :nodelay :if-supported))))
-    (setf (car socket-box) socket)
+    ;; A cancel that landed while connecting found no socket to close.
+    (when (bt:with-lock-held ((exchange-lock exchange))
+            (setf (exchange-socket exchange) socket)
+            (exchange-cancelled exchange))
+      (close-socket socket)
+      (error "cancelled"))
     (wrap-http-stream socket (puri:uri-host uri) securep)))
 
 (defun wrap-http-stream (socket host securep)
@@ -433,15 +482,19 @@ ends it with exactly one :DONE."
          (request (if sink
                       (list* :stream (gate-emitter gate) request)
                       request)))
-    (multiple-value-bind (result timed-out)
+    (multiple-value-bind (result reason)
         (call-with-deadline
          timeout
          (lambda (connect) (attempt-completion request opener reader connect))
-         :name "nyaa-completion")
-      (let ((result (if timed-out (fail :timeout) result)))
+         :name "nyaa-completion"
+         :cancel (getf request :cancel))
+      (let ((result (case reason
+                      (:timeout (fail :timeout))
+                      (:cancelled (fail :cancelled))
+                      (t result))))
         (when sink
           (close-gate gate (getf request :ref) result
-                      (unless timed-out
+                      (unless reason
                         (- (/ timeout 1000)
                            (/ (- (get-internal-real-time) started)
                               internal-time-units-per-second)))))

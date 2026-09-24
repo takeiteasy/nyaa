@@ -224,6 +224,17 @@ is the one MAKE-INSTANCE takes."
                  (mapcar (lambda (event) (getf event :type)) (nreverse events))))
       (is (equal "hi there" (nyaa:content-text (getf (second result) :content)))))))
 
+(test a-cancel-crosses-the-provider
+  (with-providers ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"))
+                   (keyed))
+    (with-hold
+      (let* ((token (nyaa:make-cancel-token))
+             (canceller (bt:make-thread (lambda () (sleep 0.3) (nyaa:cancel token))))
+             (result (turn :provider-test-keyed :cancel token :timeout 30000
+                           :stream (lambda (event) event))))
+        (bt:join-thread canceller)
+        (is (eq :cancelled (nyaa:tool-error result)))))))
+
 (test a-tool-call-crosses-the-provider-ready-to-invoke
   (with-providers ((json-response
                      "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,

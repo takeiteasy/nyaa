@@ -179,3 +179,22 @@
     (is (eq :tool-call-delta (getf event :type)))
     (is (equal "c1" (getf event :id)))
     (is (equal "{\"cmd\"" (getf event :arguments)))))
+
+;;; --- cancel tokens --------------------------------------------------------
+
+(test a-cancel-token-runs-its-actions-once
+  (let ((token (nyaa:make-cancel-token))
+        (runs 0))
+    (nyaa::on-cancel token (lambda () (incf runs)))
+    (is-false (nyaa:cancelled-p token))
+    (is-true (nyaa:cancel token))
+    (is-false (nyaa:cancel token))
+    (is-true (nyaa:cancelled-p token))
+    (is (= 1 runs))))
+
+(test an-action-registered-after-cancel-runs-at-once
+  (let ((token (nyaa:make-cancel-token))
+        (runs 0))
+    (nyaa:cancel token)
+    (nyaa::on-cancel token (lambda () (incf runs)))
+    (is (= 1 runs))))

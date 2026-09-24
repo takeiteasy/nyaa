@@ -54,7 +54,8 @@ pathname: record there instead.")
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
    (running-p :initform nil :accessor %running-p)
-   (cancel-timer :initform nil :accessor %cancel-timer))
+   (cancel-timer :initform nil :accessor %cancel-timer)
+   (turn-token :initform nil :accessor %turn-token))
   (:default-initargs :name nil))
 
 (defmethod m:metadata ((service agent))
@@ -201,7 +202,8 @@ another process holds or that is already consumed."
   (incf (%turns service))
   (emit-event (agent-sink service) (turn-event (m:agent-ref service) (%turns service)))
   (let ((ref (incf (%step-ref service)))
-        (request (build-request service))
+        (request (build-request service (setf (%turn-token service)
+                                              (make-cancel-token))))
         (registry (m:service-registry service))
         (parent (m:self)))
     (m:spawn (lambda ()
@@ -210,8 +212,9 @@ another process holds or that is already consumed."
                                       (apply #'complete (agent-model service) request))))))
     nil))
 
-(defun build-request (service)
-  (list* :messages (%messages service)
+(defun build-request (service token)
+  (list* :cancel token
+         :messages (%messages service)
          :tools (request-tools service)
          :stream (and (agent-sink service)
                       (lambda (event) (emit-event (agent-sink service) event)))
@@ -357,8 +360,19 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
 
+;;; TODO: only the model turn is cancelled; dispatched tool calls run to their
+;;; own timeouts. Upgrade path: a cancel token per call. Tracked in
+;;; ~takeiteasy/nyaa#111.
+
+(defun cancel-turn (service)
+  "Stop the completion in flight, if any, rather than leave it to its own
+timeout."
+  (a:when-let ((token (shiftf (%turn-token service) nil)))
+    (cancel token)))
+
 (defun finish-run (service result)
   (cancel-deadline service)
+  (cancel-turn service)
   (setf (%running-p service) nil
         (%pending service) nil
         (%pending-order service) nil)
@@ -436,6 +450,7 @@ here but not assumed of the caller's own services)."
 
 (defmethod restore ((service agent) state)
   (cancel-deadline service)
+  (cancel-turn service)
   (release-steer-claims service)
   (setf (%messages service) (getf state :messages)
         (%turns service) (getf state :turns)

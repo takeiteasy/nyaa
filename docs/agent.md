@@ -112,6 +112,9 @@ way. `:stop-reason` is one of:
 | `:timeout` | `:deadline` lapsed |
 | `:cancelled` | `:cancel` was sent |
 
+`:cancel` and `:deadline` also cancel the model turn in flight, closing its
+connection rather than waiting out `:turn-timeout`.
+
 A `:cancelled` or `:timeout` run closes each tool call still awaiting a
 result with an `{"error":"interrupted"}` `:tool` message, so `:messages` is
 always well-formed to send back to a model. Each closed call also emits a
@@ -135,7 +138,9 @@ handed down in the request unchanged; the loop adds:
 ```
 
 A turn whose `complete` failed emits the protocol's `:done` with
-`:reason (:error r)` before `:run-done`.
+`:reason (:error r)` before `:run-done`. A turn cut short by `:cancel` or
+`:deadline` is cancelled at the protocol, and its `(:error :cancelled)` `:done`
+may arrive after `:run-done`.
 
 ## Sub-agents
 
@@ -176,6 +181,6 @@ not-running agent, ready for `(:run :continue t)`.
   concurrency cap ([#41](https://todo.sr.ht/~takeiteasy/nyaa/41)).
 - No retry or backoff on a transient backend error — the run ends on the
   first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).
-- `:cancel` and `:deadline` end the run at once, but the `complete` call
-  already in flight keeps running to its own timeout
-  ([#32](https://todo.sr.ht/~takeiteasy/nyaa/32)).
+- `:cancel` and `:deadline` stop the model turn in flight but not the tool
+  calls already dispatched, which run to their own timeouts
+  ([#111](https://todo.sr.ht/~takeiteasy/nyaa/111)).
