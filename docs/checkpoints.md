@@ -117,7 +117,8 @@ reported rather than silently accepted:
 | `:interrupted` | restored names that were snapshotted mid-work; the in-flight work is gone |
 | `:unavailable` | names the checkpoint could not snapshot — left as they are |
 | `:remounted` | names mounted again from the generation |
-| `:unremounted` | each name that could not be, with why: `(name "its class NO-PKG::X is not defined")` |
+| `:updated` | declared children of a remounted context that `:initargs` was applied to |
+| `:unremounted` | each name that could not be mounted again or updated, with why: `(name "its class NO-PKG::X is not defined")` |
 | `:missing` | a generation entry with no service mounted under that name now, `:unremounted` ones and those of a version 1 generation included |
 | `:mismatched` | mounted now, but under a different class — not restored |
 | `:extra` | mounted now, not named by the generation |
@@ -132,7 +133,12 @@ reported rather than silently accepted:
 `(name . initargs)`, put ahead of a remounted service's own.
 
 A context mounted again mounts its declared `:children` itself, so those are
-not mounted a second time; only what was mounted onto it by hand is.
+not mounted a second time; only what was mounted onto it by hand is. Such a
+child comes back without a credential the generation left out. `:initargs`
+naming one is applied to it with
+[`m:update`](https://github.com/takeiteasy/meow/blob/trunk/docs/update.md),
+which reloads it, and it is listed under `:updated`. A service that was never
+gone is not updated.
 A version 1 generation records no mount, so a service it names that has gone
 is `:missing`.
 
@@ -159,12 +165,6 @@ snapshot, so `:tool-checkpoint` is always listed under `:unavailable`.
 `~/.nyaa/generations/`), read once at mount time — a caller wanting a
 different directory per call goes through `checkpoint`/`rollback` directly
 instead, as [`tool-self`](self.md) does before every write it makes.
-
-## Limitations
-
-- `:initargs` cannot give a credential back to a child a remounted context
-  declares itself; it takes its key from its environment variable
-  ([#141](https://todo.sr.ht/~takeiteasy/nyaa/141)).
 
 [^text]: Printed as text so that a generation reads back even when a package
     it names is gone: that entry alone is `:unremounted`, when it is

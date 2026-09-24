@@ -561,3 +561,44 @@ once it is released."
         (is (null (getf result :remounted)))
         (is (null (getf result :unremounted)))
         (is (= 3 (thing)))))))
+
+(defun mount-inner-with-a-keyed-child ()
+  (unless (m:lookup :protocol-openai) (m:mount *ckpt-context* 'nyaa:protocol-openai))
+  (m:mount *ckpt-context* 'm:context :name :inner
+           :children '((nyaa/tests::provider-test-keyed
+                        :model "test-model" :base-url "http://127.0.0.1:1"
+                        :api-key "sk-nested"))))
+
+(test a-credential-in-a-declared-child-is-never-written
+  (with-checkpoints (dir)
+    (mount-inner-with-a-keyed-child)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (is (null (search "sk-nested" (generation-text path))))
+      (is (equal '("provider-test-keyed :api-key")
+                 (getf (service-entry path :inner) :withheld))))))
+
+(test rollback-initargs-reach-a-child-a-remounted-context-declares
+  (with-checkpoints (dir)
+    (mount-inner-with-a-keyed-child)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (m:unmount *ckpt-context* :inner)
+      (let ((result (rolled-back path :initargs '((:provider-test-keyed :api-key "sk-back")))))
+        (is (equal '(:inner) (getf result :remounted)))
+        (is (equal '(:provider-test-keyed) (getf result :updated)))
+        (is (null (getf result :unremounted))))
+      (is (equal "sk-back" (provider-key)))
+      (is (equal "test-model" (nyaa::provider-model
+                               (m:service-of (m:lookup :provider-test-keyed))))
+          "the rest of its spec is kept"))))
+
+(test a-declared-child-is-left-alone-without-an-override-or-a-remounted-context
+  (with-checkpoints (dir)
+    (mount-inner-with-a-keyed-child)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (is (null (getf (rolled-back path :initargs '((:provider-test-keyed :api-key "sk-x")))
+                      :updated))
+          "the context was never gone, so its child is not rollback's to update")
+      (m:unmount *ckpt-context* :inner)
+      (let ((result (rolled-back path)))
+        (is (null (getf result :updated)))
+        (is (null (provider-key)))))))

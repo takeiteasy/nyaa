@@ -365,9 +365,6 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
     (a:when-let ((image (getf stale :image)))
       (ignore-errors (delete-file image)))))
 
-;; TODO: OVERRIDES reach only a service mounted here. A context mounts its
-;; declared :children itself, from a spec with its credentials left out, so a
-;; credential cannot be given back to one (~takeiteasy/nyaa#141).
 (defun %remount-entry (context entries entry overrides)
   "Mount ENTRY, a generation entry, again, under the context it was under
 among ENTRIES -- CONTEXT's current entries -- or CONTEXT itself. OVERRIDES is
@@ -388,21 +385,39 @@ ROLLBACK's :INITARGS. Signals an error saying why it cannot."
                    (loop for key in '(:restart :shutdown :backoff :backoff-max)
                          when (getf entry key) append (list key (getf entry key)))))))
 
+(defun %update-declared (context entries entry overrides)
+  "Give ENTRY, a generation entry mounted now by a context that ROLLBACK just
+mounted again, its OVERRIDES: the context mounted it itself, from a spec with
+its credentials left out, so it is updated in place instead."
+  (let ((parent (getf (find (getf entry :parent) entries :key (lambda (e) (getf e :name)))
+                      :process)))
+    (unless parent (error "its parent ~(~a~) is not mounted" (getf entry :parent)))
+    (apply #'m:update parent (getf entry :name)
+           (cdr (assoc (getf entry :name) overrides)))))
+
 (defun %remount (context recorded overrides)
   "Mount again each of RECORDED, generation entries, that has no service of
 its name now and was recorded with how it was mounted. Parent first, as the
 generation lists them, looking again after each so that a context's declared
-children, which it mounts itself, are not mounted twice. Returns the names
-remounted, then (name reason) for each that could not be."
-  (let (remounted failed)
+children, which it mounts itself, are not mounted twice. Each of those, at any
+depth, that OVERRIDES names is updated with them. Returns the names remounted,
+then those updated, then (name reason) for each that could not be."
+  (let (remounted updated failed brought)
     (dolist (entry recorded)
-      (let ((name (getf entry :name)) (entries (%context-entries context)))
-        (when (and (getf entry :symbol)
-                   (not (find name entries :key (lambda (e) (getf e :name)))))
-          (handler-case (progn (%remount-entry context entries entry overrides)
-                               (push name remounted))
-            (error (e) (push (list name (princ-to-string e)) failed))))))
-    (values (nreverse remounted) (nreverse failed))))
+      (let* ((name (getf entry :name)) (entries (%context-entries context))
+             (present (find name entries :key (lambda (e) (getf e :name)))))
+        (handler-case
+            (cond ((and (not present) (getf entry :symbol))
+                   (%remount-entry context entries entry overrides)
+                   (push name remounted)
+                   (push name brought))
+                  ((and present (getf entry :parent) (member (getf entry :parent) brought))
+                   (push name brought)
+                   (when (assoc name overrides)
+                     (%update-declared context entries entry overrides)
+                     (push name updated))))
+          (error (e) (push (list name (princ-to-string e)) failed)))))
+    (values (nreverse remounted) (nreverse updated) (nreverse failed))))
 
 (defun rollback (context path &key (timeout 30) (remount t) initargs)
   "Restore the generation at PATH onto CONTEXT's named services now. Every
@@ -411,14 +426,16 @@ service unmounted since the checkpoint is first mounted again from what the
 generation recorded of it, and restored like the rest. INITARGS, an alist of
 (name . initargs), is added to a remounted service's own -- the way to give
 back a credential the generation left out, which a provider otherwise takes
-from its environment variable.
+from its environment variable -- or, for a child a remounted context declares
+and mounted itself, applied to it with M:UPDATE.
 Returns (:ok (:restored names :failed names :failures entries :interrupted names
-:unavailable names :remounted names :unremounted entries :missing names
+:unavailable names :remounted names :updated names :unremounted entries :missing names
 :mismatched entries :extra names)). FAILED names a
 restore that got no answer and FAILURES lists each as (name reason); INTERRUPTED a restored service that was
 snapshotted mid-work, whose in-flight work is gone; UNAVAILABLE an entry the
 checkpoint could not snapshot, left as it is. REMOUNTED names a service
-mounted again, UNREMOUNTED lists each that could not be as (name reason), and
+mounted again, UPDATED a declared child of one that INITARGS was applied to,
+UNREMOUNTED lists each that could not be as (name reason), and
 MISSING names a generation entry with no service mounted under that name
 now, one from a version 1 generation included; MISMATCHED one mounted
 under a different class, which is reported rather than restored; EXTRA a
@@ -426,12 +443,12 @@ service mounted now the generation does not name. None of these fails the
 call -- the caller decides what drift means."
   (let* ((generation (%read-generation path))
          (recorded (getf generation :services))
-         (remounted '()) (unremounted '())
+         (remounted '()) (updated '()) (unremounted '())
          (current '())
          (targets '())
          (unavailable '()) (missing '()) (mismatched '()))
     (when remount
-      (setf (values remounted unremounted) (%remount context recorded initargs)))
+      (setf (values remounted updated unremounted) (%remount context recorded initargs)))
     (setf current (%context-entries context))
     (dolist (entry recorded)
       (let* ((name (getf entry :name))
@@ -461,7 +478,7 @@ call -- the caller decides what drift means."
                           (push name interrupted)))))
       (ok :restored (nreverse restored) :failed (nreverse failed)
           :failures (nreverse failures) :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
-          :remounted remounted :unremounted unremounted
+          :remounted remounted :updated updated :unremounted unremounted
           :missing (nreverse missing) :mismatched (nreverse mismatched)
           :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
                                  (mapcar (lambda (e) (getf e :name)) recorded))))))
