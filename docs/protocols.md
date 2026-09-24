@@ -124,8 +124,9 @@ watch for `:done`. A request rejected before the network with
 A function sink is called from a thread of its own, one event at a time and in
 order, so a sink that blocks never delays the exchange or its deadline. `complete`
 returns once the sink has seen `:done`, except when the deadline lapsed: then
-the reply does not wait on the sink. A sink that signals an error loses that
-event and carries on.
+the reply does not wait on the sink. A sink that has not taken `:done` five
+seconds past the deadline is stopped, and the events still queued for it are
+dropped. A sink that signals an error loses that event and carries on.
 
 A tool call's `:arguments` arrive as text split across deltas; the consumer
 reassembles them. The `(:ok ...)` reply carries the whole turn regardless, so a

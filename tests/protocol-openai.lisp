@@ -369,6 +369,29 @@ needs and a user message."
         (is (equal '(:text-delta :done)
                    (mapcar (lambda (event) (getf event :type)) (reverse events))))))))
 
+(defun sink-threads ()
+  (remove-if-not (lambda (thread)
+                   (let ((name (bt:thread-name thread)))
+                     (and name (search "nyaa-sink" name)
+                          (not (search "reaper" name)))))
+                 (bt:all-threads)))
+
+(test a-sink-that-never-returns-loses-its-emitter-after-the-grace
+  (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
+    (with-hold
+      (let ((grace nyaa::*sink-grace*)
+            (stuck (bt:make-semaphore)))
+        (setf nyaa::*sink-grace* 0.3)
+        (unwind-protect
+             (let ((result (ask :ref :r1 :timeout 400
+                                :stream (lambda (event)
+                                          (declare (ignore event))
+                                          (bt:wait-on-semaphore stuck :timeout 60)))))
+               (is (eq :timeout (nyaa:tool-error result)))
+               (is-true (eventually (lambda () (null (sink-threads))) 5)))
+          (setf nyaa::*sink-grace* grace)
+          (bt:signal-semaphore stuck :count 3))))))
+
 (defun cancel-after (token seconds)
   (bt:make-thread (lambda () (sleep seconds) (nyaa:cancel token))
                   :name "test-canceller"))

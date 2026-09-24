@@ -494,11 +494,12 @@ handshake in the clear."
 ;;; gate, so the sink sees exactly one :DONE and nothing after it, however
 ;;; the worker and the deadline race. A function sink is called from an
 ;;; emitter of its own, fed through a mailbox, so a sink that blocks never
-;;; holds up the worker or the deadline.
-;;;
-;;; TODO: an emitter whose sink never returns outlives its turn. Upgrade
-;;; path: abandon it at the deadline as the exchange's own thread is.
-;;; Tracked in ~takeiteasy/nyaa#110.
+;;; holds up the worker or the deadline. An emitter that has not delivered
+;;; :DONE by the turn's deadline plus *SINK-GRACE* is killed, and the events
+;;; queued behind it with it.
+
+(defparameter *sink-grace* 5
+  "Seconds past a turn's deadline a function sink has to take its :DONE.")
 
 (defstruct (sink-gate (:conc-name gate-))
   sink (lock (bt:make-lock)) closed relay (drained (bt:make-semaphore)))
@@ -531,13 +532,23 @@ handshake in the clear."
 
 (defun close-gate (gate ref result &optional wait)
   "End the turn: emit its :DONE, then drop whatever the worker still sends.
-WAIT, in seconds, bounds how long to wait for the sink to have seen it."
+WAIT, in seconds, bounds how long to wait for the sink to have seen it. True
+when the sink has, or has no emitter to wait for."
   (bt:with-lock-held ((gate-lock gate))
     (unless (gate-closed gate)
       (setf (gate-closed gate) t)
       (gate-deliver gate (done ref (done-reason result)))))
-  (when (and wait (gate-relay gate))
-    (bt:wait-on-semaphore (gate-drained gate) :timeout (max 0 wait))))
+  (or (null (gate-relay gate))
+      (and wait (bt:wait-on-semaphore (gate-drained gate) :timeout (max 0 wait)))))
+
+(defun reap-relay (gate seconds)
+  "Kill GATE's emitter unless the sink has taken :DONE within SECONDS, from a
+thread of its own so the reply is not held up."
+  (bt:make-thread (lambda ()
+                    (unless (bt:wait-on-semaphore (gate-drained gate)
+                                                  :timeout (max 0 seconds))
+                      (m:kill (gate-relay gate))))
+                  :name "nyaa-sink-reaper"))
 
 (defun done-reason (result)
   (if (tool-error-p result)
@@ -568,11 +579,13 @@ ends it with exactly one :DONE."
                       (:cancelled (fail :cancelled))
                       (t result))))
         (when sink
-          (close-gate gate (getf request :ref) result
-                      (unless reason
-                        (- (/ timeout 1000)
-                           (/ (- (get-internal-real-time) started)
-                              internal-time-units-per-second)))))
+          (flet ((remaining ()
+                   (- (/ timeout 1000)
+                      (/ (- (get-internal-real-time) started)
+                         internal-time-units-per-second))))
+            (unless (close-gate gate (getf request :ref) result
+                                (unless reason (remaining)))
+              (reap-relay gate (+ (remaining) *sink-grace*)))))
         result))))
 
 (defun attempt-completion (request opener reader connect)
