@@ -271,7 +271,7 @@
         (let ((after (nyaa:invoke-tool :tool-self :op :eval :form "1")))
           (is (equal :bad-request (first (nyaa:tool-error after)))))))))
 
-(test self-define-refuses-a-non-definition-form
+(test image-generation-self-define-refuses-a-non-definition-form
   (let ((nyaa::*last-image* nil) (nyaa::*self-dirty* nil))
     (with-image-context (ctx)
       (signals error (nyaa:self-define ctx "(+ 1 2)")))))

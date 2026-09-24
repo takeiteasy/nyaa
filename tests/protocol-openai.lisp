@@ -246,7 +246,7 @@ needs and a user message."
                         extra)))
     (values (nreverse events) result)))
 
-(test text-deltas-reach-the-sink-and-the-reply
+(test openai-text-deltas-reach-the-sink-and-the-reply
   (with-openai ((sse-response
                  "{\"choices\":[{\"delta\":{\"content\":\"hi \"}}]}"
                  "{\"choices\":[{\"delta\":{\"content\":\"there\"}}]}"
@@ -378,7 +378,7 @@ needs and a user message."
 
 ;;; --- errors -----------------------------------------------------------
 
-(test a-non-ok-status-is-a-backend-error
+(test openai-a-non-ok-status-is-a-backend-error
   (with-openai ('(429 ("Content-Type" "application/json")
                   "{\"error\":{\"message\":\"rate limited\"}}"))
     (let ((reason (nyaa:tool-error (ask))))
@@ -394,11 +394,11 @@ needs and a user message."
   (with-openai ((json-response "{\"choices\":[]}"))
     (is (eq :backend-error (first (nyaa:tool-error (ask)))))))
 
-(test a-connection-closed-before-a-response-is-unavailable
+(test openai-a-connection-closed-before-a-response-is-unavailable
   (with-openai (:close)
     (is (eq :unavailable (nyaa:tool-error (ask))))))
 
-(test an-unreachable-backend-is-unavailable
+(test openai-an-unreachable-backend-is-unavailable
   (with-openai ((json-response +hello-reply+))
     ;; Port 1 on the loopback: nothing listens, so nothing is ever read.
     (is (eq :unavailable
