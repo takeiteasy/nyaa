@@ -294,6 +294,21 @@ needs and a user message."
       (is (eq :done (getf (car (last events)) :type)))
       (is (equal "ok" (nyaa:content-text (getf (second result) :content)))))))
 
+(defun done-events (events)
+  (remove :done events :key (lambda (event) (getf event :type)) :test-not #'eq))
+
+(defun stream-threads ()
+  (remove-if-not (lambda (thread)
+                   (let ((name (bt:thread-name thread)))
+                     (and name (eql 0 (search "nyaa-completion" name)))))
+                 (bt:all-threads)))
+
+(defun expect-one-failed-done (events)
+  "EVENTS end in exactly one :done, carrying a failed result."
+  (is (= 1 (length (done-events events))))
+  (is (eq :done (getf (car (last events)) :type)))
+  (is (nyaa:tool-error-p (getf (car (last events)) :reason))))
+
 (defun cut-stream-bytes ()
   (format nil "HTTP/1.1 200 OK~c~cContent-Type: text/event-stream~c~c~
                Connection: close~c~c~c~c~
@@ -307,8 +322,59 @@ needs and a user message."
   ;; a finish_reason nor a [DONE].
   (with-openai ((list :raw (cut-stream-bytes)))
     (multiple-value-bind (events result) (collect-stream)
-      (declare (ignore events))
-      (is (eq :backend-error (first (nyaa:tool-error result)))))))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (expect-one-failed-done events)
+      (is (eq :backend-error (first (nyaa:tool-error (getf (car (last events)) :reason))))))))
+
+(test a-stalled-stream-ends-in-one-timeout-done-and-frees-its-threads
+  ;; The backend sends one delta and goes quiet. The deadline answers
+  ;; :timeout, ends the sink's turn once, and closes the connection so the
+  ;; reader thread does not outlive it.
+  (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
+    (with-hold
+      (let* ((events '())
+             (lock (bt:make-lock))
+             (result (ask :ref :r1 :timeout 400
+                            :stream (lambda (event)
+                                      (bt:with-lock-held (lock) (push event events))))))
+        (is (eq :timeout (nyaa:tool-error result)))
+        (is (equal '(:text-delta :done)
+                   (mapcar (lambda (event) (getf event :type)) (reverse events))))
+        (is (equal '(:error :timeout) (getf (first events) :reason)))
+        ;; The hold is still on, so the threads are gone only because the
+        ;; deadline closed the connection.
+        (is-true (eventually (lambda () (null (stream-threads)))))
+        (sleep 0.2)
+        (is (= 2 (length events)))))))
+
+(test a-streamed-non-ok-status-ends-in-one-failed-done
+  (with-openai ('(429 ("Content-Type" "application/json") "{\"error\":\"slow down\"}"))
+    (multiple-value-bind (events result) (collect-stream)
+      (is (= 429 (second (nyaa:tool-error result))))
+      (is (equal '(:done) (mapcar (lambda (event) (getf event :type)) events)))
+      (expect-one-failed-done events))))
+
+(test a-streamed-unreachable-backend-ends-in-one-failed-done
+  (with-openai ((json-response +hello-reply+))
+    (let* ((events '())
+           (result (nyaa:complete :protocol-openai
+                                  :base-url "http://127.0.0.1:1" :model "m"
+                                  :messages '((:role :user :content "x"))
+                                  :ref :r1 :stream (lambda (event) (push event events)))))
+      (is (eq :unavailable (nyaa:tool-error result)))
+      (is (equal '(:error :unavailable) (getf (first events) :reason)))
+      (is (= 1 (length events))))))
+
+(defparameter +non-ascii-text+ (format nil "h~cllo ~c" (code-char #xe9) (code-char #x2713)))
+
+(test a-non-ascii-delta-survives-the-stream
+  (with-openai ((sse-response
+                 (format nil "{\"choices\":[{\"delta\":{\"content\":\"~a\"},\"finish_reason\":\"stop\"}]}"
+                         +non-ascii-text+)))
+    (multiple-value-bind (events result) (collect-stream)
+      (is (equal +non-ascii-text+ (getf (first events) :text)))
+      (is (equal +non-ascii-text+
+                 (nyaa:content-text (getf (second result) :content)))))))
 
 ;;; --- errors -----------------------------------------------------------
 

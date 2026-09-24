@@ -321,6 +321,19 @@ RUN-ARGS and return the run's result."
       (is (equal '(:turn :text-delta :text-delta :done :run-done)
                  (mapcar (lambda (e) (getf e :type)) events))))))
 
+;;; A failed turn ends the sink's turn with a failed :DONE, ahead of the loop's
+;;; own :RUN-DONE.
+(test a-failed-streamed-turn-emits-a-failed-done-before-run-done
+  (with-agent ('(500 ("Content-Type" "application/json") "{\"error\":\"boom\"}"))
+    (let* ((events '())
+           (result (agent-turn :messages '((:role :user :content "hi"))
+                               :sink (lambda (event) (push event events)))))
+      (setf events (nreverse events))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (is (equal '(:turn :done :run-done)
+                 (mapcar (lambda (e) (getf e :type)) events)))
+      (is (nyaa:tool-error-p (getf (second events) :reason))))))
+
 ;;; --- sub-agents ----------------------------------------------------
 
 (test a-sub-agent-result-reaches-the-parent-as-a-tool-message

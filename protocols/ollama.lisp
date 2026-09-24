@@ -96,14 +96,17 @@ Ollama correlates a tool result by position, not by id."
 
 ;;; --- the exchange ---------------------------------------------------------
 
-(defun open-chat (request)
-  (let ((streaming (and (getf request :stream) t)))
+(defun open-chat (request connect)
+  (let ((streaming (and (getf request :stream) t))
+        (url (chat-url (getf request :base-url))))
     (multiple-value-bind (body status)
         (drakma:http-request
-         (chat-url (getf request :base-url))
+         url
          :method :post
+         :stream (funcall connect url)
          :redirect nil
          :want-stream t
+         :close t
          :additional-headers (header-alist (getf request :headers))
          :content-type "application/json"
          :content (json:stringify (chat-body request streaming)))
@@ -194,7 +197,6 @@ OpenAI's :usage arrives.")
     (unless ended
       (return-from read-streamed-chat
         (backend-error status "the stream ended before the turn did")))
-    (emit-event sink (done ref reason))
     (make-reply (get-output-stream-string text) calls reason meta)))
 
 (defun absorb-ollama-chunk (chunk sink ref text tools)

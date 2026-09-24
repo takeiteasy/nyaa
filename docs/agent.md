@@ -134,6 +134,9 @@ handed down in the request unchanged; the loop adds:
 (:type :run-done    :ref r :reason :stop)
 ```
 
+A turn whose `complete` failed emits the protocol's `:done` with
+`:reason (:error r)` before `:run-done`.
+
 ## Sub-agents
 
 With `:sub-agents t`, the model gets a reserved tool, `agent-task`, taking one

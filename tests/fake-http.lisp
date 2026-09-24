@@ -10,6 +10,9 @@
 ;;;       -> (code headers body)  a normal response; headers is a plist
 ;;;       -> (:raw "bytes")       verbatim bytes, then a hard close
 ;;;       -> :close               close without sending anything
+;;;       -> (:stall "bytes" more-p)
+;;;                               verbatim bytes, then hold the connection
+;;;                               open while (funcall more-p) is true
 ;;;
 ;;;   (fake-http-url server)      -> "http://127.0.0.1:<port>"
 ;;;   (fake-http-requests server) -> oldest-first list of request plists
@@ -70,6 +73,9 @@
         ((eq answer :close))
         ((and (consp answer) (eq (first answer) :raw))
          (write-fake-bytes stream (second answer)))
+        ((and (consp answer) (eq (first answer) :stall))
+         (write-fake-bytes stream (second answer))
+         (loop while (funcall (third answer)) do (sleep 0.02)))
         (t (destructuring-bind (code headers body) answer
              (write-fake-response stream code headers body)))))))
 
@@ -141,6 +147,27 @@
   "An answer a fake handler returns: 200, text/event-stream, PAYLOADS."
   (list 200 '("Content-Type" "text/event-stream")
         (apply #'sse-body payloads)))
+
+;;; --- stalled streams -----------------------------------------------------
+
+(defvar *hold* nil
+  "Set around a stalled answer to keep the fake server's connection open, and
+cleared again so STOP-FAKE-HTTP's join does not wait on it. SETF rather than
+LET: the handler runs on the fake server's own thread.")
+
+(defmacro with-hold (&body body)
+  "BODY with the fake server holding its stalled connections, released on the
+way out. Nest it inside the test's backend, which stops the server on exit."
+  `(progn (setf *hold* t)
+          (unwind-protect (progn ,@body) (setf *hold* nil))))
+
+(defun stalled-stream (content-type payload)
+  "An answer that sends a 200 and PAYLOAD, then goes quiet while *HOLD* is set."
+  (list :stall
+        (format nil "HTTP/1.1 200 OK~c~cContent-Type: ~a~c~cConnection: close~c~c~c~c~a"
+                #\Return #\Newline content-type #\Return #\Newline
+                #\Return #\Newline #\Return #\Newline payload)
+        (lambda () *hold*)))
 
 ;;; --- newline-delimited JSON --------------------------------------------
 

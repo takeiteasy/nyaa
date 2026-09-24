@@ -193,10 +193,44 @@
   (with-ollama ((ndjson-response
                  "{\"message\":{\"role\":\"assistant\",\"content\":\"partial\"},\"done\":false}"))
     (multiple-value-bind (events result) (collect-ollama-stream)
-      (declare (ignore events))
-      (is (eq :backend-error (first (nyaa:tool-error result)))))))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (expect-one-failed-done events))))
 
-;;; --- errors -----------------------------------------------------------
+(test ollama-a-stalled-stream-ends-in-one-timeout-done-and-frees-its-threads
+  ;; The backend sends one delta and goes quiet. The deadline answers
+  ;; :timeout, ends the sink's turn once, and closes the connection so the
+  ;; reader thread does not outlive it.
+  (with-ollama ((stalled-stream "application/x-ndjson" (ndjson-body "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}")))
+    (with-hold
+      (let* ((events '())
+             (lock (bt:make-lock))
+             (result (ask-ollama :ref :r1 :timeout 400
+                            :stream (lambda (event)
+                                      (bt:with-lock-held (lock) (push event events))))))
+        (is (eq :timeout (nyaa:tool-error result)))
+        (is (equal '(:text-delta :done)
+                   (mapcar (lambda (event) (getf event :type)) (reverse events))))
+        (is (equal '(:error :timeout) (getf (first events) :reason)))
+        ;; The hold is still on, so the threads are gone only because the
+        ;; deadline closed the connection.
+        (is-true (eventually (lambda () (null (stream-threads)))))
+        (sleep 0.2)
+        (is (= 2 (length events)))))))
+
+(test ollama-a-streamed-non-ok-status-ends-in-one-failed-done
+  (with-ollama ('(429 ("Content-Type" "application/json") "{\"error\":\"slow down\"}"))
+    (multiple-value-bind (events result) (collect-ollama-stream)
+      (is (= 429 (second (nyaa:tool-error result))))
+      (expect-one-failed-done events))))
+
+(test ollama-a-non-ascii-delta-survives-the-stream
+  (with-ollama ((ndjson-response
+                 (format nil "{\"message\":{\"role\":\"assistant\",\"content\":\"~a\"},\"done\":true,\"done_reason\":\"stop\"}"
+                         +non-ascii-text+)))
+    (multiple-value-bind (events result) (collect-ollama-stream)
+      (is (equal +non-ascii-text+ (getf (first events) :text)))
+      (is (equal +non-ascii-text+
+                 (nyaa:content-text (getf (second result) :content)))))))
 
 (test a-non-ok-status-is-a-backend-error
   (with-ollama ('(429 ("Content-Type" "application/json")

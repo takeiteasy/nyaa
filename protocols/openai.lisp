@@ -91,15 +91,18 @@ problem string. The shared CHECK-REQUEST stays neutral, so this runs on top."
 
 ;;; --- the exchange -----------------------------------------------------
 
-(defun open-completion (request)
+(defun open-completion (request connect)
   "POST the request body, answering the response stream and its status."
-  (let ((streaming (and (getf request :stream) t)))
+  (let ((streaming (and (getf request :stream) t))
+        (url (completion-url (getf request :base-url))))
     (multiple-value-bind (body status)
         (drakma:http-request
-         (completion-url (getf request :base-url))
+         url
          :method :post
+         :stream (funcall connect url)
          :redirect nil
          :want-stream t
+         :close t
          :additional-headers (header-alist (getf request :headers))
          :content-type "application/json"
          :content (json:stringify (completion-body request streaming)))
@@ -189,7 +192,6 @@ list arrives as \"\" as readily as \"{}\"."
     (unless ended
       (return-from read-streamed-completion
         (backend-error status "the stream ended before the turn did")))
-    (emit-event sink (done ref reason))
     (make-reply (get-output-stream-string text)
                 (streamed-calls calls (getf request :tools))
                 reason meta)))

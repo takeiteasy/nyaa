@@ -105,6 +105,21 @@ nil. Every event echoes the request's `:ref`.
 (:type :done            :ref r :reason :stop)
 ```
 
+A streamed turn ends with exactly one `:done`, and nothing follows it. `:reason`
+is the finish reason, or, when the exchange failed, the failed result the call
+replies with:
+
+```lisp
+(:type :done :ref r :reason (:error :timeout))
+(:type :done :ref r :reason (:error (:backend-error 429 "rate limited")))
+```
+
+`tool-error-p` tells the two apart. Every streaming request that reaches the
+backend exchange ends this way — a refused connection, a non-OK status, a
+stream cut short, a lapsed deadline — so a consumer of the sink alone can
+watch for `:done`. A request rejected before the network with
+`(:bad-request ...)` emits nothing.
+
 A tool call's `:arguments` arrive as text split across deltas; the consumer
 reassembles them. The `(:ok ...)` reply carries the whole turn regardless, so a
 caller may ignore the sink entirely.
@@ -131,7 +146,8 @@ protocol reached by a bare `m:call` sees the same checked request.
 
 A protocol bounds its own work by the request's timeout and cancels what is in
 flight, as tools do, so a wedged backend costs a timeout rather than a wedged
-service.
+service. The deadline closes the connection, so the reader thread unwinds
+rather than waiting on the backend.
 
 ## The OpenAI protocol
 
@@ -249,15 +265,8 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- The stream vocabulary has no error event. A stream that breaks down mid-turn
-  ends as the call's `(:backend-error ...)` reply, so a consumer of the sink
-  alone sees the events stop without a reason
-  ([#31](https://todo.sr.ht/~takeiteasy/nyaa/31)).
 - A completion in flight can only be abandoned at its deadline; there is no
   cancel message ([#32](https://todo.sr.ht/~takeiteasy/nyaa/32)).
-- A completion abandoned at its deadline leaves its reader thread blocked until
-  the backend answers or the connection drops
-  ([#34](https://todo.sr.ht/~takeiteasy/nyaa/34)).
 - A protocol service handles one completion at a time: meow's service loop runs
   one message to completion before the next, so concurrent turns queue. This
   now applies to both protocol services and to a provider layered on either

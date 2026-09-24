@@ -256,12 +256,8 @@ is what COERCE-ARGS matches a schema on."
 ;;; --- streaming --------------------------------------------------------
 
 ;;; A neutral event vocabulary, never raw provider chunks: the agent loop and
-;;; the UIs consume these.
-;;;
-;;; TODO: three events and no error among them, so a stream that breaks down
-;;; mid-turn stops without a terminating event and the reason reaches the
-;;; caller only as the reply. Upgrade path: a failure reason on :DONE.
-;;; Tracked in ~takeiteasy/nyaa#31.
+;;; the UIs consume these. A turn ends with exactly one :DONE, whose reason is
+;;; the finish reason or, when the exchange failed, the failed result.
 
 (defun text-delta (ref text)
   (list :type :text-delta :ref ref :text text))
@@ -297,36 +293,134 @@ malformed payload, a stream cut short."
 ;;; deadline-bounded worker thread, and the reply and transport shapes a
 ;;; JSON-over-HTTP protocol needs regardless of wire dialect.
 ;;;
-;;; TODO: a completion abandoned at its deadline leaves its reader thread
-;;; blocked on a socket that may never close, holding a stream rather than a
-;;; single response. Upgrade path: drive the socket directly so the deadline
-;;; can close it. Tracked in ~takeiteasy/nyaa#34.
+;;; The connection is opened here rather than left to drakma, so the deadline
+;;; has a socket of its own to close: drakma's :connection-timeout only bounds
+;;; connecting, not the whole exchange.
+
+(defun header-alist (headers)
+  "HEADERS, a coerced plist of names and values, as a lower-cased alist."
+  (loop for (name value) on headers by #'cddr
+        collect (cons (string-downcase name) value)))
+
+(defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange"))
+  "Run FUNCTION on a worker thread, bounded by TIMEOUT-MS. FUNCTION takes
+CONNECT, a function of a URL answering a stream ready for drakma's :STREAM.
+Answers (values result timed-out-p). At the deadline the connection is closed,
+so the worker unwinds instead of running until the backend answers or hangs
+up."
+  (let* ((result nil)
+         (socket-box (list nil))
+         (done (bt:make-semaphore))
+         (connect (lambda (url) (open-connection url socket-box timeout-ms))))
+    (bt:make-thread
+     (lambda ()
+       (unwind-protect
+            (setf result (funcall function connect))
+         (close-socket (car socket-box))
+         (bt:signal-semaphore done)))
+     :name (format nil "~a-request" name))
+    (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
+        (values result nil)
+        (progn (abandon-connection (car socket-box) name)
+               (values nil t)))))
+
+(defun close-socket (socket)
+  (when socket (ignore-errors (usocket:socket-close socket))))
+
+(defun abandon-connection (socket name)
+  "Closing the socket from a thread of its own reliably wakes the worker's
+blocked read."
+  (when socket
+    (bt:make-thread (lambda () (close-socket socket))
+                    :name (format nil "~a-close" name))))
+
+(defun open-connection (url socket-box timeout-ms)
+  (let* ((uri (puri:parse-uri url))
+         (securep (eq (puri:uri-scheme uri) :https))
+         (socket (with-immediate-connect-refusal
+                   (usocket:socket-connect
+                    (puri:uri-host uri) (or (puri:uri-port uri) (if securep 443 80))
+                    :element-type '(unsigned-byte 8)
+                    ;; Bounds the connect phase alone, ahead of the whole-
+                    ;; exchange deadline.
+                    :timeout (max 1 (ceiling timeout-ms 1000))
+                    :nodelay :if-supported))))
+    (setf (car socket-box) socket)
+    (wrap-http-stream socket (puri:uri-host uri) securep)))
+
+(defun wrap-http-stream (socket host securep)
+  "SOCKET's stream, wrapped exactly as drakma wraps one it opens itself:
+chunked framing under a flexi-stream, with SSL attached first when
+SECUREP. Passing :stream skips drakma's own wrapping entirely -- it only
+adjusts the flexi-stream's element-type and external-format -- so a stream
+given raw fails outright, and one without SSL attached sends a TLS
+handshake in the clear."
+  (let ((raw (usocket:socket-stream socket)))
+    (flexi-streams:make-flexi-stream
+     (chunga:make-chunked-stream
+      (if securep
+          (cl+ssl:make-ssl-client-stream raw :hostname host)
+          raw))
+     ;; Matches drakma's own +LATIN-1+ (specials.lisp), which is internal.
+     :external-format (flexi-streams:make-external-format :latin-1 :eol-style :lf))))
+
+;;; --- streamed turns ---------------------------------------------------
+
+;;; The worker's deltas and the caller's :DONE reach the sink through one
+;;; gate, so the sink sees exactly one :DONE and nothing after it, however
+;;; the worker and the deadline race.
+;;;
+;;; TODO: events are emitted under the gate's lock, so a sink that blocks
+;;; delays the deadline's :DONE. Upgrade path: an emitter thread fed by a
+;;; queue. Tracked in ~takeiteasy/nyaa#108.
+
+(defstruct (sink-gate (:conc-name gate-))
+  sink (lock (bt:make-lock)) closed)
+
+(defun gate-emitter (gate)
+  (lambda (event)
+    (bt:with-lock-held ((gate-lock gate))
+      (unless (gate-closed gate)
+        (emit-event (gate-sink gate) event)))))
+
+(defun close-gate (gate ref result)
+  "End the turn: emit its :DONE, then drop whatever the worker still sends."
+  (bt:with-lock-held ((gate-lock gate))
+    (unless (gate-closed gate)
+      (setf (gate-closed gate) t)
+      (emit-event (gate-sink gate) (done ref (done-reason result))))))
+
+(defun done-reason (result)
+  (if (tool-error-p result)
+      result
+      (getf (getf (second result) :meta) :finish-reason)))
 
 (defun perform-completion (request opener reader)
   "Run the exchange on a worker thread bounded by the caller's deadline, as
 TOOL-HTTP does: a wedged backend costs a timeout, not a wedged service. OPENER
-takes REQUEST and answers (values stream status); READER takes (request
-stream status) and answers the reply."
-  (let ((result nil)
-        (done (bt:make-semaphore)))
-    (bt:make-thread
-     (lambda ()
-       (unwind-protect
-            (setf result (attempt-completion request opener reader))
-         (bt:signal-semaphore done)))
-     :name "nyaa-completion")
-    (if (bt:wait-on-semaphore
-         done :timeout (/ (getf request :timeout +default-tool-timeout+) 1000))
-        result
-        (fail :timeout))))
+takes (request connect) and answers (values stream status); READER takes
+(request stream status) and answers the reply. A request with a :STREAM sink
+ends it with exactly one :DONE."
+  (let* ((sink (getf request :stream))
+         (gate (make-sink-gate :sink sink))
+         (request (if sink
+                      (list* :stream (gate-emitter gate) request)
+                      request)))
+    (multiple-value-bind (result timed-out)
+        (call-with-deadline
+         (getf request :timeout +default-tool-timeout+)
+         (lambda (connect) (attempt-completion request opener reader connect))
+         :name "nyaa-completion")
+      (let ((result (if timed-out (fail :timeout) result)))
+        (when sink (close-gate gate (getf request :ref) result))
+        result))))
 
-(defun attempt-completion (request opener reader)
+(defun attempt-completion (request opener reader connect)
   ;; The two failure regions are kept apart: nothing read yet is a transport
   ;; failure, and everything after the status is the backend misbehaving.
   (let (stream status)
     (handler-case
-        (with-immediate-connect-refusal
-          (multiple-value-setq (stream status) (funcall opener request)))
+        (multiple-value-setq (stream status) (funcall opener request connect))
       ;; Nothing was read, so there is no backend answer to report on: a
       ;; refused connection and a peer that hangs up before the status line
       ;; are the same failure to the caller.
@@ -340,10 +434,15 @@ stream status) and answers the reply."
       (ignore-errors (close stream)))))
 
 (defun character-stream (stream)
-  "STREAM as characters. Drakma decodes a content type it knows to be textual
-and leaves the rest as octets."
-  (if (subtypep (stream-element-type stream) 'character)
-      stream
+  "STREAM as UTF-8 characters. Drakma leaves the stream it was given in the
+external format of the response's content type, which is Latin-1 unless the
+type names a charset."
+  (if (typep stream 'flexi-streams:flexi-stream)
+      (progn
+        (setf (flexi-streams:flexi-stream-external-format stream)
+              (flexi-streams:make-external-format :utf-8 :eol-style :lf)
+              (flexi-streams:flexi-stream-element-type stream) 'character)
+        stream)
       (flexi-streams:make-flexi-stream stream :external-format :utf-8)))
 
 (defun read-detail (stream)
