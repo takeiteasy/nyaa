@@ -401,28 +401,52 @@ visible on the helper thread."
    :name "nyaa-self-grace"))
 
 (defun eval-in-host (form package)
-  ;; TODO: only EVAL's primary value is kept, and RENDER-SELF-VALUE's own
-  ;; cap never reports elision the way worker-program.lisp's does -- a
-  ;; caller has no signal a value came back truncated. Upgrade path:
-  ;; capture (multiple-value-list (eval form)) and add :values/:elided the
-  ;; way ~takeiteasy/nyaa#105 added them to tool-eval and tool-repl.
-  ;; Tracked in ~takeiteasy/nyaa#107.
   (let ((out (make-string-output-stream)))
     (handler-case
-        (let ((value (let ((*standard-output* out) (*error-output* out)
-                           (*package* (or (and package (find-package (string-upcase package)))
-                                          *package*)))
-                       (eval form))))
-          (ok :value (render-self-value value) :out (get-output-stream-string out)))
+        (let ((values (let ((*standard-output* out) (*error-output* out)
+                            (*package* (or (and package (find-package (string-upcase package)))
+                                           *package*)))
+                        (multiple-value-list (eval form)))))
+          (multiple-value-bind (rendered elided) (render-self-values values)
+            (ok :value (or (first rendered) "NIL") :values rendered
+                :out (get-output-stream-string out) :elided elided)))
       (error (e) (fail (list :error (princ-to-string e)))))))
 
 (defun render-self-value (value)
-  "VALUE printed under the same caps WORKER-PROGRAM.LISP applies, so a large
-or circular host value cannot flood the reply the way an uncapped one
-could ~takeiteasy/nyaa#26 already tracks for the worker side."
-  (let ((*print-length* 100) (*print-level* 8) (*print-readably* nil) (*print-circle* t))
-    (let ((s (prin1-to-string value)))
-      (if (> (length s) 4000) (concatenate 'string (subseq s 0 4000) " ...") s))))
+  "VALUE printed under the same caps and elision check
+WORKER-PROGRAM.LISP's RENDER applies to a worker value, so a large or
+circular host value cannot flood the reply the way an uncapped one could
+(~takeiteasy/nyaa#26), and a caller sees when it did. Elided when the
+character cap cut the string outright, or when printing one step wider
+would print more of it -- that second pass only runs when the first
+output looks cut, so a value under both limits prints once."
+  (flet ((render-under (length level)
+           (let ((*print-length* length) (*print-level* level)
+                 (*print-readably* nil) (*print-circle* t))
+             (prin1-to-string value))))
+    (let* ((s (render-under 100 8))
+           (capped (> (length s) 4000)))
+      (values (if capped (concatenate 'string (subseq s 0 4000) " ...") s)
+              (or capped
+                  (and (or (find #\# s) (search "..." s))
+                       (string/= s (render-under 101 9))))))))
+
+(defun render-self-values (values)
+  "Every one of VALUES rendered under RENDER-SELF-VALUE's own cap; more
+than 100 values, or a combined printed form past 4000 characters, drops
+the remainder and sets ELIDED -- the same guard
+~takeiteasy/nyaa#105 gave the worker side's own RENDER-VALUES."
+  (let* ((many (> (length values) 100))
+         (values (if many (subseq values 0 100) values))
+         (elided many) (total 0) (rendered '()))
+    (dolist (v values)
+      (if (> total 4000)
+          (setf elided t)
+          (multiple-value-bind (s e) (render-self-value v)
+            (push s rendered)
+            (incf total (length s))
+            (when e (setf elided t)))))
+    (values (nreverse rendered) elided)))
 
 ;;; --- the log -----------------------------------------------------------
 

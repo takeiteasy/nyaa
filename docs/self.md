@@ -9,7 +9,7 @@ See [~takeiteasy/nyaa#12](https://todo.sr.ht/~takeiteasy/nyaa/12).
 ```lisp
 (m:mount *ctx* 'nyaa:tool-self :enable '(:eval :define :reload))
 (nyaa:invoke-tool :tool-self :op :eval :form "(+ 1 2)")
-;; => (:ok (:value "3" :out ""))
+;; => (:ok (:value "3" :values ("3") :out "" :elided nil))
 ```
 
 ## `:enable`
@@ -34,10 +34,16 @@ and stays off the model's own allow-list the same way.
 
 | `:op` | Params | Answers |
 |---|---|---|
-| `:eval` | `:form` (required), `:package` (default `"CL-USER"`), `:timeout` | `:value`, `:out` |
+| `:eval` | `:form` (required), `:package` (default `"CL-USER"`), `:timeout` | `:value`, `:values`, `:out`, `:elided` |
 | `:define` | `:form` (required), `:package`, `:timeout` | `:name` |
 | `:reload` | `:name` (required) | `:name` |
 | `:log` | `:limit` (default 50) | `:entries`, `:total` |
+
+`:eval` answers the same value shape `tool-eval` and `tool-repl` do (see
+[tools](tools.md#results)): `:values` carries every value the form
+returned, printed in order; `:value` is its first entry, or `"NIL"` when
+there is none. `:elided` is true when a value's print limits, character
+cap, or the value-list cap cut what came back.
 
 `:form` is read as exactly one expression, with `*read-eval*` nil -- the
 same guard a generation's own read applies -- against `:package`, resolved

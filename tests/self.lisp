@@ -72,7 +72,25 @@
     (let ((result (self :eval :form "(progn (princ \"hi\") (+ 1 2))")))
       (is (eq :ok (first result)))
       (is (equal "3" (getf (second result) :value)))
-      (is (equal "hi" (getf (second result) :out))))))
+      (is (equal '("3") (getf (second result) :values)))
+      (is (equal "hi" (getf (second result) :out)))
+      (is (null (getf (second result) :elided))))))
+
+(test self-eval-carries-every-value-a-form-returns
+  (with-self ()
+    (let ((result (self :eval :form "(floor 7 2)")))
+      (is (equal "3" (getf (second result) :value)))
+      (is (equal '("3" "1") (getf (second result) :values))))))
+
+(test self-eval-with-no-values-reports-nil
+  (with-self ()
+    (let ((result (self :eval :form "(values)")))
+      (is (equal "NIL" (getf (second result) :value)))
+      (is (null (getf (second result) :values))))))
+
+(test self-eval-elides-a-large-value
+  (with-self ()
+    (is (eq t (getf (second (self :eval :form "(make-list 200)")) :elided)))))
 
 (test self-eval-a-signalling-form-is-an-error-not-a-crash
   (with-self ()
