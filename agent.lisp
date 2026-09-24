@@ -529,9 +529,9 @@ timeout."
 
 ;;; --- events ---------------------------------------------------------
 
-;;; The protocol's own :TEXT-DELTA / :TOOL-CALL-DELTA / :DONE pass straight
-;;; through, since the sink is handed down in the request. These are the
-;;; loop's own, all echoing :REF as the protocol events do.
+;;; The protocol's own :TEXT-DELTA / :TOOL-CALL-DELTA / :DONE pass through
+;;; the turn's stream. These are the loop's own, all echoing :REF as the
+;;; protocol events do.
 
 (defun turn-event (ref n) (list :type :turn :ref ref :turn n))
 

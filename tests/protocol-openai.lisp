@@ -441,12 +441,16 @@ needs and a user message."
 (test a-request-cancelled-beforehand-never-reaches-the-backend
   (with-openai ((json-response +hello-reply+))
     (let ((token (nyaa:make-cancel-token))
+          (lock (bt:make-lock))
           (events '()))
       (nyaa:cancel token)
       (let ((result (ask :ref :r1 :cancel token
-                           :stream (lambda (event) (push event events)))))
+                           :stream (lambda (event)
+                                     (bt:with-lock-held (lock) (push event events))))))
         (is (eq :cancelled (nyaa:tool-error result)))
         (is (null (fake-http-requests *backend*)))
+        ;; A cancelled reply does not wait on the sink.
+        (is-true (eventually (lambda () (bt:with-lock-held (lock) events))))
         (is (equal '(:done) (mapcar (lambda (event) (getf event :type)) events)))))))
 
 (test cancelling-after-the-reply-changes-nothing

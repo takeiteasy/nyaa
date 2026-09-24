@@ -172,7 +172,7 @@ A turn whose `complete` failed emits the protocol's `:done` with
 A function sink is called from a thread of the agent's own, one event at a
 time and in order, and a sub-agent's events pass through the same thread. A
 sink that blocks never holds up the agent: `:steer` and `:cancel` still land.
-`:run-done` is the last event a sink sees, though the parent can get
+`:run-done` is the last event a function sink sees, though the parent can get
 `:agent-done`, and `run-agent` return, before the sink has taken it. A sink that has not taken `:run-done` five seconds after
 the run ends is stopped, and the events still queued for it are dropped. A
 sink that signals an error loses that event and carries on.
