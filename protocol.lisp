@@ -104,6 +104,20 @@ single-text-block case."
   (a:when-let ((metadata (find name tools :key (lambda (m) (getf m :name)))))
     (tool-schema metadata)))
 
+(defun make-call (id name arguments tools)
+  "A tool call as a reply carries it. It keeps the schema of the tool it names
+among TOOLS, so it renders the same wherever it is replayed."
+  (let ((schema (call-schema name tools)))
+    (list* :id id :name name :arguments arguments
+           (when schema (list :schema schema)))))
+
+(defun call-arguments->json (call tools)
+  "CALL's arguments as JSON, by the schema the call carries, else by the tool
+TOOLS names."
+  (arguments->json (getf call :arguments)
+                   (or (getf call :schema)
+                       (call-schema (getf call :name) tools))))
+
 (defun arguments->json (arguments schema)
   (let ((json (json-object)))
     (loop for (name value) on arguments by #'cddr
@@ -128,10 +142,8 @@ single-text-block case."
     ((spec-is spec "ANY") (untyped->json value))
     (t (json-value value))))
 
-;;; TODO: without a schema, a plist of keywords is an object and any other
-;;; list an array -- a map whose keys coerced to strings renders as an array.
-;;; Upgrade path: carry the schema on the call. Tracked in
-;;; ~takeiteasy/nyaa#36.
+;;; A call built by hand carries no schema, so it renders by this guess: a plist
+;;; of keywords is an object and any other list an array.
 
 (defun untyped->json (value)
   (cond

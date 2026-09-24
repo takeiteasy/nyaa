@@ -73,6 +73,22 @@
       (nyaa::%write-generation path form)
       (is (equal form (nyaa::%read-generation path))))))
 
+(test a-tool-call-keeps-its-schema-through-a-generation-file
+  (with-tools
+   (with-generations-directory (dir)
+    (ensure-directories-exist dir)
+    (dolist (name '(:tool-http :tool-fs))
+      (let* ((path (merge-pathnames (format nil "~(~a~).generation" name) dir))
+             (schema (nyaa:tool-schema (nyaa:describe-tool name)))
+             (call (list :id "c1" :name name :arguments nil :schema schema))
+             (form (list :nyaa-generation 1 :messages
+                         (list (list :role :assistant :tool-calls (list call))))))
+        (nyaa::%write-generation path form)
+        (is (equal schema
+                   (getf (first (getf (first (getf (nyaa::%read-generation path) :messages))
+                                      :tool-calls))
+                         :schema))))))))
+
 (test reading-a-generation-never-evaluates
   ;; *READ-EVAL* is nil around the read, the same guard tool-eval's worker
   ;; applies to a submitted form.

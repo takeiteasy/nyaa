@@ -165,6 +165,28 @@
                                     :model "test-model"
                                     followup-request)))))))))
 
+;;; --- the call carries its schema ----------------------------------------
+
+(test an-ollama-replayed-call-renders-by-its-own-schema-when-its-tool-is-no-longer-offered
+  (with-ollama ((json-response
+                  "{\"message\":{\"role\":\"assistant\",\"content\":\"\",
+                     \"tool_calls\":[{\"function\":{\"name\":\"tool-demo\",
+                       \"arguments\":{\"headers\":{\"Accept\":\"text/plain\"}}}}]},
+                    \"done\":true,\"done_reason\":\"tool_calls\"}"))
+    (let* ((tool '(:name :tool-demo :params ((:headers (map-of string)))))
+           (turn (second (ask-ollama :tools (list tool)))))
+      (is (equal (getf tool :params) (getf (first (getf turn :tool-calls)) :schema)))
+      (nyaa:complete :protocol-ollama
+                     :base-url (fake-http-url *backend*)
+                     :model "test-model"
+                     :messages (list '(:role :user :content "go") turn
+                                     '(:role :tool :tool-call-id "call_0" :content "ok"))))
+    (let* ((body (com.inuoe.jzon:parse
+                  (getf (second (fake-http-requests *backend*)) :body)))
+           (call (aref (gethash "tool_calls" (aref (gethash "messages" body) 1)) 0))
+           (arguments (gethash "arguments" (gethash "function" call))))
+      (is (equal "text/plain" (gethash "Accept" (gethash "headers" arguments)))))))
+
 ;;; --- streaming --------------------------------------------------------
 
 (defun collect-ollama-stream (&rest extra)

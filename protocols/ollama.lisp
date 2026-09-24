@@ -87,12 +87,10 @@ Ollama correlates a tool result by position, not by id."
     json))
 
 (defun ollama-call->json (call tools)
-  (let ((name (getf call :name)))
-    (json-object
-     "function" (json-object
-                 "name" (wire-tool-name name)
-                 "arguments" (arguments->json (getf call :arguments)
-                                              (call-schema name tools))))))
+  (json-object
+   "function" (json-object
+               "name" (wire-tool-name (getf call :name))
+               "arguments" (call-arguments->json call tools))))
 
 ;;; --- the exchange ---------------------------------------------------------
 
@@ -162,10 +160,10 @@ OpenAI's :usage arrives.")
 (defun chat-call->lisp (call index tools)
   (let* ((function (gethash "function" call))
          (name (lisp-tool-name (gethash "name" function))))
-    (list :id (format nil "call_~d" index)
-          :name name
-          :arguments (json->arguments (gethash "arguments" function)
-                                      (call-schema name tools)))))
+    (make-call (format nil "call_~d" index) name
+               (json->arguments (gethash "arguments" function)
+                                (call-schema name tools))
+               tools)))
 
 ;;; --- streaming ----------------------------------------------------------
 
@@ -219,8 +217,7 @@ only on the final done:true line."
             (emit-event sink (tool-call-delta
                               ref :id (getf call :id) :name (getf call :name)
                               :arguments (json:stringify
-                                          (arguments->json (getf call :arguments)
-                                                           (call-schema (getf call :name) tools)))))))))
+                                          (call-arguments->json call tools))))))))
     (if (eq done t)
         (values calls (finish-reason (gethash "done_reason" chunk)) t (chat-meta chunk))
         (values calls nil nil nil))))

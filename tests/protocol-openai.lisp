@@ -236,6 +236,41 @@ needs and a user message."
       (is (equal '("Accept" "text/plain") (getf arguments :headers)))
       (is (equal '("a" "b") (getf arguments :names))))))
 
+(defparameter +map-tool+
+  '(:name :tool-demo :params ((:headers (map-of string)))))
+
+(test a-parsed-call-carries-its-tools-schema
+  (with-openai ((json-response
+                  "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,
+                     \"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",
+                       \"function\":{\"name\":\"tool-demo\",
+                         \"arguments\":\"{\\\"headers\\\":{\\\"Accept\\\":\\\"text/plain\\\"}}\"}}]},
+                     \"finish_reason\":\"tool_calls\"}]}"))
+    (is (equal (getf +map-tool+ :params)
+               (getf (first (getf (second (ask :tools (list +map-tool+))) :tool-calls))
+                     :schema)))
+    (is (null (getf (first (getf (second (ask)) :tool-calls)) :schema)))))
+
+(test an-openai-replayed-call-renders-by-its-own-schema-when-its-tool-is-no-longer-offered
+  (with-openai ((json-response
+                  "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,
+                     \"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",
+                       \"function\":{\"name\":\"tool-demo\",
+                         \"arguments\":\"{\\\"headers\\\":{\\\"Accept\\\":\\\"text/plain\\\"}}\"}}]},
+                     \"finish_reason\":\"tool_calls\"}]}"))
+    (let ((turn (second (ask :tools (list +map-tool+)))))
+      (nyaa:complete :protocol-openai
+                     :base-url (fake-http-url *backend*)
+                     :model "test-model"
+                     :messages (list '(:role :user :content "go") turn
+                                     '(:role :tool :tool-call-id "c1" :content "ok"))))
+    (let* ((body (com.inuoe.jzon:parse
+                  (getf (second (fake-http-requests *backend*)) :body)))
+           (call (aref (gethash "tool_calls" (aref (gethash "messages" body) 1)) 0))
+           (arguments (com.inuoe.jzon:parse
+                       (gethash "arguments" (gethash "function" call)))))
+      (is (equal "text/plain" (gethash "Accept" (gethash "headers" arguments)))))))
+
 ;;; --- streaming --------------------------------------------------------
 
 (defun collect-stream (&rest extra)

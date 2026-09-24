@@ -79,15 +79,12 @@ problem string. The shared CHECK-REQUEST stays neutral, so this runs on top."
     json))
 
 (defun tool-call->json (call tools)
-  (let ((name (getf call :name)))
-    (json-object
-     "id" (getf call :id)
-     "type" "function"
-     "function" (json-object
-                 "name" (wire-tool-name name)
-                 "arguments" (json:stringify
-                              (arguments->json (getf call :arguments)
-                                               (call-schema name tools)))))))
+  (json-object
+   "id" (getf call :id)
+   "type" "function"
+   "function" (json-object
+               "name" (wire-tool-name (getf call :name))
+               "arguments" (json:stringify (call-arguments->json call tools)))))
 
 ;;; --- the exchange -----------------------------------------------------
 
@@ -150,10 +147,10 @@ problem string. The shared CHECK-REQUEST stays neutral, so this runs on top."
 (defun wire-call->lisp (call tools)
   (let* ((function (gethash "function" call))
          (name (lisp-tool-name (gethash "name" function))))
-    (list :id (gethash "id" call)
-          :name name
-          :arguments (parse-arguments (gethash "arguments" function)
-                                      (call-schema name tools)))))
+    (make-call (gethash "id" call) name
+               (parse-arguments (gethash "arguments" function)
+                                (call-schema name tools))
+               tools)))
 
 (defun parse-arguments (text schema)
   "TEXT, a JSON object as a string, as an argument plist. An empty argument
@@ -244,11 +241,11 @@ consumer of the sink alone reassembles without tracking arrival order."
 
 (defun streamed-calls (calls tools)
   (loop for (nil . call) in calls
-        collect (list :id (call-id call)
-                      :name (call-name call)
-                      :arguments (parse-arguments
-                                  (get-output-stream-string (call-arguments call))
-                                  (call-schema (call-name call) tools)))))
+        collect (make-call (call-id call) (call-name call)
+                           (parse-arguments
+                            (get-output-stream-string (call-arguments call))
+                            (call-schema (call-name call) tools))
+                           tools)))
 
 ;;; --- SSE --------------------------------------------------------------
 

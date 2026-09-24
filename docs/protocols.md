@@ -90,7 +90,11 @@ expressible:
 ```
 
 `:tool-calls` are `(:id "c1" :name :tool-shell :arguments (:cmd "ls"))`, ready
-for `invoke-tool`. `:meta` is protocol-specific — usage counters, finish reason,
+for `invoke-tool`. A call to a tool the request offered also carries that
+tool's `:schema`, and a protocol renders a replayed call's arguments by it, so
+a call reads the same whether or not its tool is offered again. A call built by
+hand has none and renders by its shape: a plist of keywords is an object and any
+other list an array. `:meta` is protocol-specific — usage counters, finish reason,
 backend ids — and informational only. Dispatch on `:content`, `:tool-calls` and
 `:done`.
 
@@ -360,6 +364,3 @@ the same way, since a provider answers the same messages.
   ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).
 - A `complete` made from a thread a protocol body spawns itself starts at
   depth 0 ([#132](https://todo.sr.ht/~takeiteasy/nyaa/132)).
-- A tool call naming a tool absent from the request's `:tools` has no schema to
-  render its arguments by, and falls back to a heuristic
-  ([#36](https://todo.sr.ht/~takeiteasy/nyaa/36)).
