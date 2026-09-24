@@ -299,8 +299,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 - `tool-http` returns a non-text body as garbled text rather than an error
   ([#138](https://todo.sr.ht/~takeiteasy/nyaa/138)).
-- `tool-plan`'s `:timeout` is checked only between steps, so one long step
-  can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition
   ([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the

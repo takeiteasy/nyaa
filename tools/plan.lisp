@@ -26,9 +26,10 @@
 ;;; allowed and agent-trusted; every :as unique; every :ref naming an
 ;;; earlier step. A step that errors ends the plan, with the results so far.
 ;;;
-;;; TODO: :timeout bounds the plan only between steps, so one long step can
-;;; run past it. Upgrade path: thread the remaining time into each step's
-;;; own deadline. Tracked in ~takeiteasy/nyaa#43.
+;;; :timeout bounds the whole plan, each step included: a step's own :timeout
+;;; is clamped to the time left, the wait on it ends when that lapses, and
+;;; its cancel token is then cancelled. A tool that honours neither keeps
+;;; running on after the plan returns (~takeiteasy/nyaa#145).
 
 (define-tool :tool-plan
     (:trust :agent
@@ -45,7 +46,7 @@
 substitutes an earlier step's result")))
                :required t :doc "the steps to run, in order")
               (:timeout (integer 1) :default +default-tool-timeout+
-               :doc "whole-plan deadline in milliseconds, checked between steps")))
+               :doc "whole-plan deadline in milliseconds; bounds each step")))
   (:invoke (steps timeout)
     ;; INVOKE-TOOL has no registry argument of its own -- it reads
     ;; M:*REGISTRY*, which this service's own thread does not inherit from
@@ -127,28 +128,57 @@ before this one, or a message naming the first problem found."
 ;;; --- execution ---------------------------------------------------------
 
 (defun execute-plan (steps timeout-ms cancel)
-  "Run STEPS in order, handing each CANCEL, so a cancelled plan stops the
-step in flight and refuses the rest."
+  "Run STEPS in order, handing each a token cancelled with CANCEL, so a
+cancelled plan stops the step in flight and refuses the rest."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000)))
         (results (make-hash-table :test #'equal))
         (n 0))
-    (dolist (step steps)
-      (when (> (get-internal-real-time) deadline)
-        (return-from execute-plan (fail :timeout)))
-      (incf n)
-      (let* ((as (getf step :as))
-             (tool-name (getf step :tool))
-             (args (resolve-refs (getf step :args) results))
-             (result (apply #'invoke-tool (lisp-tool-name tool-name)
-                            :cancel cancel args)))
-        (when (tool-error-p result)
-          (return-from execute-plan
-            (fail (list :step n :tool tool-name :reason (tool-error result)
-                        :results (plan-results-plist results)))))
-        (when as
-          (setf (gethash as results) (second result)))))
-    (ok :results (plan-results-plist results) :steps n)))
+    (flet ((fail-step (tool-name reason)
+             (fail (list :step n :tool tool-name :reason reason
+                         :results (plan-results-plist results)))))
+      (dolist (step steps)
+        (incf n)
+        (let* ((as (getf step :as))
+               (tool-name (getf step :tool))
+               (left (floor (* 1000 (- deadline (get-internal-real-time)))
+                            internal-time-units-per-second)))
+          (when (<= left 0)
+            (return-from execute-plan (fail-step tool-name :timeout)))
+          (let ((result (invoke-step (lisp-tool-name tool-name)
+                                     (resolve-refs (getf step :args) results)
+                                     cancel left)))
+            (when (tool-error-p result)
+              (return-from execute-plan (fail-step tool-name (tool-error result))))
+            (when as
+              (setf (gethash as results) (second result))))))
+      (ok :results (plan-results-plist results) :steps n))))
+
+(defun invoke-step (name args cancel left-ms)
+  "INVOKE-TOOL for one step, held to LEFT-MS: a :TIMEOUT the tool declares is
+clamped to it, and the wait on the tool ends with it, cancelling the tool's
+own token. That token is cancelled with CANCEL."
+  (let ((token (make-cancel-token)))
+    (when cancel
+      (on-cancel cancel (lambda () (cancel token))))
+    (multiple-value-bind (process message timeout)
+        (%tool-call name (list* :cancel token (clamp-timeout name args left-ms)))
+      (if (null process)
+          message
+          (multiple-value-bind (reply status)
+              (m:call process message :timeout (min timeout (/ left-ms 1000.0)))
+            (when (eq status :timeout)
+              (cancel token))
+            (%call-result reply status))))))
+
+(defun clamp-timeout (name args left-ms)
+  "ARGS with :TIMEOUT held to LEFT-MS, when NAME declares one and ARGS' is
+absent or a number. Anything else is left for coercion to refuse."
+  (let ((own (getf args :timeout +default-tool-timeout+)))
+    (if (and (find :timeout (tool-schema (tool-metadata name)) :key #'param-name)
+             (realp own))
+        (list* :timeout (min own left-ms) (a:remove-from-plist args :timeout))
+        args)))
 
 (defun resolve-refs (value results)
   (cond

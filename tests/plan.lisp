@@ -17,9 +17,36 @@
     (sleep (/ ms 1000.0))
     (nyaa::ok)))
 
+;;; Sleeps in small slices, stopping when cancelled, and records that it saw
+;;; the cancel.
+
+(defvar *saw-cancel* nil)
+
+(nyaa:define-tool :tool-patient
+    (:trust :agent
+     :summary "Sleep for :ms milliseconds, stopping early if cancelled"
+     :params ((:ms (integer 0) :required t :doc "milliseconds to sleep")))
+  (:invoke (ms)
+    (loop repeat (ceiling ms 10)
+          do (when (and nyaa::cancel-token (nyaa::cancelled-p nyaa::cancel-token))
+               (setf *saw-cancel* t)
+               (return))
+             (sleep 0.01))
+    (nyaa::ok)))
+
+;;; Declares its own :TIMEOUT and reports what it was given.
+
+(nyaa:define-tool :tool-timeout-echo
+    (:trust :agent
+     :summary "Answer the :timeout this call was given"
+     :params ((:timeout (integer 1) :default nyaa::+default-tool-timeout+
+               :doc "milliseconds")))
+  (:invoke (timeout)
+    (nyaa::ok :timeout timeout)))
+
 (defvar *plan-sandbox* nil "The fs tool's sandbox root for the running test.")
 
-(defun call-with-plan (allow max-steps body &key sleep-tool)
+(defun call-with-plan (allow max-steps body &key sleep-tool extra)
   (let* ((registry (make-instance 'm:registry))
          (m:*registry* registry)
          (root (make-sandbox-directory))
@@ -31,6 +58,7 @@
            (m:mount context 'nyaa:tool-fs :root root)
            (m:mount context 'nyaa:tool-shell)
            (when sleep-tool (m:mount context 'tool-sleep))
+           (dolist (tool extra) (m:mount context tool))
            (m:mount context 'nyaa:tool-plan :allow allow :max-steps max-steps)
            (funcall body))
       (m:stop context)
@@ -146,7 +174,12 @@
         (is (member :ok (getf detail :results))))
       (is (not (sandbox-file-exists-p "never.txt"))))))
 
-;;; --- the whole-plan deadline, checked between steps ----------------------
+;;; --- the whole-plan deadline, held over every step ----------------------
+
+(defun timed-out-at-step-p (result step)
+  (and (nyaa:tool-error-p result)
+       (eql step (getf (nyaa:tool-error result) :step))
+       (eq :timeout (getf (nyaa:tool-error result) :reason))))
 
 (test plan-honours-its-timeout-between-steps
   (call-with-plan '(:tool-fs :tool-sleep) 16
@@ -155,9 +188,40 @@
                                 (list :tool "tool-fs"
                                       :args (list :op :write :path "never.txt" :data "x")))
                           1)))
-        (is (eq :timeout (nyaa:tool-error result)))
+        (is (timed-out-at-step-p result 1))
         (is (not (sandbox-file-exists-p "never.txt")))))
     :sleep-tool t))
+
+(test a-long-step-is-bounded-by-the-plan-timeout
+  (setf *saw-cancel* nil)
+  (call-with-plan '(:tool-fs :tool-patient) 16
+    (lambda ()
+      (let* ((start (get-internal-real-time))
+             (result (plan (list (list :tool "tool-patient" :args (list :ms 2000))
+                                 (list :tool "tool-fs"
+                                       :args (list :op :write :path "never.txt" :data "x")))
+                           200))
+             (elapsed-ms (floor (* 1000 (- (get-internal-real-time) start))
+                                internal-time-units-per-second)))
+        (is (timed-out-at-step-p result 1))
+        (is (< elapsed-ms 1500))
+        (is (not (sandbox-file-exists-p "never.txt")))
+        (sleep 0.2)
+        (is-true *saw-cancel*)))
+    :extra '(tool-patient)))
+
+(test a-step-timeout-is-clamped-to-the-plan-deadline
+  (call-with-plan '(:tool-timeout-echo) 16
+    (lambda ()
+      (let ((result (plan (list (list :as "own" :tool "tool-timeout-echo"
+                                      :args (list :timeout 20000))
+                                (list :as "default" :tool "tool-timeout-echo"
+                                      :args nil))
+                          5000)))
+        (is (not (nyaa:tool-error-p result)))
+        (is (<= (getf (getf (plan-results result) :own) :timeout) 5000))
+        (is (<= (getf (getf (plan-results result) :default) :timeout) 5000))))
+    :extra '(tool-timeout-echo)))
 
 (test a-cancelled-plan-refuses-its-remaining-steps
   (call-with-plan '(:tool-fs :tool-sleep) 16

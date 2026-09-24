@@ -71,11 +71,24 @@ errors ends the plan:
 
 with the results of every step that ran before it.
 
+## Timeout
+
+`:timeout` bounds the whole plan, each step included. A step's own
+`:timeout`, if its tool declares one, is clamped to the time left. When the
+time lapses the wait on the step ends and the step's cancel token is
+cancelled:
+
+```lisp
+(:error (:step 1 :tool "tool-slow" :reason :timeout :results (...)))
+```
+
+A step also stops when the plan's own `:cancel` token is cancelled.
+
 ## Limitations
 
-- `:timeout` bounds the whole plan, but is checked only between steps, so
-  one long step can run past it
-  ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
+- A tool that honours neither its `:timeout` nor its cancel token keeps
+  running after the plan returns
+  ([#145](https://todo.sr.ht/~takeiteasy/nyaa/145)).
 - A step cannot pass a literal `(:ref "...")` value as an argument — `:args`
   has no way to say "this is not a reference"
   ([#45](https://todo.sr.ht/~takeiteasy/nyaa/45)).
