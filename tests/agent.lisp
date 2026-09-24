@@ -232,12 +232,16 @@ object)."
             (is-true received)
             (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
           (is-true (eventually (lambda () (null (stream-threads)))))
-          (dolist (thread (stream-threads))
-            (bt:interrupt-thread
-             thread (lambda ()
-                      (format *error* "~&LEAKED-BT~%")
-                      (sb-debug:print-backtrace :count 30 :stream *error*))))
-          (sleep 1))))))
+          (let ((dumps '()) (threads (stream-threads)))
+            (dolist (thread threads)
+              (bt:interrupt-thread
+               thread (lambda ()
+                        (push (with-output-to-string (out)
+                                (sb-debug:print-backtrace :count 30 :stream out))
+                              dumps))))
+            (sleep 1.5)
+            (format t "~&LEAKED-BT ~d threads, ~d dumps~%~{~a~%~}"
+                    (length threads) (length dumps) dumps)))))))
 
 (test steer-reaches-the-next-request
   (let ((n 0))
