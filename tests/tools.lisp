@@ -380,6 +380,7 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
     ((string= path "/stall") (loop while *stall* do (sleep 0.02)) (list 200 '() ""))
     ((string= path "/moved") (list 302 '("Location" "/echo") ""))
     ((string= path "/boom") (list 500 '() "kaboom"))
+    ((string= path "/crash") (error "the handler crashed"))
     ((string= path "/seen") (list 200 '() (or (getf-string headers "x-tag") "")))
     (t (list 404 '("Content-Type" "application/json") "{\"error\":\"nf\"}"))))
 
@@ -396,6 +397,17 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
       (is (eql 404 (result-value (tool :tool-http :url (format nil "~a/nope" url))
                                  :status)))
       (is (eql 500 (result-value (tool :tool-http :url (format nil "~a/boom" url))
+                                 :status))))))
+
+(test fake-http-keeps-serving-after-a-connection-fails
+  ;; Serving a client that has gone -- a cancelled exchange, where Linux
+  ;; fails the write -- must not take the server down for the next request.
+  (with-tools
+    (with-fake-http (url)
+      (is (nyaa:tool-error-p (tool :tool-http :url (format nil "~a/crash" url)
+                                   :timeout 2000)))
+      (is (eql 200 (result-value (tool :tool-http :url (format nil "~a/echo" url)
+                                       :timeout 2000)
                                  :status))))))
 
 (test http-does-not-follow-redirects

@@ -52,16 +52,18 @@
 
 (defun fake-http-loop (server)
   (loop while (fake-running server)
-        do (handler-case
-               (let ((connection (usocket:socket-accept
-                                  (fake-socket server)
-                                  :element-type '(unsigned-byte 8))))
-                 (unwind-protect
-                      (when (fake-running server)
-                        (serve-connection server connection))
-                   (ignore-errors (usocket:socket-close connection))))
-             ;; A half-open wake-up connection, or a listener already gone.
-             (error () (return)))))
+        do (let ((connection (handler-case
+                                 (usocket:socket-accept (fake-socket server)
+                                                        :element-type '(unsigned-byte 8))
+                               ;; The listener is already gone.
+                               (error () (return)))))
+             (unwind-protect
+                  (when (fake-running server)
+                    ;; A half-open wake-up connection, or a client that hung
+                    ;; up before its answer -- one it cancelled, whose write
+                    ;; fails on Linux -- ends that connection, not the server.
+                    (ignore-errors (serve-connection server connection)))
+               (ignore-errors (usocket:socket-close connection))))))
 
 (defun serve-connection (server connection)
   (let* ((stream (usocket:socket-stream connection))
