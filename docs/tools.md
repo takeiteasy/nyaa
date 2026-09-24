@@ -116,7 +116,7 @@ kept running.
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
-| `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. |
+| `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. An id idle past the mount's `:idle` (600 s by default) is dropped. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
 | `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
 | `:tool-services` | `:op`, `:kind`, `:recursive`, `:name` | Read-only introspection over the meow supervision tree: `registry`, `children`, `describe`. See [introspection](introspection.md). |
@@ -163,6 +163,13 @@ Each `tool-repl` id runs on its own session, mounted under the tool's
 context on first use, so each id evaluates independently of the others and
 of the tool's own `:describe`. Calls on one id still run in order, since a
 session's own mailbox serialises them.
+
+An id with no eval in flight for `:idle` seconds (a `tool-repl` mount
+option, 600 by default; `nil` keeps every session until the tool itself
+stops) is dropped, killing its worker the same way an unmounted `tool-repl`
+does. An eval still running past `:idle` keeps its session; the check is
+against time since the last one finished, not time since the session
+started.
 
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
@@ -261,9 +268,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- A `tool-repl` session lives for as long as its process does once mounted,
-  so an id that is never used again keeps its worker, if any, and its
-  effect entry around indefinitely ([#104](https://todo.sr.ht/~takeiteasy/nyaa/104)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

@@ -754,3 +754,37 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
     (let ((result (tool :tool-repl :id "a" :form "(values 1 (make-list 200))")))
       (is (eq t (result-value result :elided)))
       (is (equal "1" (first (result-value result :values)))))))
+
+;;; --- idle reaping (~takeiteasy/nyaa#104) --------------------------------
+
+(test idle-tool-repl-reaps-an-unused-id
+  (with-tools
+    (m:unmount *context* :tool-repl)
+    (m:mount *context* 'nyaa:tool-repl :idle 0.3)
+    (let ((pid (parse-integer
+                (result-value (tool :tool-repl :id "a" :form +getpid-form+) :value))))
+      (is (wait-for-exit pid 2.0))
+      ;; the id starts empty again, against a freshly started worker
+      (is (not (equal (princ-to-string pid)
+                       (result-value (tool :tool-repl :id "a" :form +getpid-form+)
+                                     :value)))))))
+
+(test idle-tool-repl-keeps-a-session-with-an-eval-still-in-flight
+  (with-tools
+    (m:unmount *context* :tool-repl)
+    (m:mount *context* 'nyaa:tool-repl :idle 0.3)
+    (tool :tool-repl :id "a" :form "(defparameter *x* 1)")
+    ;; the sleep runs well past :idle; the idle timer must see the eval as
+    ;; in flight and re-arm rather than drop the session out from under it
+    (tool :tool-repl :id "a" :form "(sleep 1)" :timeout 5000)
+    (is (equal "1" (result-value (tool :tool-repl :id "a" :form "*x*") :value)))))
+
+(test idle-nil-never-reaps
+  (with-tools
+    (m:unmount *context* :tool-repl)
+    (m:mount *context* 'nyaa:tool-repl :idle nil)
+    (let ((pid (parse-integer
+                (result-value (tool :tool-repl :id "a" :form +getpid-form+) :value))))
+      (sleep 0.5)
+      (is (equal (princ-to-string pid)
+                 (result-value (tool :tool-repl :id "a" :form +getpid-form+) :value))))))
