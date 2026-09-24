@@ -1038,3 +1038,170 @@ test's."
         (is (eq :stop (getf (second result) :stop-reason)))
         (is (search "inner done" (first (tool-message-texts result))))
         (is (< (elapsed-since start) 10))))))
+
+;;; --- retrying a turn (~takeiteasy/nyaa#42) --------------------------------
+
+(defun error-reply (status)
+  (list status '("Content-Type" "application/json") "{\"error\":\"nope\"}"))
+
+(defun fails-then (n-failures status success)
+  "A backend answering STATUS to its first N-FAILURES requests, SUCCESS after."
+  (let ((n 0))
+    (lambda (&rest request)
+      (declare (ignore request))
+      (if (<= (incf n) n-failures) (error-reply status) success))))
+
+(test a-transient-failure-is-retried-and-the-run-carries-on
+  (with-agent ((fails-then 1 500 (final-reply "recovered")))
+    (let ((result (agent-turn :messages '((:role :user :content "go"))
+                              :turn-retries 2 :retry-backoff 5)))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (is (= 1 (getf (second result) :turns)))
+      (is (= 2 (length (requests))))
+      (is (equal "recovered" (nyaa:content-text (getf (second result) :content)))))))
+
+(test a-failure-past-the-retries-ends-the-run-with-that-error
+  (with-agent ((fails-then 10 503 nil))
+    (let ((result (agent-turn :messages '((:role :user :content "go"))
+                              :turn-retries 2 :retry-backoff 5)))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (is (= 503 (second (nyaa:tool-error result))))
+      (is (= 3 (length (requests)))))))
+
+(test a-failure-a-retry-cannot-fix-is-not-retried
+  (with-agent ((fails-then 10 400 nil))
+    (let ((result (agent-turn :messages '((:role :user :content "go"))
+                              :turn-retries 2 :retry-backoff 5)))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (is (= 1 (length (requests)))))))
+
+(test a-turn-is-not-retried-by-default
+  (with-agent ((fails-then 10 500 nil))
+    (let ((result (agent-turn :messages '((:role :user :content "go")))))
+      (is (eq :backend-error (first (nyaa:tool-error result))))
+      (is (= 1 (length (requests)))))))
+
+(test retryable-p-takes-the-transient-shapes-only
+  (flet ((retryable (reason) (nyaa::retryable-p (nyaa::fail reason))))
+    (is-true (retryable :unavailable))
+    (is-true (retryable '(:backend-error 408 "")))
+    (is-true (retryable '(:backend-error 429 "")))
+    (is-true (retryable '(:backend-error 503 "")))
+    (is-true (retryable '(:backend-error 200 "the stream ended before the turn did")))
+    (is-false (retryable '(:backend-error 400 "")))
+    (is-false (retryable '(:backend-error 401 "")))
+    (is-false (retryable :timeout))
+    (is-false (retryable :cancelled))
+    (is-false (retryable '(:bad-request "no")))
+    (is-false (retryable '(:error "No model registered")))))
+
+(test a-retry-is-announced-and-is-not-a-new-turn
+  (let ((recorder (make-recorder)))
+    (with-agent ((fails-then 1 500 (streamed-reply "ok")))
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :turn-retries 2 :retry-backoff 5
+                                :sink (recorder-sink recorder))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (let* ((events (recorded-events recorder))
+               (retry (find :turn-retry events :key (lambda (e) (getf e :type)))))
+          (is (equal '(:turn :done :turn-retry) (subseq (event-types events) 0 3)))
+          (is (= 1 (count :turn events :key (lambda (e) (getf e :type)))))
+          (is (eq :run-done (getf (car (last events)) :type)))
+          (is (= 1 (getf retry :attempt)))
+          (is (= 1 (getf retry :turn)))
+          (is (eq :backend-error (first (getf retry :reason)))))))))
+
+(test a-cancel-during-the-backoff-sends-nothing-more
+  (let ((recorder (make-recorder)))
+    (with-agent ((fails-then 10 500 nil))
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :turn-retries 2 :retry-backoff 300
+                                 :sink (recorder-sink recorder))))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually (lambda () (recorder-has recorder :turn-retry))))
+          (m:cast child '(:cancel))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
+          (sleep 0.6)
+          (is (= 1 (length (requests)))))))))
+
+(test a-steer-during-the-backoff-folds-into-the-retry
+  (let ((recorder (make-recorder)))
+    (with-agent ((fails-then 1 500 (streamed-reply "ok")))
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :turn-retries 2 :retry-backoff 300
+                                 :sink (recorder-sink recorder))))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually (lambda () (recorder-has recorder :turn-retry))))
+          (m:cast child (list :steer :content "change of plan"))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (eq :stop (getf (second (fourth message)) :stop-reason)))
+            (is (= 1 (getf (second (fourth message)) :turns))))
+          (is (= 2 (length (requests))))
+          (is-false (search "change of plan" (getf (first (requests)) :body)))
+          (is (search "change of plan" (getf (second (requests)) :body))))))))
+
+(test an-interrupting-steer-during-the-backoff-retries-at-once
+  (let ((recorder (make-recorder)))
+    (with-agent ((fails-then 1 500 (streamed-reply "ok")))
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :turn-retries 2 :retry-backoff 5000
+                                 :sink (recorder-sink recorder))))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually (lambda () (recorder-has recorder :turn-retry))))
+          (m:cast child (list :steer :content "change of plan" :interrupt t))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (eq :stop (getf (second (fourth message)) :stop-reason)))
+            (is (= 1 (getf (second (fourth message)) :turns))))
+          (is (search "change of plan" (getf (second (requests)) :body))))))))
+
+;;; --- capping a tool result (~takeiteasy/nyaa#40) --------------------------
+
+(defun long-text-backend ()
+  (let ((n 0))
+    (lambda (&rest request)
+      (declare (ignore request))
+      (if (= (incf n) 1)
+          (sse-tool-call "c1" "tool-echo"
+                         (format nil "{\"text\":\"~a\"}" (make-string 200 :initial-element #\x)))
+          (streamed-reply "done")))))
+
+(test a-capped-tool-result-is-cut-with-a-note
+  (let ((recorder (make-recorder)))
+    (with-agent ((long-text-backend) 'tool-echo)
+      (let* ((result (agent-turn :messages '((:role :user :content "go"))
+                                 :max-tool-result 50
+                                 :sink (recorder-sink recorder)))
+             (text (first (tool-message-texts result))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (search "[truncated: " text))
+        (is (= 50 (search "... [truncated: " text)))
+        (is (search "first 50 kept]" text))
+        (let ((event (find :tool-result (recorded-events recorder)
+                           :key (lambda (e) (getf e :type)))))
+          (is (= 200 (length (getf (second (getf event :result)) :text)))))))))
+
+(test a-tool-result-is-not-cut-by-default
+  (with-agent ((let ((n 0))
+                 (lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-call-reply "c1" "tool-echo"
+                                        (format nil "{\"text\":\"~a\"}"
+                                                (make-string 200 :initial-element #\x)))
+                       (final-reply "done"))))
+              'tool-echo)
+    (let ((text (first (tool-message-texts
+                        (agent-turn :messages '((:role :user :content "go")))))))
+      (is (not (search "truncated" text)))
+      (is (> (length text) 200)))))
+
+(test a-result-within-the-cap-is-untouched
+  (is (equal "{\"a\":1}" (nyaa::render-tool-result (nyaa::ok :a 1) 100)))
+  (is (equal "{\"a\":1}" (nyaa::render-tool-result (nyaa::ok :a 1) 7))))

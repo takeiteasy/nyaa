@@ -364,3 +364,5 @@ the same way, since a provider answers the same messages.
   ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).
 - A `complete` made from a thread a protocol body spawns itself starts at
   depth 0 ([#132](https://todo.sr.ht/~takeiteasy/nyaa/132)).
+- A non-ASCII character in a request body fails the turn as `:unavailable`
+  ([#136](https://todo.sr.ht/~takeiteasy/nyaa/136)).

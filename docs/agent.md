@@ -57,6 +57,9 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:deadline` | 300000 | milliseconds for the whole run |
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
+| `:max-tool-result` | nil | most characters of a tool result's text that reach the conversation; nil is uncapped |
+| `:turn-retries` | 0 | times a turn that failed transiently is sent again |
+| `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, plus up to 25% jitter |
 | `:sink` | nil | a stream sink, as `complete` takes |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
 | `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
@@ -154,9 +157,40 @@ refused by the allow-list answers at once and holds none. A call still waiting
 when the calls are closed never runs, and closes as `interrupted` like any
 other.
 
+### Capping a tool result
+
+With `:max-tool-result`, a result whose rendered text is longer is cut there,
+and a note says how much was dropped, so the model knows it saw part of it:
+
+```
+{"text":"xxxxxxxx... [truncated: 211 characters, first 50 kept]
+```
+
+Only the `:tool` message is cut; the `:tool-result` event a sink sees carries
+the whole result. The cut text is not valid JSON.
+
+## Failed turns
+
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
 ends the run as that same `(:error reason)`, unwrapped. So does a `:model`
-nothing is registered under.
+nothing is registered under. With `:turn-retries`, a transient one is sent
+again first:
+
+| Failure | Retried |
+|---|---|
+| `:unavailable` | yes |
+| `:backend-error` with status 408, 425, 429 or 5xx | yes |
+| `:backend-error` with a 2xx status (a stream or payload cut short) | yes |
+| other `:backend-error` statuses, `:timeout`, `:cancelled` | no |
+
+A retry waits `:retry-backoff`, doubled each time, plus up to 25% jitter, and
+emits `:turn-retry`. It is not a new turn: `:turns` and `:max-turns` do not
+count it, and `:deadline` still bounds the run. What the failed attempt
+streamed is dropped. A `:cancel`, `:deadline` or `:restore` during the wait
+ends it. A `:steer` folds into the retry; with `:interrupt t` the retry
+goes out at once.
+
+A tool call is never retried; its side effects may not be safe to repeat.
 
 ## Events
 
@@ -167,6 +201,7 @@ nothing is registered under.
 ```lisp
 (:type :turn        :ref r :turn n)
 (:type :turn-interrupted :ref r :turn n)
+(:type :turn-retry  :ref r :turn n :attempt 1 :reason (:backend-error 503 "..."))
 (:type :tool-call   :ref r :id "c1" :name :tool-shell :arguments (:cmd "ls"))
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
@@ -176,7 +211,7 @@ An interrupted turn ends with `:turn-interrupted` rather than a `:done`:
 nothing it streams reaches the sink after it, and the next `:turn` follows.
 
 A turn whose `complete` failed emits the protocol's `:done` with
-`:reason (:error r)` before `:run-done`. A turn cut short by `:cancel` or
+`:reason (:error r)`, then `:turn-retry` if it is retried, or `:run-done` if not. A turn cut short by `:cancel` or
 `:deadline` ends at `:run-done`, with no `:done` of its own.
 
 A function sink is called on a pooled thread, one event at a time and in
@@ -222,7 +257,5 @@ abandoned turn reaches the sink.
 - Conversation growth is unbounded: there is no context-window accounting or
   compaction, so a long run eventually overruns the model's window
   ([#39](https://todo.sr.ht/~takeiteasy/nyaa/39)).
-- A tool result is rendered whole with no size cap, so one large result can
-  fill the context ([#40](https://todo.sr.ht/~takeiteasy/nyaa/40)).
-- No retry or backoff on a transient backend error — the run ends on the
-  first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).
+- A retry ignores a backend's `Retry-After` header
+  ([#135](https://todo.sr.ht/~takeiteasy/nyaa/135)).

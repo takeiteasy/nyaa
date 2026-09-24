@@ -42,6 +42,18 @@ Otherwise a list of tool names.")
                        :type (or null (integer 1)) :reader agent-max-parallel-tools
                        :documentation "The most tool calls, sub-agents included,
 running at once. The rest wait their turn.")
+   (max-tool-result :initarg :max-tool-result :initform nil
+                    :type (or null (integer 1)) :reader agent-max-tool-result
+                    :documentation "The most characters of a tool result's
+rendered text that reach the conversation; NIL is uncapped.")
+   (turn-retries :initarg :turn-retries :initform 0
+                 :type (integer 0) :reader agent-turn-retries
+                 :documentation "How many times a turn that failed transiently
+is sent again before the run ends.")
+   (retry-backoff :initarg :retry-backoff :initform 1000
+                  :type (real 0) :reader agent-retry-backoff
+                  :documentation "Milliseconds before the first retry; each
+further one waits twice as long, plus jitter.")
    (sampling :initarg :sampling :initform nil :reader agent-sampling
              :documentation "A plist of sampling parameters passed through
 to COMPLETE, e.g. :TEMPERATURE.")
@@ -63,6 +75,8 @@ pathname: record there instead.")
    (cancel-timer :initform nil :accessor %cancel-timer)
    (turn-token :initform nil :accessor %turn-token)
    (turn-in-flight :initform nil :accessor %turn-in-flight)
+   (attempt :initform 0 :accessor %attempt)
+   (retry-pending :initform nil :accessor %retry-pending)
    (turn-stream :initform nil :accessor %turn-stream)
    (emitter :initform nil :accessor %emitter))
   (:default-initargs :name nil))
@@ -75,6 +89,9 @@ pathname: record there instead.")
         :tools (agent-tools-spec service)
         :sub-agents (agent-sub-agents service)
         :max-turns (agent-max-turns service)
+        :max-tool-result (agent-max-tool-result service)
+        :turn-retries (agent-turn-retries service)
+        :retry-backoff (agent-retry-backoff service)
         :vault (agent-vault service)))
 
 (defun agents (&key (registry m:*registry*))
@@ -100,6 +117,9 @@ pathname: record there instead.")
     (:cancel (cancel-run service))
     (:step (step-agent service))
     (:deadline (deadline-run service))
+    (:retry (when (and (%retry-pending service) (eql (second message) (%step-ref service)))
+              (resend-turn service)
+              nil))
     (:reply (destructuring-bind (tag value status) (rest message)
               (route-reply service tag (%call-result value status))))
     ;; Reports from a delegated sub-agent, routed into HANDLE by the meow fix
@@ -170,7 +190,8 @@ usual."
       ;; An interrupt on the last allowed turn finishes the run, and
       ;; (VALUES :DONE result) is how HANDLE ends it.
       (multiple-value-bind (value result)
-          (cond ((%turn-in-flight service) (interrupt-turn service))
+          (cond ((%retry-pending service) (resend-turn service))
+                ((%turn-in-flight service) (interrupt-turn service))
                 ((%pending service) (interrupt-tools service)))
         (if (eq value :done) (values :done result) :ok))
       :ok))
@@ -240,15 +261,22 @@ another process holds or that is already consumed."
                               :turns (%turns service) :stop-reason :max-turns))
       (issue-turn service)))
 
-(defun issue-turn (service)
-  ;; Steering only folds in here, between turns, so a message queued mid-turn
-  ;; never lands ahead of the assistant reply or tool results already owed.
+(defun fold-steers (service)
+  "Steering only folds in between turns, so a message queued mid-turn never
+lands ahead of the assistant reply or tool results already owed."
   (dolist (cell (nreverse (shiftf (%steer-queue service) nil)))
     (push-message service (cddr cell))
     (a:when-let ((id (car cell)))
-      (vault-consume (cadr cell) id :folded)))
+      (vault-consume (cadr cell) id :folded))))
+
+(defun issue-turn (service)
+  (fold-steers service)
   (incf (%turns service))
+  (setf (%attempt service) 0)
   (emit-event (agent-events service) (turn-event (m:agent-ref service) (%turns service)))
+  (send-turn service))
+
+(defun send-turn (service)
   (setf (%turn-in-flight service) t
         (%turn-stream service) (and (agent-sink service) (make-turn-stream)))
   (let ((ref (incf (%step-ref service)))
@@ -303,22 +331,78 @@ tools, and get back its final answer."
   ;; step ref has moved on, so this one is dropped.
   (when (eql ref (%step-ref service))
     (setf (%turn-in-flight service) nil)
-    (if (tool-error-p result)
-        (finish-run service result)
-        (let ((reply (second result)))
-          (push-message service reply)
-          (let ((calls (getf reply :tool-calls)))
-            (cond
-              (calls (dispatch-calls service calls))
-              ;; A steer that arrived while this turn was in flight gets a
-              ;; turn of its own rather than waiting for the next :RUN.
-              ((and (%steer-queue service)
-                    (< (%turns service) (agent-max-turns service)))
-               (issue-turn service))
-              (t (finish-run service (ok :messages (%messages service)
-                                         :content (getf reply :content)
-                                         :turns (%turns service)
-                                         :stop-reason :stop)))))))))
+    (cond
+      ((and (tool-error-p result) (retry-turn-p service result))
+       (schedule-retry service result))
+      ((tool-error-p result)
+       (finish-run service result))
+      (t
+       (let ((reply (second result)))
+         (push-message service reply)
+         (let ((calls (getf reply :tool-calls)))
+           (cond
+             (calls (dispatch-calls service calls))
+             ;; A steer that arrived while this turn was in flight gets a
+             ;; turn of its own rather than waiting for the next :RUN.
+             ((and (%steer-queue service)
+                   (< (%turns service) (agent-max-turns service)))
+              (issue-turn service))
+             (t (finish-run service (ok :messages (%messages service)
+                                        :content (getf reply :content)
+                                        :turns (%turns service)
+                                        :stop-reason :stop))))))))))
+
+(defun retryable-p (result)
+  "Whether RESULT, an (:error reason), is a failure a fresh attempt could get
+past: a backend that could not be reached, or one that answered 408, 425, 429,
+a 5xx, or a 2xx whose stream or payload broke. A :TIMEOUT is not, since another
+attempt could double a wait the caller bounded."
+  (let ((reason (tool-error result)))
+    (or (eq reason :unavailable)
+        (and (consp reason)
+             (eq (first reason) :backend-error)
+             (let ((status (second reason)))
+               (and (integerp status)
+                    (or (member status '(408 425 429))
+                        (>= status 500)
+                        (<= 200 status 299))))))))
+
+(defun retry-turn-p (service result)
+  (and (retryable-p result)
+       (< (%attempt service) (agent-turn-retries service))))
+
+(defun schedule-retry (service result)
+  "Send the turn that just failed again after a backoff. The retry is not a
+new turn: :TURNS and the :TURN event stay as they were. Anything that moves
+the step ref before the timer fires -- a cancel, the deadline, a restore, an
+interrupt -- leaves the timer's :RETRY unmatchable."
+  (let* ((attempt (incf (%attempt service)))
+         ;; TODO: a Retry-After header is ignored -- BACKEND-ERROR carries
+         ;; only the body. Carry the headers through and wait as told
+         ;; (~takeiteasy/nyaa#135).
+         (delay (* (agent-retry-backoff service) (expt 2 (1- attempt))
+                   (+ 1 (random 0.25d0))))
+         (ref (%step-ref service))
+         (self (m:self)))
+    (close-turn-stream service)
+    (emit-event (agent-events service)
+                (turn-retry-event (m:agent-ref service) (%turns service) attempt
+                                  (tool-error result)))
+    (setf (%turn-in-flight service) t
+          (%retry-pending service)
+          (m:after service (/ delay 1000.0d0)
+                   (lambda () (m:cast self (list :retry ref)))))
+    nil))
+
+(defun cancel-retry (service)
+  (a:when-let ((cancel (shiftf (%retry-pending service) nil)))
+    (funcall cancel)))
+
+(defun resend-turn (service)
+  "Send the turn again, with any steer that queued during the backoff."
+  (cancel-retry service)
+  (fold-steers service)
+  (send-turn service))
 
 (defun dispatch-calls (service calls)
   "Every call starts :QUEUED and is dispatched, in order, as
@@ -396,6 +480,9 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :sub-agents nil
                             :max-turns (agent-max-turns service)
                             :max-parallel-tools (agent-max-parallel-tools service)
+                            :max-tool-result (agent-max-tool-result service)
+                            :turn-retries (agent-turn-retries service)
+                            :retry-backoff (agent-retry-backoff service)
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
                             :sink (agent-events service)
@@ -434,7 +521,8 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
 or an :INTERRUPTED error where none has arrived."
   (mapcar (lambda (id)
             (let ((result (cdr (assoc id (%pending service) :test #'equal))))
-              (tool-message id (if (outstanding-p result) (fail :interrupted) result))))
+              (tool-message id (if (outstanding-p result) (fail :interrupted) result)
+                            (agent-max-tool-result service))))
           (%pending-order service)))
 
 (defun cancel-pending-calls (service)
@@ -457,16 +545,22 @@ or an :INTERRUPTED error where none has arrived."
         (%pending-order service) nil
         (%call-tokens service) nil))
 
-(defun tool-message (id result)
-  (list :role :tool :tool-call-id id :content (render-tool-result result)))
+(defun tool-message (id result cap)
+  (list :role :tool :tool-call-id id :content (render-tool-result result cap)))
 
-(defun render-tool-result (result)
+(defun render-tool-result (result &optional cap)
   "RESULT, an (:ok plist) or (:error reason), as JSON text -- more legible to
-a model than PRINC-TO-STRING, and jzon is already a dependency."
-  (json:stringify
-   (if (tool-error-p result)
-       (json-object "error" (untyped->json (tool-error result)))
-       (untyped->json (second result)))))
+a model than PRINC-TO-STRING, and jzon is already a dependency. Text past CAP
+characters is cut there, with a note of how much was dropped, so the model
+knows it saw part of it."
+  (let ((text (json:stringify
+               (if (tool-error-p result)
+                   (json-object "error" (untyped->json (tool-error result)))
+                   (untyped->json (second result))))))
+    (if (and cap (> (length text) cap))
+        (format nil "~a... [truncated: ~d characters, first ~d kept]"
+                (subseq text 0 cap) (length text) cap)
+        text)))
 
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
@@ -533,6 +627,7 @@ timeout."
 
 (defun finish-run (service result)
   (cancel-deadline service)
+  (cancel-retry service)
   (close-turn-stream service)
   (cancel-turn service)
   (setf (%running-p service) nil
@@ -570,6 +665,9 @@ timeout."
 ;;; protocol events do.
 
 (defun turn-event (ref n) (list :type :turn :ref ref :turn n))
+
+(defun turn-retry-event (ref n attempt reason)
+  (list :type :turn-retry :ref ref :turn n :attempt attempt :reason reason))
 
 (defun turn-interrupted-event (ref n) (list :type :turn-interrupted :ref ref :turn n))
 
@@ -618,6 +716,7 @@ here but not assumed of the caller's own services)."
 
 (defmethod restore ((service agent) state)
   (cancel-deadline service)
+  (cancel-retry service)
   (close-turn-stream service)
   (cancel-turn service)
   (cancel-pending-calls service)
