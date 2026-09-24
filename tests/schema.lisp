@@ -75,6 +75,64 @@ object carries no key order."
   ;; A parameter with neither is simply absent.
   (is (equal '() (coerced '((:note string)) '()))))
 
+;;; --- :required-when -----------------------------------------------------
+
+(defparameter +conditional+
+  '((:op (member :read :write :list) :default :list)
+    (:data string :required-when (:op :write))
+    (:key string :required-when (:op (:read :write)))))
+
+(test required-when-holds-only-for-the-named-values
+  (is (equal '(:op :list) (coerced +conditional+ '())))
+  (is (equal '(:op :read :key "k") (coerced +conditional+ '(:op :read :key "k"))))
+  (is (search ":data is required when :op is write"
+              (problem +conditional+ '(:op :write :key "k"))))
+  (is (search ":key is required when :op is read or write"
+              (problem +conditional+ '(:op :read))))
+  (is (equal '(:op :write :data "d" :key "k")
+             (coerced +conditional+ '(:op :write :data "d" :key "k")))))
+
+(test required-when-reads-the-coerced-controller
+  (is (search ":data" (problem +conditional+ '(:op "WRITE" :key "k"))))
+  ;; The controller may follow the parameter it governs, and its default counts.
+  (is (search ":data" (problem '((:data string :required-when (:op :write))
+                                 (:op (member :read :write) :default :write))
+                               '()))))
+
+(test required-when-applies-inside-a-nested-object
+  (let ((schema `((:where (nyaa:object ,@+conditional+)))))
+    (is (search ":where" (problem schema '(:where (:op :write :key "k")))))
+    (is (coerced schema '(:where (:op :write :data "d" :key "k"))))))
+
+(test a-malformed-required-when-is-a-definition-error
+  (dolist (schema '(((:d string :required-when (:op :write)))
+                    ((:op string) (:d string :required-when (:op :write)))
+                    ((:op (member :read :write)) (:d string :required-when (:op :delete)))
+                    ((:op (member :read :write)) (:d string :required-when (:op)))
+                    ((:op (member :read :write)) (:d string :required-when (:op ())))
+                    ((:op (member :read :write)) (:d string :required-when :write))
+                    ((:op (member :read :write))
+                     (:d string :required t :required-when (:op :write)))
+                    ((:op (member :read :write))
+                     (:d string :default "x" :required-when (:op :write)))
+                    ((:op (member :read :write) :required-when (:op :write)))))
+    (signals error (nyaa:validate-schema schema))))
+
+(test required-when-renders-as-prose
+  (let ((properties (gethash "properties" (nyaa:schema->json-schema
+                                           '((:op (member :read :write))
+                                             (:data string :required-when (:op :write)
+                                              :doc "file contents")
+                                             (:key string :required-when (:op (:read :write)))))))
+        (required (gethash "required" (nyaa:schema->json-schema
+                                       '((:op (member :read :write))
+                                         (:data string :required-when (:op :write)))))))
+    (is (equal "file contents. Required when op is write."
+               (gethash "description" (gethash "data" properties))))
+    (is (equal "Required when op is read or write."
+               (gethash "description" (gethash "key" properties))))
+    (is (zerop (length required)))))
+
 (test unknown-parameter-is-rejected
   (is (search ":colour" (problem '((:cmd string)) '(:cmd "ls" :colour t)))))
 

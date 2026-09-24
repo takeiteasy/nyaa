@@ -12,7 +12,28 @@ an external tool arrives with. One validator, one coercion path.
 ```
 
 Each parameter is `(:name specifier . options)`. The options are `:doc`,
-`:required` and `:default`; any other is a definition error.
+`:required`, `:default` and `:required-when`; any other is a definition error.
+
+## Conditional parameters
+
+`:required-when` makes a parameter required for some values of another:
+
+```lisp
+:params '((:op   (member :read :write :list) :required t)
+          (:data string :required-when (:op :write) :doc "file contents"))
+```
+
+The value is `(:param :value)` or `(:param (:value ...))`. `:param` must be a
+`member` parameter of the same schema, and every value one of its members. A
+parameter cannot also carry `:required` or `:default`.
+
+Coercion checks it against the coerced controller, so `"WRITE"` counts, and a
+controller's `:default` does too. A missing parameter is refused before the
+tool runs: `(:bad-request ":data is required when :op is write")`.
+
+It renders into the parameter's description, `file contents. Required when op
+is write.`, and not into `required`, `allOf` or `if`, which not every backend
+accepts.
 
 ## Vocabulary
 
@@ -82,12 +103,7 @@ insertion order, so a schema renders the same way on every run, which keeps a
 request body stable for prompt caching. `json-schema->schema` is its inverse;
 an unrecognised construct is an error, matching the closed set.
 
-A round trip preserves every specifier, its options and the `required` set.
-It does not preserve parameter order: a JSON object carries none, so an import
-is ordered by parameter name.
-
-## Limitations
-
-- A parameter is `:required` or it is not; a parameter required only for some
-  other parameter's value still needs a check in the tool
-  ([#30](https://todo.sr.ht/~takeiteasy/nyaa/30)).
+A round trip preserves every specifier, its options and the `required` set,
+except `:required-when`, which stays in the description as text. It does not
+preserve parameter order: a JSON object carries none, so an import is ordered
+by parameter name.

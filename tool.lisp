@@ -216,8 +216,9 @@ DEFSERVICE and DEFINE-TOOL-HANDLER directly."
   "PARAM, a literal schema entry, as a form that rebuilds it: the specifier
 and option keys are quoted, since PARAMS is checked at macroexpansion, but
 option values -- a :default naming a constant such as
-+DEFAULT-TOOL-TIMEOUT+ -- are left to evaluate."
++DEFAULT-TOOL-TIMEOUT+ -- are left to evaluate, except :REQUIRED-WHEN, which
+is data."
   `(list* ,(param-name param) ',(param-type param)
           (list ,@(loop for (key value) on (param-options param) by #'cddr
                         collect `',key
-                        collect value))))
+                        collect (if (eq key :required-when) `',value value)))))

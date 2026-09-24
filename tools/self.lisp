@@ -69,10 +69,10 @@ then the only way an operator can still redefine anything, and every
 :define stays code-exact, undoable by relaunching that image."))
      :params ((:op (member :eval :define :reload :log) :required t
                :doc "operation to perform")
-              (:form string :doc "source text of one form, for :eval and :define")
+              (:form string :required-when (:op (:eval :define)) :doc "source text of one form")
               (:package string :default "CL-USER"
                :doc "package the form reads in, for :eval and :define")
-              (:name string :doc "child name to reload, for :reload")
+              (:name string :required-when (:op :reload) :doc "child name to reload")
               (:label string :doc "a note for this write's checkpoint and log entry")
               (:limit (integer 1 1000) :default 50 :doc "entries to answer, for :log")
               (:timeout (integer 1) :default +default-tool-timeout+
@@ -112,9 +112,7 @@ before this one."
         (run-checkpointed-write service op parsed label timeout package cancel))))
 
 (defun parse-self-form (form package)
-  (if (null form)
-      (values nil ":form is required")
-      (%read-one-form form package)))
+  (%read-one-form form package))
 
 (defun parse-define-form (form package)
   (multiple-value-bind (parsed problem) (parse-self-form form package)
@@ -125,10 +123,8 @@ before this one."
       (t (values parsed nil)))))
 
 (defun parse-reload-name (name)
-  (if (null name)
-      (values nil ":name is required")
-      (let ((symbol (find-symbol (string-upcase name) "KEYWORD")))
-        (if symbol (values symbol nil) (values nil (format nil "no such name ~a" name))))))
+  (let ((symbol (find-symbol (string-upcase name) "KEYWORD")))
+    (if symbol (values symbol nil) (values nil (format nil "no such name ~a" name)))))
 
 (defun %read-one-form (text package-name)
   "TEXT read as exactly one form, in PACKAGE-NAME, with *READ-EVAL* nil, or

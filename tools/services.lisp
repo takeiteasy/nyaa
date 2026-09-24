@@ -21,7 +21,7 @@
                :doc "filter :registry to one :kind of service")
               (:recursive boolean :default t
                :doc "descend into nested contexts for :children")
-              (:name string :doc "service name, for :describe")))
+              (:name string :required-when (:op :describe) :doc "service name")))
   (:invoke (op kind recursive name)
     (case op
       (:registry (op-registry service kind))
@@ -71,14 +71,12 @@
         entry)))
 
 (defun op-service-describe (service name)
-  (if (null name)
-      (bad-request ":name is required for :describe")
-      (let ((registry (m:service-registry service)))
-        (handler-case
-            (multiple-value-bind (process props)
-                (m:lookup (a:make-keyword (string-upcase name)) :registry registry)
-              (if (null process)
-                  (bad-request "no service named ~a" name)
-                  (ok :name name :props props :alive (and (m:process-alive-p process) t)
-                      :effects (m:effects process))))
-          (error (e) (fail (list :error (princ-to-string e))))))))
+  (let ((registry (m:service-registry service)))
+    (handler-case
+        (multiple-value-bind (process props)
+            (m:lookup (a:make-keyword (string-upcase name)) :registry registry)
+          (if (null process)
+              (bad-request "no service named ~a" name)
+              (ok :name name :props props :alive (and (m:process-alive-p process) t)
+                  :effects (m:effects process))))
+      (error (e) (fail (list :error (princ-to-string e)))))))

@@ -18,7 +18,7 @@
                :doc "operation to perform")
               (:label string :doc "a note describing this generation, for :save")
               (:keep (integer 1) :doc "prune to this many newest generations, for :save")
-              (:path string :doc "generation path to restore, for :restore")))
+              (:path string :required-when (:op :restore) :doc "generation path to restore")))
   (:invoke (op label keep path)
     (let ((context (m:service-context service)))
       (if (null context)
@@ -39,8 +39,7 @@
   (ok :generations (generations :dir dir)))
 
 (defun op-checkpoint-restore (context path)
-  (cond
-    ((null path) (bad-request ":path is required for :restore"))
-    ((not (probe-file path)) (bad-request "no generation at ~a" path))
-    (t (handler-case (rollback (m:service-process context) path)
-         (error (e) (fail (list :error (princ-to-string e))))))))
+  (if (not (probe-file path))
+      (bad-request "no generation at ~a" path)
+      (handler-case (rollback (m:service-process context) path)
+        (error (e) (fail (list :error (princ-to-string e)))))))

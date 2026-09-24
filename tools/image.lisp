@@ -22,9 +22,10 @@
      :summary "Read-only introspection over the live Lisp image: describe, apropos, documentation, source"
      :params ((:op (member :describe :apropos :documentation :source :packages)
                :required t :doc "operation to perform")
-              (:symbol string :doc "symbol name, e.g. \"nyaa:complete\" or \"complete\"")
+              (:symbol string :required-when (:op (:describe :documentation :source))
+               :doc "symbol name, e.g. \"nyaa:complete\" or \"complete\"")
               (:package string :doc "package to resolve :symbol or :pattern against")
-              (:pattern string :doc "substring to search for, for :apropos")
+              (:pattern string :required-when (:op :apropos) :doc "substring to search for")
               (:external-only boolean :default t
                :doc "restrict :apropos to exported symbols")
               (:limit (integer 1 1000) :default 100 :doc ":apropos result cap")
@@ -63,22 +64,20 @@ hit, or :not-found / :no-package. FIND-SYMBOL only."
           (multiple-value-bind (symbol found) (find-symbol (string-upcase name) package)
             (if found (values symbol found) (values nil :not-found)))))))
 
-(defmacro with-resolved-symbol ((symbol-var symbol-text package-text op-name) &body body)
-  "Resolve SYMBOL-TEXT for OP-NAME and run BODY with SYMBOL-VAR bound, or
+(defmacro with-resolved-symbol ((symbol-var symbol-text package-text) &body body)
+  "Resolve SYMBOL-TEXT and run BODY with SYMBOL-VAR bound, or
 answer the (:bad-request ...) naming what went wrong."
   (a:with-gensyms (status)
-    `(if (null ,symbol-text)
-         (bad-request ":symbol is required for ~a" ,op-name)
-         (multiple-value-bind (,symbol-var ,status) (resolve-symbol ,symbol-text ,package-text)
-           (case ,status
-             (:no-package (bad-request "no package named ~a" (or ,package-text ,symbol-text)))
-             (:not-found (bad-request "no symbol named ~a" ,symbol-text))
-             (t (progn ,@body)))))))
+    `(multiple-value-bind (,symbol-var ,status) (resolve-symbol ,symbol-text ,package-text)
+       (case ,status
+         (:no-package (bad-request "no package named ~a" (or ,package-text ,symbol-text)))
+         (:not-found (bad-request "no symbol named ~a" ,symbol-text))
+         (t (progn ,@body))))))
 
 ;;; --- :describe -----------------------------------------------------
 
 (defun op-describe (symbol-text package-text)
-  (with-resolved-symbol (symbol symbol-text package-text :describe)
+  (with-resolved-symbol (symbol symbol-text package-text)
     (ok :name (symbol-name symbol)
         :package (and (symbol-package symbol) (package-name (symbol-package symbol)))
         :fboundp (and (fboundp symbol) t)
@@ -116,16 +115,14 @@ the implementation cannot say."
 ;;; --- :apropos --------------------------------------------------------
 
 (defun op-apropos (pattern-text package-text external-only limit)
-  (if (null pattern-text)
-      (bad-request ":pattern is required for :apropos")
-      (let ((package (and package-text (find-package (string-upcase package-text)))))
-        (if (and package-text (null package))
-            (bad-request "no package named ~a" package-text)
-            (let* ((matches (matching-symbols pattern-text package external-only))
-                   (total (length matches)))
-              (ok :symbols (mapcar #'qualified-name (subseq matches 0 (min limit total)))
-                  :total total
-                  :truncated (> total limit)))))))
+  (let ((package (and package-text (find-package (string-upcase package-text)))))
+    (if (and package-text (null package))
+        (bad-request "no package named ~a" package-text)
+        (let* ((matches (matching-symbols pattern-text package external-only))
+               (total (length matches)))
+          (ok :symbols (mapcar #'qualified-name (subseq matches 0 (min limit total)))
+              :total total
+              :truncated (> total limit))))))
 
 (defun matching-symbols (pattern package external-only)
   (let ((symbols (remove-duplicates (apropos-list pattern package) :test #'eq)))
@@ -149,12 +146,12 @@ the implementation cannot say."
     (:structure 'structure) (:setf 'setf) (:compiler-macro 'compiler-macro)))
 
 (defun op-documentation (symbol-text package-text doc-type)
-  (with-resolved-symbol (symbol symbol-text package-text :documentation)
+  (with-resolved-symbol (symbol symbol-text package-text)
     (ok :documentation (documentation symbol (doc-type-symbol doc-type)))))
 
 (defun op-source (symbol-text package-text doc-type)
   (declare (ignore doc-type)) ;; only function source locations are offered; see docs/introspection.md
-  (with-resolved-symbol (symbol symbol-text package-text :source)
+  (with-resolved-symbol (symbol symbol-text package-text)
     (a:if-let (source (symbol-source symbol))
       (apply #'ok :available t source)
       (ok :available nil))))

@@ -217,6 +217,31 @@ last resort with no dedicated OS mechanism behind it."
     (is (equal :bad-request
                (first (nyaa:tool-error (tool :tool-fs :op :read)))))))
 
+(test fs-write-without-data-is-refused-before-touching-the-filesystem
+  (with-tools
+    (let ((result (nyaa:tool-error (tool :tool-fs :op :write :path "new/dir/f.txt"))))
+      (is (eq :bad-request (first result)))
+      (is (search ":data is required when :op is write" (second result))))
+    (is (not (member "new" (result-value (tool :tool-fs :op :list :path ".") :files)
+                     :test #'string=)))))
+
+(test a-missing-conditional-parameter-is-refused-by-every-tool
+  (with-tools
+    (m:mount *context* 'nyaa:tool-vault)
+    (m:mount *context* 'nyaa:tool-self)
+    (dolist (case '((:tool-services (:op :describe) ":name")
+                    (:tool-image (:op :describe) ":symbol")
+                    (:tool-image (:op :apropos) ":pattern")
+                    (:tool-vault (:op :restore) ":id")
+                    (:tool-vault (:op :discard) ":id")
+                    (:tool-self (:op :eval) ":form")
+                    (:tool-self (:op :define) ":form")
+                    (:tool-self (:op :reload) ":name")))
+      (destructuring-bind (name args parameter) case
+        (let ((result (nyaa:tool-error (apply #'tool name args))))
+          (is (eq :bad-request (first result)))
+          (is (search parameter (second result))))))))
+
 ;;; --- fs: symlinks (~takeiteasy/nyaa#15) --------------------------------
 
 (defun make-symlink (target link)

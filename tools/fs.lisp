@@ -10,7 +10,7 @@
                :doc "operation to perform")
               (:path string :required t
                :doc "path relative to the sandbox root")
-              (:data string :doc "file contents, for write")))
+              (:data string :required-when (:op :write) :doc "file contents")))
   (:invoke (op path data)
     (let ((lexical (normalize-path (join-path (fs-root service) path))))
       (if (not (under-root (fs-root service) lexical))
@@ -130,9 +130,6 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
 (defun fs-op-write (leaf data)
   (cond
     ((null leaf) (fail (list :error "is a directory")))
-    ;; :data is required for write alone, which the schema cannot say.
-    ;; Tracked in ~takeiteasy/nyaa#30.
-    ((null data) (bad-request "data required for write, a string"))
     (t (multiple-value-bind (fd errno)
            (fs-open-leaf leaf '(:wronly :creat :trunc) #o644)
          (if (not fd)

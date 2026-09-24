@@ -18,7 +18,7 @@
 (the default) uses the same default an agent's :VAULT T does."))
      :params ((:op (member :list :restore :discard :compact) :required t
                :doc "operation to perform")
-              (:id string :doc "vault entry id, for :restore and :discard")
+              (:id string :required-when (:op (:restore :discard)) :doc "vault entry id")
               (:agent string :doc "target agent name for :restore; required
 when the entry was recorded with no agent (a delegated sub-agent has none),
 and overrides the recorded one otherwise")
@@ -48,16 +48,14 @@ and overrides the recorded one otherwise")
     (ok :entries (last entries limit) :total (length entries))))
 
 (defun op-vault-restore (service id agent-name)
-  (cond
-    ((null id) (bad-request ":id is required for :restore"))
-    (t (let ((entry (%vault-find (vault-log-path service) id)))
-         (cond
-           ((null entry) (bad-request "no vault entry ~a" id))
-           ((not (eq (getf entry :status) :pending))
-            (bad-request "vault entry ~a is already ~(~a~)" id (getf entry :status)))
-           ((getf entry :claimed)
-            (bad-request "vault entry ~a is already queued at an agent" id))
-           (t (op-vault-restore-into service id entry agent-name)))))))
+  (let ((entry (%vault-find (vault-log-path service) id)))
+    (cond
+      ((null entry) (bad-request "no vault entry ~a" id))
+      ((not (eq (getf entry :status) :pending))
+       (bad-request "vault entry ~a is already ~(~a~)" id (getf entry :status)))
+      ((getf entry :claimed)
+       (bad-request "vault entry ~a is already queued at an agent" id))
+      (t (op-vault-restore-into service id entry agent-name)))))
 
 (defun op-vault-restore-into (service id entry agent-name)
   (let ((target (or (and agent-name (a:make-keyword (string-upcase agent-name)))
@@ -79,14 +77,12 @@ and overrides the recorded one otherwise")
                   (t (bad-request "vault entry ~a is already ~(~a~)" id claim)))))))))
 
 (defun op-vault-discard (path id)
-  (if (null id)
-      (bad-request ":id is required for :discard")
-      (let ((result (vault-consume-pending path id :discarded)))
-        (case result
-          (:consumed (ok :id id))
-          (:unknown (bad-request "no vault entry ~a" id))
-          (:held (bad-request "vault entry ~a is queued at an agent; it cannot be discarded" id))
-          (t (bad-request "vault entry ~a is already ~(~a~)" id result))))))
+  (let ((result (vault-consume-pending path id :discarded)))
+    (case result
+      (:consumed (ok :id id))
+      (:unknown (bad-request "no vault entry ~a" id))
+      (:held (bad-request "vault entry ~a is queued at an agent; it cannot be discarded" id))
+      (t (bad-request "vault entry ~a is already ~(~a~)" id result)))))
 
 (defun op-vault-compact (path max-age)
   (multiple-value-bind (dropped kept)

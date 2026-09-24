@@ -14,6 +14,14 @@
 (defun param-type (param) (second param))
 (defun param-options (param) (cddr param))
 
+(defun options-condition (options)
+  "OPTIONS' :REQUIRED-WHEN as (controller . values), or NIL."
+  (a:when-let ((condition (getf options :required-when)))
+    (cons (first condition) (a:ensure-list (second condition)))))
+
+(defun param-condition (param)
+  (options-condition (param-options param)))
+
 (defun param-key (param)
   "PARAM's name as a JSON property name."
   (string-downcase (symbol-name (param-name param))))
@@ -39,9 +47,37 @@ A specifier outside it is a definition error, not a silent pass-through."
       (unless (evenp (length options))
         (error "Options of ~s must be a plist." (param-name param)))
       (loop for key in options by #'cddr
-            unless (member key '(:doc :required :default))
+            unless (member key '(:doc :required :default :required-when))
               do (error "Unknown option ~s on ~s." key (param-name param))))
-    (validate-specifier (param-type param))))
+    (validate-specifier (param-type param)))
+  (dolist (param schema)
+    (when (getf (param-options param) :required-when)
+      (validate-condition param schema)))
+  schema)
+
+(defun validate-condition (param schema)
+  "Signal an error unless PARAM's :REQUIRED-WHEN, written (:controller :value)
+or (:controller (:value ...)), names a member parameter of SCHEMA and values it
+holds, and PARAM is otherwise optional."
+  (let* ((name (param-name param))
+         (options (param-options param))
+         (written (getf options :required-when))
+         (condition (param-condition param))
+         (controller (find (car condition) schema :key #'param-name)))
+    (unless (and (listp written) (= 2 (length written)) (keywordp (first written))
+                 (every #'keywordp (cdr condition)) (cdr condition))
+      (error ":required-when on ~s must be (:param :value) or (:param (:value ...)), got ~s."
+             name written))
+    (when (or (getf options :required) (member :default options))
+      (error "~s takes :required-when or one of :required and :default, not both." name))
+    (unless (and controller (not (eq controller param))
+                 (spec-is (param-type controller) "MEMBER"))
+      (error ":required-when on ~s names ~s, which is not another member parameter."
+             name (car condition)))
+    (dolist (value (cdr condition))
+      (unless (member value (rest (param-type controller)))
+        (error ":required-when on ~s names ~s, not a member of ~s."
+               name value (car condition))))))
 
 (defun validate-specifier (spec)
   (cond
@@ -86,7 +122,7 @@ NIL and a message naming the parameter at fault."
           do (return-from coerce-args
                (values nil (format nil "unknown parameter ~(~s~)" name))))
   (let ((coerced '()))
-    (dolist (param schema (values (nreverse coerced) nil))
+    (dolist (param schema)
       (let ((value (getf args (param-name param) *absent*))
             (options (param-options param)))
         (cond
@@ -104,7 +140,21 @@ NIL and a message naming the parameter at fault."
              (values nil (format nil "~(~s~) is required" (param-name param)))))
           ((member :default options)
            (push (param-name param) coerced)
-           (push (getf options :default) coerced)))))))
+           (push (getf options :default) coerced)))))
+    (setf coerced (nreverse coerced))
+    (a:when-let ((param (find-if (lambda (param) (conditionally-missing param coerced))
+                                 schema)))
+      (return-from coerce-args
+        (values nil (format nil "~(~s~) is required when ~(~s~) is ~(~{~a~^ or ~}~)"
+                            (param-name param) (car (param-condition param))
+                            (cdr (param-condition param))))))
+    (values coerced nil)))
+
+(defun conditionally-missing (param coerced)
+  "True when PARAM's :REQUIRED-WHEN holds in COERCED and PARAM is absent."
+  (a:when-let ((condition (param-condition param)))
+    (and (member (getf coerced (car condition)) (cdr condition))
+         (eq *absent* (getf coerced (param-name param) *absent*)))))
 
 (defun coerce-value (value spec)
   "VALUE as SPEC, and T when it coerced. NIL alone is a coerced (or null X)."
@@ -242,8 +292,14 @@ has an even length too, and must not pass as one empty entry."
                  "additionalProperties" nil)))
 
 (defun property->json (spec options)
-  (let ((json (specifier->json spec)))
-    (a:when-let ((doc (getf options :doc)))
+  (let ((json (specifier->json spec))
+        (doc (getf options :doc))
+        (condition (options-condition options)))
+    (when condition
+      (setf doc (format nil "~@[~a. ~]Required when ~(~a~) is ~(~{~a~^ or ~}~)."
+                        (and doc (string-right-trim "." doc))
+                        (car condition) (cdr condition))))
+    (when doc
       (setf (gethash "description" json) doc))
     (when (member :default options)
       (setf (gethash "default" json) (json-value (getf options :default))))
