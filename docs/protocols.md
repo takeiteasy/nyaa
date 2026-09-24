@@ -161,13 +161,47 @@ backend.
 
 ## Concurrency
 
-Each completion runs on a worker process of its own, so a protocol or provider
-answers `(:describe)` and further completions while one is in flight. A
-service inherits `completion-host` and defines its handler with
-`define-protocol-handler`, which runs the body on the worker.
+Each completion runs as a job on a shared [worker pool](#worker-pools), so a
+protocol or provider answers `(:describe)` and further completions while one is
+in flight. A service inherits `completion-host` and defines its handler with
+`define-protocol-handler`, which runs the body as the job.
 
-Stopping a service cancels every completion it has in flight: each caller
-receives `(:error :cancelled)`.
+`:max-in-flight`, a mount option of every `completion-host`, caps how many of
+a service's completions run at once; nil, the default, leaves them uncapped.
+Past the cap a completion queues:
+
+```lisp
+(meow:mount *context* 'nyaa:protocol-openai :max-in-flight 4)
+```
+
+- Time spent queued counts against the request's `:timeout`: the body sees
+  what is left, and one that runs out while queued answers `(:error
+  :timeout)` without starting.
+- Cancelling a queued completion's token answers `(:error :cancelled)` at
+  once, and its body never runs.
+- A body that signals answers `(:error (:error "text"))`.
+
+Stopping a service cancels every completion it has in flight or queued: each
+caller receives `(:error :cancelled)`.
+
+### Worker pools
+
+Waiting work runs on pooled threads rather than one spawned per job. There
+are four pools, or tiers, and a job only ever waits on a lower one, so a full
+tier never waits on itself:
+
+| Tier | Runs | Waits on |
+|---|---|---|
+| `:tool` | an [agent](agent.md)'s tool calls | the tool |
+| `:turn` | an agent's model turns | a provider or protocol |
+| `:provider` | a provider's completions | its protocol |
+| `:protocol` | a protocol's completions | the backend |
+
+`*pool-sizes*` caps each tier's threads (`(:tool 32 :turn 32 :provider 64
+:protocol 64)`), read when a tier is first used. A thread idle for
+`*pool-idle-seconds*` (30) exits, and one is started again as work arrives.
+`(nyaa:pool-stats tier)` reports a tier's threads, idle threads, queued and
+running jobs.
 
 ## Cancelling
 
@@ -305,8 +339,12 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- Completions in flight per service are not capped
-  ([#112](https://todo.sr.ht/~takeiteasy/nyaa/112)).
+- Each exchange's socket thread, and the close thread a cancel or timeout
+  adds, sit outside the pools, bounded only by `:max-in-flight`
+  ([#127](https://todo.sr.ht/~takeiteasy/nyaa/127)).
+- A protocol whose body calls `complete` waits within its own tier, so a full
+  tier stalls it until timeout
+  ([#128](https://todo.sr.ht/~takeiteasy/nyaa/128)).
 - A tool call naming a tool absent from the request's `:tools` has no schema to
   render its arguments by, and falls back to a heuristic
   ([#36](https://todo.sr.ht/~takeiteasy/nyaa/36)).

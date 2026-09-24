@@ -43,6 +43,10 @@
   :protocol :protocol-echo
   :base-url "http://127.0.0.1:1")
 
+(nyaa:define-provider :test-stacked
+  :protocol :provider-test-echo
+  :base-url "http://127.0.0.1:1")
+
 (nyaa:define-provider :test-orphan
   :protocol :protocol-nobody-mounted
   :base-url "http://127.0.0.1:1")
@@ -353,3 +357,44 @@ is the one MAKE-INSTANCE takes."
              (is (every (lambda (result) (eq :ok (first result))) results))
              (is (< (elapsed-since start) 1.2))))
       (m:stop context))))
+
+(defun call-with-echo-provider (body &rest provider-args)
+  (let* ((registry (make-instance 'm:registry))
+         (m:*registry* registry)
+         (context (m:start-service (make-instance 'm:context :name :providers)
+                                   :registry registry)))
+    (unwind-protect
+         (progn
+           (m:mount context 'protocol-echo)
+           (apply #'m:mount context 'provider-test-echo provider-args)
+           (funcall body context))
+      (m:stop context))))
+
+(test a-provider-max-in-flight-queues
+  (call-with-echo-provider
+   (lambda (context)
+     (declare (ignore context))
+     (let* ((start (get-internal-real-time))
+            (results (concurrently
+                      2 (lambda () (turn :provider-test-echo :delay 0.4)))))
+       (is (every (lambda (result) (eq :ok (first result))) results))
+       (is (>= (elapsed-since start) 0.75))))
+   :max-in-flight 1))
+
+(test a-provider-passes-down-the-time-left
+  (call-with-echo-provider
+   (lambda (context)
+     (declare (ignore context))
+     (let ((busy (in-thread (lambda () (turn :provider-test-echo :delay 0.3)))))
+       (sleep 0.05)
+       (let ((result (turn :provider-test-echo :timeout 2000)))
+         (is (eq :ok (first result)))
+         (is (< (getf (getf (second result) :meta) :timeout) 1800)))
+       (bt:join-thread busy)))
+   :max-in-flight 1))
+
+(test a-provider-over-a-provider-is-refused
+  (call-with-echo-provider
+   (lambda (context)
+     (m:mount context 'provider-test-stacked)
+     (is (eq :bad-request (first (nyaa:tool-error (turn :provider-test-stacked))))))))

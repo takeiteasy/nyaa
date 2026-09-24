@@ -44,7 +44,8 @@ doesn't actually hold."
   "SUSPENSION closed over from before the fork -- the same process and
 service instances the saved core's heap already holds, so RESUME on load
 just respawns threads over them, no re-discovery needed. FORGET-WORKERS
-first: the workers that heap holds belong to the process that saved it, and
+and FORGET-POOLS first: the workers and pooled threads that heap holds
+belong to the process that saved it, and
 so do the vault claims on its agents' queued steers, which are claimed again
 as this image (RECLAIM-STEER-CLAIMS). NYAA_IMAGE_PROBE
 set skips all of that: BIN/NYAA and the integration tests use it to check
@@ -53,6 +54,7 @@ a core loads without actually reviving its services."
     (cond
       ((uiop:getenv "NYAA_IMAGE_PROBE") (sb-ext:exit :code 0 :abort t))
       (t (forget-workers)
+         (forget-pools)
          ;; TODO: reads meow's internal suspension-entries; upgrade path is
          ;; a public accessor. Tracked in ~takeiteasy/meow#69.
          (dolist (entry (meow::suspension-entries suspension))
@@ -138,6 +140,9 @@ because of a stray thread."
          (suspension (m:suspend context :timeout timeout)))
     (unwind-protect
          (progn
+           ;; Pooled threads sit outside every context, so M:SUSPEND
+           ;; leaves them be.
+           (retire-idle-workers :timeout timeout)
            (%await-lone-thread (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (let ((pid (sb-posix:fork)))
              (if (zerop pid)

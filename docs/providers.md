@@ -30,7 +30,7 @@ protocol answers `(:error :unavailable)`.
 
 | Key | Meaning |
 |---|---|
-| `:protocol` | required; the protocol service to delegate to, a literal keyword |
+| `:protocol` | required; the protocol service to delegate to, a literal keyword. A provider is refused. |
 | `:base-url` | required; the API root, http or https |
 | `:auth` | `:none` (the default), `(:bearer :env "VAR")`, `(:header "name" :env "VAR")` |
 | `:models` | the catalogue, for discovery |
@@ -54,7 +54,9 @@ backend knows.
 ## Mount options
 
 `:base-url`, `:model` and `:api-key` override the declaration at mount time, so
-one definition serves a local backend, a remote host and a proxy:
+one definition serves a local backend, a remote host and a proxy.
+`:max-in-flight` caps the completions it runs at once, queueing the rest, as
+[a protocol's](protocols.md#concurrency) does:
 
 ```lisp
 (meow:mount *context* 'nyaa:provider-ollama
@@ -133,5 +135,5 @@ OpenAI protocol's own live tests use.)
   rather than refused, since a protocol takes only what it knows.
 - Auth is BYOK. OAuth and other interactive flows are
   [#24](https://todo.sr.ht/~takeiteasy/nyaa/24).
-- Completions in flight per provider are not capped
-  ([#112](https://todo.sr.ht/~takeiteasy/nyaa/112)).
+- A provider holds a pooled thread for the whole of its protocol's turn
+  ([#126](https://todo.sr.ht/~takeiteasy/nyaa/126)).

@@ -14,6 +14,8 @@
                ;; Ahead of worker.lisp and tools/shell.lisp: both launch and
                ;; kill through the process-group helpers declared here.
                (:file "process")
+               ;; Ahead of protocol.lisp and agent.lisp, which submit to it.
+               (:file "pool")
                (:file "schema")
                (:file "tool")
                ;; Right after tool.lisp: CHECKPOINT and ROLLBACK need only
@@ -79,6 +81,8 @@
                (:file "protocol-openai")
                (:file "protocol-ollama")
                (:file "provider")
+               ;; After provider: it runs completions through the echo provider.
+               (:file "pool")
                (:file "agent")
                (:file "worker")
                (:file "tools")

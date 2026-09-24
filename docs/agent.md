@@ -7,8 +7,8 @@ results in and goes round again. It registers under `:kind :agent`, the same
 convention discovery uses for tools, protocols and providers.
 
 It is message-driven rather than a blocking call: every model turn, tool
-call and sub-agent is issued from a spawned process and reported back as a
-message, so the agent is never blocked waiting on one and stays responsive
+call and sub-agent is issued off the agent's own process and reported back as
+a message, so the agent is never blocked waiting on one and stays responsive
 between turns — `:cancel` and `:steer` land during a run, not just before
 one.
 
@@ -56,6 +56,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:turn-timeout` | 30000 | milliseconds for one `complete` call |
 | `:deadline` | 300000 | milliseconds for the whole run |
 | `:sub-agents` | nil | whether the model may delegate a task |
+| `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
 | `:sink` | nil | a stream sink, as `complete` takes |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
 | `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
@@ -145,6 +146,14 @@ tool allows -- a shell command, HTTP exchange, worker or plan step is
 abandoned, and a sub-agent is sent `:cancel`. A reply that arrives after its
 call was closed is dropped, even when the next turn reuses its id.
 
+### Capping tool calls
+
+With `:max-parallel-tools`, calls past the cap wait, in order, and each starts
+as a running one answers. A sub-agent holds its slot for its whole run; a call
+refused by the allow-list answers at once and holds none. A call still waiting
+when the calls are closed never runs, and closes as `interrupted` like any
+other. Each call and turn runs on a [pooled thread](protocols.md#worker-pools).
+
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
 ends the run as that same `(:error reason)`, unwrapped.
 
@@ -181,8 +190,8 @@ sink that signals an error loses that event and carries on.
 
 With `:sub-agents t`, the model gets a reserved tool, `agent-task`, taking one
 `:task` string. Calling it delegates a child agent — under meow's own agent
-supervisor, via `m:delegate` — with this agent's model, allow-list and
-`:vault`, runs it to completion, and returns its final answer as the tool
+supervisor, via `m:delegate` — with this agent's model, allow-list,
+`:max-parallel-tools` and `:vault`, runs it to completion, and returns its final answer as the tool
 result. The child's `:ref`, echoed on its events, is a cons of an internal
 step counter and the call id. A child does not itself get `:sub-agents`, so
 delegation does not nest by default, and it is never registered under a name, so a steer
@@ -214,7 +223,9 @@ abandoned turn reaches the sink.
   ([#39](https://todo.sr.ht/~takeiteasy/nyaa/39)).
 - A tool result is rendered whole with no size cap, so one large result can
   fill the context ([#40](https://todo.sr.ht/~takeiteasy/nyaa/40)).
-- One thread per outstanding model turn and tool call; no pooling or
-  concurrency cap ([#41](https://todo.sr.ht/~takeiteasy/nyaa/41)).
+- A tool call waits on a pooled thread for as long as the tool runs, and a
+  tool that itself runs an agent can stall behind that agent's own tool calls
+  when the `:tool` tier is full
+  ([#125](https://todo.sr.ht/~takeiteasy/nyaa/125)).
 - No retry or backoff on a transient backend error — the run ends on the
   first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).

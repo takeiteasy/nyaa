@@ -72,6 +72,37 @@
   (sleep 1)
   (nyaa::ok :slow t))
 
+;;; Two services sharing one count of the calls running at once, and the
+;;; most there ever were: one service answers its calls one at a time, so
+;;; overlap needs two.
+
+(defvar *gate-lock* (bt:make-lock))
+(defvar *gate-running* 0)
+(defvar *gate-peak* 0)
+
+(defun reset-gate ()
+  (bt:with-lock-held (*gate-lock*) (setf *gate-running* 0 *gate-peak* 0)))
+
+(defun pass-gate ()
+  (bt:with-lock-held (*gate-lock*)
+    (setf *gate-peak* (max *gate-peak* (incf *gate-running*))))
+  (sleep 0.2)
+  (bt:with-lock-held (*gate-lock*) (decf *gate-running*))
+  (nyaa::ok :gated t))
+
+(defmacro define-gate (name)
+  `(progn
+     (m:defservice ,name () () (:name ,(intern (symbol-name name) :keyword)))
+     (defmethod m:metadata ((service ,name))
+       (list :kind :tool :name ,(intern (symbol-name name) :keyword) :trust :agent
+             :summary "Hold the call briefly, counting overlap" :params nil))
+     (nyaa::define-tool-handler ,name (service args)
+       args
+       (pass-gate))))
+
+(define-gate tool-gate)
+(define-gate tool-gate-b)
+
 ;;; --- the harness --------------------------------------------------------
 
 (defun call-with-agent (answer tool-classes body)
@@ -829,3 +860,125 @@ test's."
     (let ((metadata (nyaa:describe-agent :agent-under-test)))
       (is (eq :agent (getf metadata :kind)))
       (is (eq :provider-test-keyed (getf metadata :model))))))
+;;; --- the tool cap ------------------------------------------------------
+
+(defun tool-message-texts (result)
+  (mapcar #'cdr (remove :tool (message-texts result) :key #'car :test-not #'eq)))
+
+(test queued-tool-calls-dispatch-as-slots-free
+  (reset-gate)
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-calls-reply '("c1" "tool-gate" "{}") '("c2" "tool-gate-b" "{}")
+                                         '("c3" "tool-gate" "{}"))
+                       (final-reply "done")))
+                 'tool-gate 'tool-gate-b)
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :tools '(:tool-gate :tool-gate-b) :max-parallel-tools 1)))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (= 1 *gate-peak*))
+        (is (= 3 (count-if (lambda (text) (search "gated" text))
+                           (tool-message-texts result))))))))
+
+(test without-a-cap-tool-calls-run-together
+  (reset-gate)
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-calls-reply '("c1" "tool-gate" "{}") '("c2" "tool-gate-b" "{}"))
+                       (final-reply "done")))
+                 'tool-gate 'tool-gate-b)
+      (agent-turn :messages '((:role :user :content "go")) :tools '(:tool-gate :tool-gate-b))
+      (is (= 2 *gate-peak*)))))
+
+(defun wait-then-echo (&rest request)
+  (declare (ignore request))
+  (tool-calls-reply '("c1" "tool-wait" "{}") '("c2" "tool-echo" "{\"text\":\"ran\"}")))
+
+(test an-interrupt-closes-queued-calls-too
+  (let ((n 0))
+    (multiple-value-bind (result seconds)
+        (interrupt-tool-phase (lambda (&rest request)
+                                (if (= (incf n) 1)
+                                    (apply #'wait-then-echo request)
+                                    (final-reply "done")))
+                              '(tool-wait tool-echo)
+                              '(:tools (:tool-wait :tool-echo) :max-parallel-tools 1))
+      (is (< seconds 2))
+      (is (eq :stop (getf (second result) :stop-reason)))
+      (is (equal '("{\"error\":\"interrupted\"}" "{\"error\":\"interrupted\"}")
+                 (tool-message-texts result))))))
+
+(test cancel-closes-queued-calls
+  (with-agent (#'wait-then-echo 'tool-wait 'tool-echo)
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :tools '(:tool-wait :tool-echo) :max-parallel-tools 1)))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (is-true (eventually (lambda () (in-tool-phase-p (m:call child '(:snapshot))))))
+        (m:cast child '(:cancel))
+        (multiple-value-bind (message received) (m:receive :timeout 5)
+          (is-true received)
+          (let ((result (fourth message)))
+            (is (eq :cancelled (getf (second result) :stop-reason)))
+            (is (equal '("{\"error\":\"interrupted\"}" "{\"error\":\"interrupted\"}")
+                       (tool-message-texts result)))))))))
+
+(test a-snapshot-closes-queued-calls-as-interrupted
+  (with-agent (#'wait-then-echo 'tool-wait 'tool-echo)
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :tools '(:tool-wait :tool-echo) :max-parallel-tools 1)))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (is-true (eventually (lambda () (in-tool-phase-p (m:call child '(:snapshot))))))
+        (let ((snapshot (m:call child '(:snapshot))))
+          (is (equal '("c1" "c2") (in-tool-phase-p snapshot)))
+          (is (= 2 (count :tool (getf snapshot :messages)
+                          :key (lambda (m) (getf m :role))))))
+        (m:cast child '(:cancel))
+        (is-true (nth-value 1 (m:receive :timeout 5)))))))
+
+(test a-disallowed-call-takes-no-slot
+  (reset-gate)
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-calls-reply '("c1" "tool-boom" "{}") '("c2" "tool-gate" "{}"))
+                       (final-reply "done")))
+                 'tool-gate)
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :tools '(:tool-gate) :max-parallel-tools 1)))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (destructuring-bind (refused gated) (tool-message-texts result)
+          (is (search "allow-list" refused))
+          (is (search "gated" gated)))))))
+
+(test a-sub-agent-holds-a-slot-for-its-run
+  (reset-gate)
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (case (incf n)
+                     (1 (tool-calls-reply '("c1" "agent-task" "{\"task\":\"help\"}")
+                                          '("c2" "tool-gate" "{}")))
+                     ;; The gate would be running by now, were it not queued.
+                     (2 (sleep 0.3)
+                        (if (zerop *gate-peak*)
+                            (final-reply "gate still queued")
+                            (final-reply "gate ran alongside")))
+                     (t (final-reply "done"))))
+                 'tool-gate)
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :tools '(:tool-gate) :sub-agents t :max-parallel-tools 1)))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (search "gate still queued" (first (tool-message-texts result))))
+        (is (search "gated" (second (tool-message-texts result))))))))
+
+(test max-parallel-tools-must-be-a-positive-integer
+  (with-agent ((final-reply "hi"))
+    (signals error (agent-turn :messages '((:role :user :content "go"))
+                               :max-parallel-tools 0))))

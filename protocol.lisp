@@ -315,22 +315,32 @@ time."
 
 ;;; --- concurrent completions ------------------------------------------------
 
-;;; Each completion runs on a worker process of its own, so a protocol or
-;;; provider answers :DESCRIBE and further completions while one is in flight.
-;;; The service still checks and layers the request on its own process; only
-;;; the blocking work moves. Stopping the service cancels what is in flight.
-;;;
-;;; TODO: one thread per completion in flight, with no cap. Upgrade path: a
-;;; per-service :max-in-flight, or a shared worker pool. Tracked in
-;;; ~takeiteasy/nyaa#112, alongside ~takeiteasy/nyaa#41.
+;;; Each completion runs as a job on the shared worker pool (pool.lisp), so a
+;;; protocol or provider answers :DESCRIBE and further completions while one
+;;; is in flight. The service still checks and layers the request on its own
+;;; process; only the blocking work moves. :MAX-IN-FLIGHT caps how many of a
+;;; service's completions run at once, and the rest queue, their time queued
+;;; counting against their :TIMEOUT. Stopping the service cancels what is in
+;;; flight and what is queued.
 
 (defclass completion-host ()
-  ((in-flight :initform '() :accessor host-in-flight)
+  ((max-in-flight :initarg :max-in-flight :initform nil
+                  :type (or null (integer 1)) :reader host-max-in-flight)
+   (in-flight :initform '() :accessor host-in-flight)
    (closing :initform nil :accessor host-closing)
    (drained :initform (bt:make-semaphore) :reader host-drained)
    (in-flight-lock :initform (bt:make-lock) :reader host-lock))
   (:documentation "The state a service needs to run completions concurrently:
-the cancel tokens of those in flight, and whether the service is stopping."))
+its cap, the cancel tokens of those in flight or queued, and whether the
+service is stopping."))
+
+;;; TODO: a protocol whose body calls COMPLETE waits within its own tier.
+;;; Upgrade path: tiers as a per-service depth. Tracked in
+;;; ~takeiteasy/nyaa#128.
+(defgeneric completion-tier (host)
+  (:documentation "The pool tier HOST's completions run in. A job only waits
+on work in a lower tier, so a host that waits on another must sit above it.")
+  (:method ((host completion-host)) :protocol))
 
 (defun track-completion (host token)
   (bt:with-lock-held ((host-lock host))
@@ -364,28 +374,52 @@ the cancel tokens of those in flight, and whether the service is stopping."))
   (call-next-method))
 
 (defun defer-completion (host request function)
-  "Call from HANDLE while answering a :complete call: run FUNCTION on REQUEST
-in a worker process and answer the call from there. FUNCTION's request carries
-a :CANCEL token of the worker's own, which cancelling the caller's token or
-stopping HOST also cancels."
-  (let* ((token (make-cancel-token))
-         (registry (m:service-registry host))
-         (worker (m:spawn (lambda ()
-                            (let ((cell (m:receive))
-                                  (m:*registry* registry))
-                              (unwind-protect
-                                   (m:reply cell (funcall function
-                                                          (list* :cancel token
-                                                                 (a:remove-from-plist request :cancel))))
-                                (untrack-completion host token))))
-                          :name "nyaa-completion-worker")))
-    (track-completion host token)
-    (a:when-let ((caller (getf request :cancel)))
-      (on-cancel caller (lambda () (cancel token))))
-    (a:if-let ((cell (m:defer-reply :until worker)))
-      (m:send worker cell)
-      (m:kill worker))
-    nil))
+  "Call from HANDLE while answering a :complete call: queue FUNCTION on
+REQUEST as a pool job and answer the call from there. FUNCTION's request
+carries a :CANCEL token of the job's own, which cancelling the caller's token
+or stopping HOST also cancels, and the :TIMEOUT left once it starts."
+  (a:when-let ((cell (m:defer-reply)))
+    (let* ((token (make-cancel-token))
+           (timeout (getf request :timeout +default-tool-timeout+))
+           (queued-at (get-internal-real-time))
+           (job nil))
+      (labels ((answer (result)
+                 (m:reply cell result)
+                 (untrack-completion host token))
+               (answer-unrun (result)
+                 ;; FUNCTION never ran, so nothing ended the stream.
+                 (emit-done-detached (getf request :stream) (getf request :ref) result)
+                 (answer result))
+               (remaining ()
+                 (- timeout (floor (* 1000 (- (get-internal-real-time) queued-at))
+                                   internal-time-units-per-second))))
+        (flet ((withdraw (reason)
+                 (when (pool-withdraw job)
+                   (answer-unrun (fail reason)))))
+          (setf job (make-pool-job
+                     (lambda ()
+                       (let ((result (fail :cancelled))
+                             (ran nil))
+                         (unwind-protect
+                              (setf result
+                                    (let ((left (remaining)))
+                                      (if (plusp left)
+                                          (handler-case
+                                              (funcall function
+                                                       (list* :cancel token :timeout (setf ran left)
+                                                              (a:remove-from-plist request :cancel :timeout)))
+                                            (error (e) (fail (list :error (princ-to-string e)))))
+                                          (fail :timeout))))
+                           (if ran (answer result) (answer-unrun result)))))
+                     :key host :limit (host-max-in-flight host)
+                     :registry (m:service-registry host)))
+          (track-completion host token)
+          (when (pool-submit (tier-pool (completion-tier host)) job)
+            (m:after host (/ timeout 1000) (lambda () (withdraw :timeout))))
+          (on-cancel token (lambda () (withdraw :cancelled)))
+          (a:when-let ((caller (getf request :cancel)))
+            (on-cancel caller (lambda () (cancel token))))))))
+  nil)
 
 ;;; --- the exchange -------------------------------------------------------
 
@@ -405,6 +439,10 @@ stopping HOST also cancels."
 (defstruct (exchange (:conc-name exchange-))
   socket thread cancelled finished (lock (bt:make-lock)))
 
+;;; TODO: the exchange thread, and the close thread a cancel or timeout adds,
+;;; sit outside the worker pools, bounded only by :MAX-IN-FLIGHT. Upgrade
+;;; path: run the exchange on the pooled job under a socket-closing
+;;; watchdog. Tracked in ~takeiteasy/nyaa#127.
 (defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange") cancel)
   "Run FUNCTION on a worker thread, bounded by TIMEOUT-MS. FUNCTION takes
 CONNECT, a function of a URL answering a stream ready for drakma's :STREAM.
@@ -524,6 +562,14 @@ handshake in the clear."
                          (bt:signal-semaphore (emitter-drained emitter))))
                      :name name))
       emitter)))
+
+(defun emit-done-detached (sink ref result)
+  "End a turn that never ran with its one :DONE, without waiting on SINK."
+  (a:if-let ((emitter (start-emitter sink)))
+    (progn (emitter-send emitter (done ref (done-reason result)))
+           (stop-emitter emitter)
+           (reap-emitter emitter *sink-grace*))
+    (emit-event sink (done ref (done-reason result)))))
 
 (defun emitter-send (emitter event)
   (m:send (emitter-process emitter) event))
@@ -670,7 +716,7 @@ type names a charset."
 
 (defmacro define-protocol-handler (class (service request) &body body)
   "Define HANDLE for CLASS: (:describe) answers METADATA and
-(:complete . plist) runs BODY on a worker process, DEFER-COMPLETION, with
+(:complete . plist) runs BODY as a pool job, DEFER-COMPLETION, with
 REQUEST bound to the plist, checked against the contract. CLASS must inherit
 COMPLETION-HOST. Meow intercepts %update-config, %effects and %timer-fire before
 HANDLE, so a protocol must not use those heads."

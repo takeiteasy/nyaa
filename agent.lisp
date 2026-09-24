@@ -8,10 +8,10 @@
 ;;; agent supervisor reports back into the same machine. See docs/agent.md.
 ;;;
 ;;; Every outbound piece of work -- a model turn, a tool call, a sub-agent --
-;;; is issued from a spawned process and reported back as a message, so
-;;; HANDLE is never blocked waiting on one. A spawned process is a fresh
-;;; thread and inherits no dynamic bindings, so each one rebinds M:*REGISTRY*
-;;; from the service's own before calling back into COMPLETE or INVOKE-TOOL.
+;;; is issued off the agent's process and reported back as a message, so
+;;; HANDLE is never blocked waiting on one. A turn and a tool call each run as
+;;; a job on the shared worker pool (pool.lisp), under the service's own
+;;; M:*REGISTRY*; a sub-agent is a delegated agent of its own.
 ;;;
 ;;; Finishing a run returns (values :done result) from HANDLE, which is
 ;;; M:AGENT's own convention: the parent gets :agent-done and the agent
@@ -38,6 +38,10 @@ Otherwise a list of tool names.")
              :documentation "Milliseconds for the whole run.")
    (sub-agents :initarg :sub-agents :initform nil :reader agent-sub-agents)
    (sink :initarg :sink :initform nil :reader agent-sink)
+   (max-parallel-tools :initarg :max-parallel-tools :initform nil
+                       :type (or null (integer 1)) :reader agent-max-parallel-tools
+                       :documentation "The most tool calls, sub-agents included,
+running at once. The rest wait their turn.")
    (sampling :initarg :sampling :initform nil :reader agent-sampling
              :documentation "A plist of sampling parameters passed through
 to COMPLETE, e.g. :TEMPERATURE.")
@@ -51,6 +55,7 @@ pathname: record there instead.")
    (allow-list :initform nil :accessor %allow-list)
    (pending :initform nil :accessor %pending)
    (pending-order :initform nil :accessor %pending-order)
+   (queued :initform nil :accessor %queued)
    (call-tokens :initform nil :accessor %call-tokens)
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
@@ -120,6 +125,7 @@ pathname: record there instead.")
               (%turns service) 0
               (%pending service) nil
               (%pending-order service) nil
+              (%queued service) nil
               (%call-tokens service) nil
               ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
               ;; a vault :restore) sent while the agent was idle waits in
@@ -254,11 +260,23 @@ another process holds or that is already consumed."
                                 (%turn-stream service)))
         (registry (m:service-registry service))
         (parent (m:self)))
-    (m:spawn (lambda ()
-               (let ((m:*registry* registry))
-                 (m:cast parent (list :turn-reply ref
-                                      (apply #'complete (agent-model service) request))))))
+    (submit-waiter :turn (%turn-token service) registry
+                   (lambda ()
+                     (m:cast parent (list :turn-reply ref
+                                          (apply #'complete (agent-model service) request)))))
     nil))
+
+;;; TODO: a waiter holds a pooled thread for the whole call, and a tool that
+;;; runs an agent can stall behind its child's own tool calls at a full :tool
+;;; tier. Upgrade path: a reply delivered as a message (~takeiteasy/meow#74).
+;;; Tracked in ~takeiteasy/nyaa#125.
+(defun submit-waiter (tier token registry function)
+  "Run FUNCTION as a job on TIER's pool, withdrawn if TOKEN is cancelled
+before it starts. Its reply is keyed by step ref, so a withdrawn job needs
+none."
+  (let ((job (make-pool-job function :registry registry)))
+    (pool-submit (tier-pool tier) job)
+    (on-cancel token (lambda () (pool-withdraw job)))))
 
 (defun build-request (service token stream)
   (list* :cancel token
@@ -304,16 +322,33 @@ tools, and get back its final answer."
                                          :stop-reason :stop)))))))))
 
 (defun dispatch-calls (service calls)
-  (setf (%pending service) (mapcar (lambda (call) (cons (getf call :id) :pending)) calls)
+  "Every call starts :QUEUED and is dispatched, in order, as
+:MAX-PARALLEL-TOOLS allows."
+  (setf (%pending service) (mapcar (lambda (call) (cons (getf call :id) :queued)) calls)
         (%pending-order service) (mapcar (lambda (call) (getf call :id)) calls)
         (%call-tokens service) (mapcar (lambda (call) (cons (getf call :id) (make-cancel-token)))
-                                       calls))
+                                       calls)
+        (%queued service) calls)
   (dolist (call calls)
     (emit-event (agent-events service)
                 (tool-call-event (m:agent-ref service) (getf call :id)
-                                 (getf call :name) (getf call :arguments)))
-    (dispatch-call service call))
+                                 (getf call :name) (getf call :arguments))))
+  (pump-calls service)
   nil)
+
+(defun running-calls (service)
+  (count :pending (%pending service) :key #'cdr))
+
+(defun pump-calls (service)
+  "Dispatch queued calls while a slot is free. A call refused outright
+answers at once and never holds one."
+  (loop with cap = (agent-max-parallel-tools service)
+        while (and (%queued service)
+                   (or (null cap) (< (running-calls service) cap)))
+        do (let* ((call (pop (%queued service)))
+                  (cell (assoc (getf call :id) (%pending service) :test #'equal)))
+             (setf (cdr cell) :pending)
+             (dispatch-call service call))))
 
 (defun dispatch-call (service call)
   "A call outside the allow-list, and a tool error of any kind, both come
@@ -341,12 +376,11 @@ must not answer it."
          (args (getf call :arguments))
          (token (call-token service id))
          (ref (%step-ref service))
-         (registry (m:service-registry service))
          (parent (m:self)))
-    (m:spawn (lambda ()
-               (let ((m:*registry* registry))
-                 (m:cast parent (list :tool-reply ref id
-                                      (apply #'invoke-tool name :cancel token args))))))
+    (submit-waiter :tool token (m:service-registry service)
+                   (lambda ()
+                     (m:cast parent (list :tool-reply ref id
+                                          (apply #'invoke-tool name :cancel token args)))))
     nil))
 
 (defun dispatch-sub-agent (service call)
@@ -366,6 +400,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :tools (%allow-list service)
                             :sub-agents nil
                             :max-turns (agent-max-turns service)
+                            :max-parallel-tools (agent-max-parallel-tools service)
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
                             :sink (agent-events service)
@@ -385,12 +420,16 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
   (when (eql (car ref) (%step-ref service))
     (tool-reply service (cdr ref) (fail (list :sub-agent-down reason)))))
 
+(defun outstanding-p (status)
+  (member status '(:pending :queued)))
+
 (defun tool-reply (service id result)
   (let ((cell (assoc id (%pending service) :test #'equal)))
-    (when cell
+    (when (and cell (outstanding-p (cdr cell)))
       (setf (cdr cell) result)
       (emit-event (agent-events service) (tool-result-event (m:agent-ref service) id result))
-      (when (every (lambda (c) (not (eq (cdr c) :pending))) (%pending service))
+      (pump-calls service)
+      (when (notany (lambda (c) (outstanding-p (cdr c))) (%pending service))
         (close-pending-calls service)
         (m:cast (m:self) '(:step))))
     nil))
@@ -400,11 +439,12 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
 or an :INTERRUPTED error where none has arrived."
   (mapcar (lambda (id)
             (let ((result (cdr (assoc id (%pending service) :test #'equal))))
-              (tool-message id (if (eq result :pending) (fail :interrupted) result))))
+              (tool-message id (if (outstanding-p result) (fail :interrupted) result))))
           (%pending-order service)))
 
 (defun cancel-pending-calls (service)
   "Cancel each call dispatched this turn that has no result yet."
+  (setf (%queued service) nil)
   (dolist (cell (%pending service))
     (when (eq (cdr cell) :pending)
       (cancel (call-token service (car cell))))))
@@ -412,7 +452,7 @@ or an :INTERRUPTED error where none has arrived."
 (defun close-pending-calls (service)
   (cancel-pending-calls service)
   (dolist (cell (%pending service))
-    (when (eq (cdr cell) :pending)
+    (when (outstanding-p (cdr cell))
       (setf (cdr cell) (fail :interrupted))
       (emit-event (agent-events service)
                   (tool-result-event (m:agent-ref service) (car cell) (cdr cell)))))
@@ -504,6 +544,7 @@ timeout."
         (%turn-in-flight service) nil
         (%pending service) nil
         (%pending-order service) nil
+        (%queued service) nil
         (%call-tokens service) nil)
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
@@ -567,7 +608,7 @@ here but not assumed of the caller's own services)."
 
 ;;; --- checkpoints (~takeiteasy/nyaa#11) ----------------------------------
 
-;;; The turn and tool calls in flight reference spawned processes a restore
+;;; The turn and tool calls in flight reference pooled jobs a restore
 ;;; cannot bring back, so only their ids are recorded, under :IN-FLIGHT, for
 ;;; a caller to see the checkpoint was taken mid-run. RESTORE lands a
 ;;; not-running agent and ignores it. A call with no result yet is recorded

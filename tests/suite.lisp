@@ -10,3 +10,21 @@
         until (or value (> (get-internal-real-time) deadline))
         do (sleep 0.01)
         finally (return value)))
+
+(defun call-with-pool-sizes (sizes body)
+  "Run BODY with each tier in SIZES, a plist, capped at its size, starting
+from no idle threads."
+  (let ((old (loop for (tier) on sizes by #'cddr
+                   collect tier collect (nyaa::pool-max-threads (nyaa::tier-pool tier)))))
+    (nyaa::retire-idle-workers)
+    (unwind-protect
+         (progn
+           (loop for (tier size) on sizes by #'cddr
+                 do (setf (nyaa::pool-max-threads (nyaa::tier-pool tier)) size))
+           (funcall body))
+      (loop for (tier size) on old by #'cddr
+            do (setf (nyaa::pool-max-threads (nyaa::tier-pool tier)) size))
+      (nyaa::retire-idle-workers))))
+
+(defmacro with-pool-sizes ((&rest sizes) &body body)
+  `(call-with-pool-sizes (list ,@sizes) (lambda () ,@body)))

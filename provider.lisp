@@ -173,29 +173,34 @@ appending the provider's keys after the caller's is what lets the caller win."
     (:restore (restore service (second message)))
     (t (bad-request "unknown message ~s" (first message)))))
 
+(defmethod completion-tier ((service provider)) :provider)
+
+;;; TODO: the job only waits on the protocol's. Upgrade path: with no
+;;; :REWRITE-RESPONSE, hand the reply cell to the protocol instead. Tracked in
+;;; ~takeiteasy/nyaa#126.
 (defun provider-complete (service request)
   "Layer SERVICE's data under REQUEST and hand the call to its protocol from a
-worker, so this service is free to take the next completion meanwhile."
+pool job, so this service is free to take the next completion meanwhile."
   (a:if-let ((problem (provider-key-problem service)))
     (bad-request "~a" problem)
-    (a:if-let ((process (m:lookup (provider-protocol service)
-                                  :registry (m:service-registry service))))
-      (let ((layered (apply-quirk service :rewrite-request
-                                  (layered-request service request))))
-        (defer-completion
-         service request
-         (lambda (request)
-           (apply-quirk
-            service :rewrite-response
-            (multiple-value-call #'%call-result
-              (m:call process
-                      (list* :complete
-                             ;; The worker's own :cancel goes down, not the
-                             ;; one layered from the caller.
-                             :cancel (getf request :cancel)
-                             (a:remove-from-plist layered :cancel))
-                      :timeout (%caller-timeout request)))))))
-      (fail :unavailable))))
+    (multiple-value-bind (process props)
+        (m:lookup (provider-protocol service) :registry (m:service-registry service))
+      (cond
+        ((null process) (fail :unavailable))
+        ;; A provider's job waits on its protocol's, one tier down; another
+        ;; provider's would share the tier.
+        ((not (eq (getf props :kind) :protocol))
+         (bad-request "~(~s~) is not a protocol" (provider-protocol service)))
+        (t
+         (defer-completion
+          service (apply-quirk service :rewrite-request (layered-request service request))
+          ;; Carries the job's own :cancel and the :timeout left to it.
+          (lambda (layered)
+            (apply-quirk
+             service :rewrite-response
+             (multiple-value-call #'%call-result
+               (m:call process (list* :complete layered)
+                       :timeout (%caller-timeout layered)))))))))))
 
 (defun apply-quirk (service hook value)
   "VALUE through SERVICE's HOOK, a quirk the declaration names, or unchanged."
