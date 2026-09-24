@@ -14,6 +14,8 @@
                ;; Ahead of worker.lisp and tools/shell.lisp: both launch and
                ;; kill through the process-group helpers declared here.
                (:file "process")
+               ;; Ahead of tool.lisp, which tests for a token.
+               (:file "cancel")
                ;; Ahead of protocol.lisp and agent.lisp, which submit to it.
                (:file "pool")
                (:file "schema")

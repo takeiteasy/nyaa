@@ -59,7 +59,7 @@ substitutes an earlier step's result")))
 (defun run-plan (service steps timeout-ms &optional cancel)
   (a:if-let (problem (validate-plan service steps))
     (bad-request "~a" problem)
-    (execute-plan service steps timeout-ms cancel)))
+    (execute-plan steps timeout-ms cancel)))
 
 (defun validate-plan (service steps)
   "NIL when STEPS may run as given, or a message naming the problem."
@@ -126,7 +126,7 @@ before this one, or a message naming the first problem found."
 
 ;;; --- execution ---------------------------------------------------------
 
-(defun execute-plan (service steps timeout-ms cancel)
+(defun execute-plan (steps timeout-ms cancel)
   "Run STEPS in order, handing each CANCEL, so a cancelled plan stops the
 step in flight and refuses the rest."
   (let ((deadline (+ (get-internal-real-time)
