@@ -146,10 +146,14 @@ and refuse one. Each tool's exact types are in its `:params`; see
 `tool-fs` refuses to delete directories, and offers no recursive delete: a tool
 this easy to call should not be able to `rm -rf`.
 
-`tool-eval` and `tool-repl` answer `(:ok (:value "<printed value>" :out
-"<what the form printed>" :elided <bool>))`. `:elided` is true when the
-worker's print limits or character cap cut the value's printed form; see
-[Workers](#workers) for getting past it. Source that does not read is a
+`tool-eval` and `tool-repl` answer `(:ok (:value "<printed first value>"
+:values ("<printed value>" ...) :out "<what the form printed>" :elided
+<bool>))`. `:values` holds every value the form returned, printed in order
+and empty for a form returning none; `:value` is `:values`'s first entry, or
+`"NIL"` when there is none, kept for callers that only want the primary
+value. `:elided` is true when the worker's print limits, character cap, or
+value-list cap cut what came back; see [Workers](#workers) for getting past
+it. Source that does not read is a
 `(:bad-request ...)`, a form that signals is an `(:error detail)`, and a worker
 that missed its deadline is killed: `tool-eval` starts a fresh one next call,
 and a `tool-repl` id starts empty again. A session inherited through a
@@ -183,28 +187,35 @@ fresh `NYAA-WORKER` package. One exchange per line:
 ```lisp
 (:eval "(+ 1 2)")            ; host to worker
 (:ready)                     ; worker, once, at boot
-(:ok "3" "" nil)             ; value, output, then :elided or nil
+(:ok ("3") "" nil)           ; every value, output, then :elided or nil
 (:error "message" "")        ; the form signalled
 (:reader-error "message")    ; the source did not read
 ```
 
 The source travels as a string, so source that does not read costs one reply
-rather than desynchronising the stream. Values print under `*print-length*`,
-`*print-level*` and a character cap; the reply's fourth element is `:elided`
-when any of those cut the printed form, `nil` when the value printed in full.
+rather than desynchronising the stream. Each value prints under
+`*print-length*`, `*print-level*` and a character cap; the reply's fourth
+element is `:elided` when any value was cut that way, when the form returned
+more than 100 values, or when their combined printed form ran past 4000
+characters (later values dropped), `nil` when everything printed in full.
 
-The value itself is never lost to elision: the worker keeps a REPL history
-under `*`, `**` and `***`, shifted the same way the standard toplevel's are
-after each successful eval (an erroring form leaves them alone). A `tool-repl`
-session's history survives across calls on that id, so an elided value can
-still be inspected:
+No value is lost to elision on a `tool-repl` session: the worker keeps a REPL
+history under `*`, `**` and `***` for the first value and `/`, `//` and `///`
+for the whole list, shifted the same way the standard toplevel's are after
+each successful eval (an erroring form leaves them alone). The session's
+history survives across calls on that id, so an elided value can still be
+inspected:
 
 ```lisp
 (invoke-tool :tool-repl :id "a" :form "(make-list 500)")
-;; => (:ok (:value "(NIL NIL NIL ...)" :out "" :elided t))
+;; => (:ok (:value "(NIL NIL NIL ...)" :values ("(NIL NIL NIL ...)") :out "" :elided t)
 (invoke-tool :tool-repl :id "a" :form "(defparameter v *)")
 (invoke-tool :tool-repl :id "a" :form "(length v)")
-;; => (:ok (:value "500" :out "" :elided nil))
+;; => (:ok (:value "500" :values ("500") :out "" :elided nil))
+(invoke-tool :tool-repl :id "a" :form "(floor 7 2)")
+;; => (:ok (:value "3" :values ("3" "1") :out "" :elided nil))
+(invoke-tool :tool-repl :id "a" :form "(second /)")
+;; => (:ok (:value "1" :values ("1") :out "" :elided nil))
 ```
 
 `tool-eval`'s worker is killed after the call, so its history is of no use
@@ -253,9 +264,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 - A `tool-repl` session lives for as long as its process does once mounted,
   so an id that is never used again keeps its worker, if any, and its
   effect entry around indefinitely ([#104](https://todo.sr.ht/~takeiteasy/nyaa/104)).
-- `tool-eval` and `tool-repl` only keep a form's primary value; a form
-  returning several loses the rest
-  ([#105](https://todo.sr.ht/~takeiteasy/nyaa/105)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

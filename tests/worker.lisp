@@ -72,3 +72,24 @@
     (let ((result (nyaa::worker-eval w "(princ \"...\")" 5000)))
       (is (equal "..." (getf (second result) :out)))
       (is (null (getf (second result) :elided))))))
+
+;;; --- multiple values (~takeiteasy/nyaa#105) -----------------------------
+
+(test worker-keeps-every-value-a-form-returns
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval w "(values 1 2 3)" 5000)))
+      (is (equal "1" (getf (second result) :value)))
+      (is (equal '("1" "2" "3") (getf (second result) :values))))))
+
+(test worker-reports-no-values-as-nil
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval w "(values)" 5000)))
+      (is (equal "NIL" (getf (second result) :value)))
+      (is (null (getf (second result) :values))))))
+
+(test worker-elides-past-100-values
+  (with-worker (w)
+    (let ((result (nyaa::worker-eval
+                   w "(apply #'values (loop for i below 150 collect i))" 5000)))
+      (is (= 100 (length (getf (second result) :values))))
+      (is (eq t (getf (second result) :elided))))))

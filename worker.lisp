@@ -11,28 +11,28 @@
 ;;; bound to nil:
 ;;;
 ;;;   host   -> (:eval "<source>")
-;;;   worker -> (:ready)                          once, at boot
-;;;          -> (:ok "<value>" "<output>" <elided>)
+;;;   worker -> (:ready)                              once, at boot
+;;;          -> (:ok ("<value>" ...) "<output>" <elided>)
 ;;;          -> (:error "<message>" "<output>")
 ;;;          -> (:reader-error "<message>")
 ;;;
 ;;; The source travels as a string rather than a form, and <elided> is
 ;;; either the keyword :ELIDED or NIL: the envelope then holds nothing but
-;;; keywords and strings, so source that does not read costs one reply
-;;; instead of desynchronising the stream.
+;;; keywords, strings and a list of strings, so source that does not read
+;;; costs one reply instead of desynchronising the stream.
 ;;;
-;;; <elided> is set when the value's printed form was cut by the worker's
-;;; character cap or its *PRINT-LENGTH*/*PRINT-LEVEL*. The value itself
-;;; stays reachable either way: the worker keeps a REPL history under *,
-;;; ** and ***, so a caller that gets :ELIDED can inspect the value with a
-;;; further :eval rather than lose the rest of it.
+;;; ("<value>" ...) is EVAL's every value, printed in order -- empty for a
+;;; form returning none. <elided> is set when any value's printed form was
+;;; cut by the worker's character cap or its *PRINT-LENGTH*/*PRINT-LEVEL*,
+;;; or when there were more values or more combined characters than the
+;;; worker keeps. The values themselves stay reachable either way: the
+;;; worker keeps a REPL history under *, ** and *** for the first value and
+;;; /, // and /// for the whole list, so a caller that gets :ELIDED can
+;;; inspect them with a further :eval rather than lose the rest.
 ;;;
 ;;; A worker leads its own process group (see process.lisp), so a form that
 ;;; backgrounds a process is signalled along with the worker at kill time,
 ;;; the same as tools/shell.lisp's commands.
-;;;
-;;; TODO: "<value>" is EVAL's primary value only; a form returning multiple
-;;; values loses the rest. Tracked in ~takeiteasy/nyaa#105.
 
 (defmacro worker-program ()
   "The child's loop, read from worker-program.lisp as text when this file is
@@ -165,8 +165,9 @@ deadline kills the worker, which closes the pipe and ends the reader."
 
 (defun interpret-reply (reply)
   (case (and (consp reply) (first reply))
-    (:ok (ok :value (second reply) :out (or (third reply) "")
-             :elided (eq (fourth reply) :elided)))
+    (:ok (let ((values (second reply)))
+           (ok :value (or (first values) "NIL") :values values
+               :out (or (third reply) "") :elided (eq (fourth reply) :elided))))
     (:error (fail (list :error (second reply))))
     (:reader-error (bad-request "~a" (second reply)))
     (t (if (eq reply :timeout) (fail :timeout) (fail :unavailable)))))

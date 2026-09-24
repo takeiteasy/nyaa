@@ -731,3 +731,26 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
     (tool :tool-repl :id "a" :form "41")
     (nyaa:tool-error (tool :tool-repl :id "a" :form "(error \"boom\")"))
     (is (equal "41" (result-value (tool :tool-repl :id "a" :form "*") :value)))))
+
+;;; --- multiple values (~takeiteasy/nyaa#105) -----------------------------
+
+(test repl-form-returning-several-values-carries-them-all
+  (with-tools
+    (let ((result (tool :tool-repl :id "a" :form "(floor 7 2)")))
+      (is (equal "3" (result-value result :value)))
+      (is (equal '("3" "1") (result-value result :values))))))
+
+(test repl-slash-history-reaches-the-second-value
+  ;; / holds the whole value list as one object, the same as the standard
+  ;; toplevel's: evaluating it returns that list as a single value, from
+  ;; which the second value is reachable.
+  (with-tools
+    (tool :tool-repl :id "a" :form "(floor 7 2)")
+    (is (equal "1" (result-value (tool :tool-repl :id "a" :form "(second /)")
+                                 :value)))))
+
+(test repl-elides-when-one-of-several-values-is-large
+  (with-tools
+    (let ((result (tool :tool-repl :id "a" :form "(values 1 (make-list 200))")))
+      (is (eq t (result-value result :elided)))
+      (is (equal "1" (first (result-value result :values)))))))

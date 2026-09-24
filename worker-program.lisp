@@ -22,6 +22,23 @@
                        (or capped
                            (and (or (find #\# s) (search "..." s))
                                 (string/= s (render-under v 101 9)))))))
+           (render-values (values)
+             ;; Each of VALUES renders under RENDER's own cap; a form
+             ;; returning more than 100 values, or whose combined printed
+             ;; form runs past 4000 characters, has its remainder dropped
+             ;; and ELIDED set -- the same guard against flooding the pipe
+             ;; RENDER applies to one value.
+             (let* ((many (> (length values) 100))
+                    (values (if many (subseq values 0 100) values))
+                    (elided many) (total 0) (rendered '()))
+               (dolist (v values)
+                 (if (> total 4000)
+                     (setf elided t)
+                     (multiple-value-bind (s e) (render v)
+                       (push s rendered)
+                       (incf total (length s))
+                       (when e (setf elided t)))))
+               (values (nreverse rendered) elided)))
            (say (form)
              (prin1 form)
              (terpri)
@@ -37,20 +54,18 @@
             (say (handler-case
                      (let ((form (read-from-string (second message))))
                        (handler-case
-                           ;; TODO: only the primary value is kept -- a form
-                           ;; returning (values 1 2) is seen as just "1".
-                           ;; Upgrade path: capture and render every value.
-                           ;; Tracked in ~takeiteasy/nyaa#105.
-                           (let ((value (let ((*standard-output* out)
-                                              (*error-output* out))
-                                          (eval form))))
+                           (let ((values (let ((*standard-output* out)
+                                               (*error-output* out))
+                                          (multiple-value-list (eval form)))))
                              ;; The REPL's own history, so a value the
                              ;; reply elided can still be inspected: *,
-                             ;; **, *** shift the same way the standard
-                             ;; toplevel's do. An erroring form below
-                             ;; leaves them alone.
-                             (setf *** ** ** * * value)
-                             (multiple-value-bind (rendered elided) (render value)
+                             ;; **, *** and /, //, /// shift the same way
+                             ;; the standard toplevel's do, the latter over
+                             ;; every value a form returned. An erroring
+                             ;; form below leaves them alone.
+                             (setf *** ** ** * * (first values))
+                             (setf /// // // / / values)
+                             (multiple-value-bind (rendered elided) (render-values values)
                                (list :ok rendered (get-output-stream-string out)
                                      (if elided :elided nil))))
                          (error (e) (list :error (princ-to-string e)
