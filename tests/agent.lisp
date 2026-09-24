@@ -231,17 +231,7 @@ object)."
           (multiple-value-bind (message received) (m:receive :timeout 5)
             (is-true received)
             (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
-          (is-true (eventually (lambda () (null (stream-threads)))))
-          (let ((dumps '()) (threads (stream-threads)))
-            (dolist (thread threads)
-              (bt:interrupt-thread
-               thread (lambda ()
-                        (push (with-output-to-string (out)
-                                (sb-debug:print-backtrace :count 30 :stream out))
-                              dumps))))
-            (sleep 1.5)
-            (format t "~&LEAKED-BT ~d threads, ~d dumps~%~{~a~%~}"
-                    (length threads) (length dumps) dumps)))))))
+          (is-true (eventually (lambda () (null (stream-threads))))))))))
 
 (test steer-reaches-the-next-request
   (let ((n 0))

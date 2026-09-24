@@ -403,7 +403,7 @@ stopping HOST also cancels."
         collect (cons (string-downcase name) value)))
 
 (defstruct (exchange (:conc-name exchange-))
-  socket cancelled finished (lock (bt:make-lock)))
+  socket thread cancelled finished (lock (bt:make-lock)))
 
 (defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange") cancel)
   "Run FUNCTION on a worker thread, bounded by TIMEOUT-MS. FUNCTION takes
@@ -419,13 +419,14 @@ worker unwinds instead of running until the backend answers or hangs up."
          (connect (lambda (url) (open-connection url exchange timeout-ms))))
     (when cancel
       (on-cancel cancel (lambda () (cancel-exchange exchange done name))))
-    (bt:make-thread
-     (lambda ()
-       (unwind-protect
-            (setf result (funcall function connect))
-         (close-socket (exchange-socket exchange))
-         (bt:signal-semaphore done)))
-     :name (format nil "~a-request" name))
+    (setf (exchange-thread exchange)
+          (bt:make-thread
+           (lambda ()
+             (unwind-protect
+                  (setf result (funcall function connect))
+               (close-socket (exchange-socket exchange))
+               (bt:signal-semaphore done)))
+           :name (format nil "~a-request" name)))
     (let ((finished (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))))
       (bt:with-lock-held ((exchange-lock exchange))
         (setf (exchange-finished exchange) t)
@@ -433,14 +434,14 @@ worker unwinds instead of running until the backend answers or hangs up."
               (finished (values result nil))
               (t ;; Marked so a connect still in progress closes its socket.
                (setf (exchange-cancelled exchange) :timeout)
-               (abandon-connection (exchange-socket exchange) name)
+               (abandon-exchange exchange name)
                (values nil :timeout)))))))
 
 (defun cancel-exchange (exchange done name)
   (bt:with-lock-held ((exchange-lock exchange))
     (unless (exchange-finished exchange)
       (setf (exchange-cancelled exchange) t)
-      (abandon-connection (exchange-socket exchange) name)
+      (abandon-exchange exchange name)
       (bt:signal-semaphore done))))
 
 (defun close-socket (socket)
@@ -450,12 +451,18 @@ blocked in a read on it asleep, and a shutdown wakes it."
     (ignore-errors (usocket:socket-shutdown socket :io))
     (ignore-errors (usocket:socket-close socket))))
 
-(defun abandon-connection (socket name)
-  "Closing the socket from a thread of its own reliably wakes the worker's
-blocked read."
-  (when socket
-    (bt:make-thread (lambda () (close-socket socket))
-                    :name (format nil "~a-close" name))))
+(defun abandon-exchange (exchange name)
+  "Wake EXCHANGE's worker out of a blocked read: close its socket from a
+thread of its own, and abort the worker, since on Linux a close alone leaves
+a thread blocked in a read on it asleep."
+  (let ((socket (exchange-socket exchange))
+        (thread (exchange-thread exchange)))
+    (when socket
+      (bt:make-thread (lambda () (close-socket socket))
+                      :name (format nil "~a-close" name)))
+    (when thread
+      (ignore-errors
+       (bt:interrupt-thread thread (lambda () (sb-thread:abort-thread)))))))
 
 (defun open-connection (url exchange timeout-ms)
   (let* ((uri (puri:parse-uri url))
