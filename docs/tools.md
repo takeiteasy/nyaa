@@ -203,9 +203,9 @@ so it is sent once, as asked, rather than duplicated or overridden.
 expects for `:stream` — drakma's own `:connection-timeout` does not bound the
 whole exchange, and it cannot close a connection it opened internally.
 `:timeout` bounds the connect phase too, ahead of the exchange deadline. A
-deadline that lapses unblocks the worker thread wherever it stalled, by
-closing the socket from another thread, so it errors out and unwinds
-instead of running until the server answers.
+deadline that lapses, or a cancel, shuts the socket down and unwinds the
+exchange wherever it stalled, so the call answers instead of running until
+the server answers. The exchange runs on the tool's own thread.
 
 ## Workers
 

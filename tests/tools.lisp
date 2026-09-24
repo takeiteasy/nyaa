@@ -495,30 +495,39 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
               (nyaa:tool-error (tool :tool-http :url (format nil "~a/echo" url)
                                                 :timeout 5000)))))))
 
-(test http-timeout-does-not-leak-its-worker-thread
-  ;; An abandoned request used to keep its worker thread -- and the
-  ;; separate thread that closes its socket -- alive until the server
-  ;; answered. *STALL* holds the fake server's response so the
-  ;; test controls exactly when that happens -- SETF rather than LET,
-  ;; since the handler runs on the fake server's own thread, which does
-  ;; not see a dynamic binding made on this one.
+(defun http-threads ()
+  (remove-if-not (lambda (name) (and name (search "nyaa-http" name)))
+                 (mapcar #'bt:thread-name (bt:all-threads))))
+
+(test an-http-exchange-runs-on-no-thread-of-its-own
+  ;; *STALL* holds the fake server's response, so the exchange is in flight
+  ;; until the deadline ends it. SETF rather than LET, since the handler runs
+  ;; on the fake server's own thread, which does not see a dynamic binding
+  ;; made on this one.
   (with-tools
     (with-fake-http (url)
       (setf *stall* t)
       (unwind-protect
-           (progn
-             (is (eq :timeout
-                    (nyaa:tool-error (tool :tool-http :url (format nil "~a/stall" url)
-                                                      :timeout 300))))
-             ;; *STALL* is still held here, so the fake server has not
-             ;; answered -- the worker and any close thread can only be
-             ;; gone because the deadline reclaimed them.
-             (is (poll-until (lambda ()
-                              (or (find "nyaa-http-request" (bt:all-threads)
-                                        :key #'bt:thread-name :test #'equal)
-                                  (find "nyaa-http-close" (bt:all-threads)
-                                        :key #'bt:thread-name :test #'equal))))))
+           (let ((call (in-thread (lambda ()
+                                    (tool :tool-http :url (format nil "~a/stall" url)
+                                                     :timeout 600)))))
+             (sleep 0.3)
+             (is (null (http-threads)))
+             (is (eq :timeout (nyaa:tool-error (bt:join-thread call))))
+             (is (null (http-threads))))
         (setf *stall* nil)))))
+
+(test a-timed-out-exchange-does-not-disturb-the-next-call
+  (with-tools
+    (with-fake-http (url)
+      (setf *stall* t)
+      (unwind-protect
+           (dotimes (i 2)
+             (is (eq :timeout
+                     (nyaa:tool-error (tool :tool-http :url (format nil "~a/stall" url)
+                                                       :timeout 300)))))
+        (setf *stall* nil))
+      (is (eql 200 (result-value (tool :tool-http :url (format nil "~a/echo" url)) :status))))))
 
 (test http-https-round-trip
   ;; Off by default: CI must not depend on the network. Exercises the

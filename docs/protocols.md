@@ -184,6 +184,12 @@ Past the cap a completion queues:
 Stopping a service cancels every completion it has in flight or queued: each
 caller receives `(:error :cancelled)`.
 
+### The exchange
+
+A completion's exchange runs on the thread of the job that makes it, so it
+takes no thread of its own. Its `:timeout`, kept by a timer every service
+shares, or a cancel shuts the socket down and unwinds the exchange.
+
 ### Worker pools
 
 Waiting completions run on pooled threads rather than one spawned per job.
@@ -216,7 +222,7 @@ and cancels it from any thread:
 ; => (:error :cancelled)
 ```
 
-Cancelling closes the connection and ends the call at once with
+Cancelling shuts the connection down and ends the call at once with
 `(:error :cancelled)`; a streamed turn ends with `(:type :done :reason (:error
 :cancelled))`. A token already cancelled fails the call before it reaches the
 network, and cancelling after the reply has arrived changes nothing.
@@ -340,9 +346,12 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- Each exchange's socket thread, and the close thread a cancel or timeout
-  adds, sit outside the pools, bounded only by `:max-in-flight`
-  ([#127](https://todo.sr.ht/~takeiteasy/nyaa/127)).
+- Each function sink's emitter is a process of its own, bounded only by the
+  runs that make them
+  ([#130](https://todo.sr.ht/~takeiteasy/nyaa/130)).
+- An exchange stuck where neither the socket shutdown nor the interrupt
+  reaches it holds its pooled thread
+  ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).
 - A protocol whose body calls `complete` waits within its own tier, so a full
   tier stalls it until timeout
   ([#128](https://todo.sr.ht/~takeiteasy/nyaa/128)).

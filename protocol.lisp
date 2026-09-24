@@ -400,7 +400,7 @@ or stopping HOST also cancels, and the :TIMEOUT left once it starts."
 ;;; --- the exchange -------------------------------------------------------
 
 ;;; Shared by every protocol that talks to a backend over a socket: the
-;;; deadline-bounded worker thread, and the reply and transport shapes a
+;;; deadline-bounded exchange, and the reply and transport shapes a
 ;;; JSON-over-HTTP protocol needs regardless of wire dialect.
 ;;;
 ;;; The connection is opened here rather than left to drakma, so the deadline
@@ -413,50 +413,44 @@ or stopping HOST also cancels, and the :TIMEOUT left once it starts."
         collect (cons (string-downcase name) value)))
 
 (defstruct (exchange (:conc-name exchange-))
-  socket thread cancelled finished (lock (bt:make-lock)))
+  socket thread reason finished (lock (bt:make-lock)))
 
-;;; TODO: the exchange thread, and the close thread a cancel or timeout adds,
-;;; sit outside the worker pools, bounded only by :MAX-IN-FLIGHT. Upgrade
-;;; path: run the exchange on the pooled job under a socket-closing
-;;; watchdog. Tracked in ~takeiteasy/nyaa#127.
-(defun call-with-deadline (timeout-ms function &key (name "nyaa-exchange") cancel)
-  "Run FUNCTION on a worker thread, bounded by TIMEOUT-MS. FUNCTION takes
-CONNECT, a function of a URL answering a stream ready for drakma's :STREAM.
-Answers (values result reason), REASON being :TIMEOUT or, when CANCEL -- a
-cancel token -- fired, :CANCELLED. At either the connection is closed, so the
-worker unwinds instead of running until the backend answers or hangs up."
+(defvar *exchange* nil
+  "The exchange this thread is running, so an interrupt meant for one that has
+finished does nothing.")
+
+(defun call-with-deadline (timeout-ms function &key cancel)
+  "Run FUNCTION on this thread, bounded by TIMEOUT-MS. FUNCTION takes CONNECT,
+a function of a URL answering a stream ready for drakma's :STREAM. Answers
+(values result reason), REASON being :TIMEOUT or, when CANCEL -- a cancel
+token -- fired, :CANCELLED. At either the connection is closed and FUNCTION
+is unwound, rather than left running until the backend answers or hangs up."
   (when (and cancel (cancelled-p cancel))
     (return-from call-with-deadline (values nil :cancelled)))
-  (let* ((result nil)
-         (exchange (make-exchange))
-         (done (bt:make-semaphore))
-         (connect (lambda (url) (open-connection url exchange timeout-ms))))
-    (when cancel
-      (on-cancel cancel (lambda () (cancel-exchange exchange done name))))
-    (setf (exchange-thread exchange)
-          (bt:make-thread
-           (lambda ()
-             (unwind-protect
-                  (setf result (funcall function connect))
-               (close-socket (exchange-socket exchange))
-               (bt:signal-semaphore done)))
-           :name (format nil "~a-request" name)))
-    (let ((finished (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))))
-      (bt:with-lock-held ((exchange-lock exchange))
-        (setf (exchange-finished exchange) t)
-        (cond ((eq t (exchange-cancelled exchange)) (values nil :cancelled))
-              (finished (values result nil))
-              (t ;; Marked so a connect still in progress closes its socket.
-               (setf (exchange-cancelled exchange) :timeout)
-               (abandon-exchange exchange name)
-               (values nil :timeout)))))))
+  (let ((result nil)
+        (exchange (make-exchange :thread (bt:current-thread)))
+        (cancel-timer nil))
+    (catch exchange
+      (let ((*exchange* exchange))
+        (setf cancel-timer (m:schedule (/ timeout-ms 1000)
+                                       (lambda () (abandon-exchange exchange :timeout))))
+        (when cancel
+          (on-cancel cancel (lambda () (abandon-exchange exchange :cancelled))))
+        (unwind-protect
+             (setf result (funcall function (lambda (url)
+                                              (open-connection url exchange timeout-ms))))
+          (sb-sys:without-interrupts
+            (close-socket (exchange-socket exchange))))))
+    (when cancel-timer (funcall cancel-timer))
+    (let ((reason (finish-exchange exchange)))
+      (if reason (values nil reason) (values result nil)))))
 
-(defun cancel-exchange (exchange done name)
+(defun finish-exchange (exchange)
+  "End EXCHANGE, so a cancel or timeout arriving now does nothing. Answers the
+reason one already claimed it for, if any."
   (bt:with-lock-held ((exchange-lock exchange))
-    (unless (exchange-finished exchange)
-      (setf (exchange-cancelled exchange) t)
-      (abandon-exchange exchange name)
-      (bt:signal-semaphore done))))
+    (setf (exchange-finished exchange) t)
+    (exchange-reason exchange)))
 
 (defun close-socket (socket)
   "Shut SOCKET down before closing it: on Linux a close alone leaves a thread
@@ -465,18 +459,24 @@ blocked in a read on it asleep, and a shutdown wakes it."
     (ignore-errors (usocket:socket-shutdown socket :io))
     (ignore-errors (usocket:socket-close socket))))
 
-(defun abandon-exchange (exchange name)
-  "Wake EXCHANGE's worker out of a blocked read: close its socket from a
-thread of its own, and abort the worker, since on Linux a close alone leaves
-a thread blocked in a read on it asleep."
-  (let ((socket (exchange-socket exchange))
-        (thread (exchange-thread exchange)))
-    (when socket
-      (bt:make-thread (lambda () (close-socket socket))
-                      :name (format nil "~a-close" name)))
-    (when thread
+;;; TODO: an exchange stuck where neither the shutdown nor the interrupt
+;;; reaches it holds its pooled thread. Upgrade path: have the pool replace a
+;;; thread whose job outlives its deadline. Tracked in ~takeiteasy/nyaa#131.
+(defun abandon-exchange (exchange reason)
+  "End EXCHANGE's run for REASON, :TIMEOUT or :CANCELLED, unless something
+already has: shut its socket down, which wakes a read on it, and interrupt
+its thread out of FUNCTION, since on Linux a close alone leaves a thread
+blocked in a read on it asleep. Cheap, and safe to call from any thread."
+  (bt:with-lock-held ((exchange-lock exchange))
+    (unless (or (exchange-finished exchange) (exchange-reason exchange))
+      (setf (exchange-reason exchange) reason)
+      (a:when-let ((socket (exchange-socket exchange)))
+        (ignore-errors (usocket:socket-shutdown socket :io)))
       (ignore-errors
-       (bt:interrupt-thread thread (lambda () (sb-thread:abort-thread)))))))
+       (bt:interrupt-thread (exchange-thread exchange)
+                            (lambda ()
+                              (when (eq *exchange* exchange)
+                                (throw exchange nil))))))))
 
 (defun open-connection (url exchange timeout-ms)
   (let* ((uri (puri:parse-uri url))
@@ -492,7 +492,7 @@ a thread blocked in a read on it asleep."
     ;; A cancel that landed while connecting found no socket to close.
     (when (bt:with-lock-held ((exchange-lock exchange))
             (setf (exchange-socket exchange) socket)
-            (exchange-cancelled exchange))
+            (exchange-reason exchange))
       (close-socket socket)
       (error "cancelled"))
     (wrap-http-stream socket (puri:uri-host uri) securep)))
@@ -525,6 +525,9 @@ handshake in the clear."
 (defstruct (emitter (:constructor %make-emitter))
   process (drained (bt:make-semaphore)))
 
+;;; TODO: each emitter is a process with a thread of its own, bounded only by
+;;; the runs that make them. Upgrade path: a per-sink queue drained by a keyed
+;;; pool job. Tracked in ~takeiteasy/nyaa#130.
 (defun start-emitter (sink &key (name "nyaa-sink"))
   "An emitter calling SINK, or nil when SINK is not a function."
   (when (and sink (typep sink '(or function symbol)))
@@ -558,13 +561,12 @@ handshake in the clear."
   "True once EMITTER has stopped, waiting at most SECONDS."
   (bt:wait-on-semaphore (emitter-drained emitter) :timeout (max 0 seconds)))
 
-(defun reap-emitter (emitter seconds &key (name "nyaa-sink-reaper"))
-  "Kill EMITTER unless it has stopped within SECONDS, from a thread of its own
-so the caller is not held up."
-  (bt:make-thread (lambda ()
-                    (unless (await-emitter emitter seconds)
-                      (m:kill (emitter-process emitter))))
-                  :name name))
+(defun reap-emitter (emitter seconds)
+  "Kill EMITTER unless it has stopped within SECONDS."
+  (m:schedule (max 0 seconds)
+              (lambda ()
+                (unless (await-emitter emitter 0)
+                  (m:kill (emitter-process emitter))))))
 
 ;;; --- streamed turns ---------------------------------------------------
 
@@ -608,8 +610,8 @@ when the sink has, or has no emitter to wait for."
       (getf (getf (second result) :meta) :finish-reason)))
 
 (defun perform-completion (request opener reader)
-  "Run the exchange on a worker thread bounded by the caller's deadline, as
-TOOL-HTTP does: a wedged backend costs a timeout, not a wedged service. OPENER
+  "Run the exchange under the caller's deadline, as TOOL-HTTP does: a wedged
+backend costs a timeout, not a wedged service. OPENER
 takes (request connect) and answers (values stream status); READER takes
 (request stream status) and answers the reply. A request with a :STREAM sink
 ends it with exactly one :DONE."
@@ -624,7 +626,6 @@ ends it with exactly one :DONE."
         (call-with-deadline
          timeout
          (lambda (connect) (attempt-completion request opener reader connect))
-         :name "nyaa-completion"
          :cancel (getf request :cancel))
       (let ((result (case reason
                       (:timeout (fail :timeout))

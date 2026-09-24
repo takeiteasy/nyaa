@@ -316,12 +316,12 @@ object)."
         (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
                                  :turn-timeout 30000)))
           (m:cast child (list :run :messages '((:role :user :content "go"))))
-          (is-true (eventually (lambda () (stream-threads))))
+          (is-true (eventually #'completion-running-p))
           (m:cast child '(:cancel))
           (multiple-value-bind (message received) (m:receive :timeout 5)
             (is-true received)
             (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
-          (is-true (eventually (lambda () (null (stream-threads))))))))))
+          (is-true (eventually (lambda () (not (completion-running-p))))))))))
 
 (test steer-reaches-the-next-request
   (let ((n 0))

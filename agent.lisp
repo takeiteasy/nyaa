@@ -491,7 +491,7 @@ when a function sink has no emitter running, so it is never called here."
 the sink has not taken that within *SINK-GRACE*."
   (a:when-let ((emitter (shiftf (%emitter service) nil)))
     (stop-emitter emitter)
-    (reap-emitter emitter *sink-grace* :name "nyaa-agent-sink-reaper")))
+    (reap-emitter emitter *sink-grace*)))
 
 ;;; --- a turn's stream ------------------------------------------------------
 

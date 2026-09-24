@@ -27,7 +27,6 @@
       (call-with-deadline timeout-ms
                           (lambda (connect)
                             (attempt-request url method headers body connect))
-                          :name "nyaa-http"
                           :cancel cancel)
     (if reason (fail reason) result)))
 

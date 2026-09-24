@@ -297,11 +297,9 @@ needs and a user message."
 (defun done-events (events)
   (remove :done events :key (lambda (event) (getf event :type)) :test-not #'eq))
 
-(defun stream-threads ()
-  (remove-if-not (lambda (thread)
-                   (let ((name (bt:thread-name thread)))
-                     (and name (eql 0 (search "nyaa-completion" name)))))
-                 (bt:all-threads)))
+(defun completion-running-p ()
+  "True while a pooled thread is running a completion."
+  (plusp (getf (nyaa:pool-stats :protocol) :running)))
 
 (defun expect-one-failed-done (events)
   "EVENTS end in exactly one :done, carrying a failed result."
@@ -343,7 +341,7 @@ needs and a user message."
         (is (equal '(:error :timeout) (getf (first events) :reason)))
         ;; The hold is still on, so the threads are gone only because the
         ;; deadline closed the connection.
-        (is-true (eventually (lambda () (null (stream-threads)))))
+        (is-true (eventually (lambda () (not (completion-running-p)))))
         (sleep 0.2)
         (is (= 2 (length events)))))))
 
@@ -372,8 +370,7 @@ needs and a user message."
 (defun sink-threads ()
   (remove-if-not (lambda (thread)
                    (let ((name (bt:thread-name thread)))
-                     (and name (search "nyaa-sink" name)
-                          (not (search "reaper" name)))))
+                     (and name (search "nyaa-sink" name))))
                  (bt:all-threads)))
 
 (test a-sink-that-never-returns-loses-its-emitter-after-the-grace
@@ -416,7 +413,7 @@ needs and a user message."
         (is (equal '(:text-delta :done)
                    (mapcar (lambda (event) (getf event :type)) (reverse events))))
         (is (equal '(:error :cancelled) (getf (first events) :reason)))
-        (is-true (eventually (lambda () (null (stream-threads)))))))))
+        (is-true (eventually (lambda () (not (completion-running-p)))))))))
 
 (test stopping-the-protocol-mid-stream-ends-the-turn-and-frees-its-threads
   (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
@@ -436,7 +433,7 @@ needs and a user message."
         (is-true (eventually (lambda () (= 2 (length (bt:with-lock-held (lock) events))))))
         (is (equal '(:text-delta :done)
                    (mapcar (lambda (event) (getf event :type)) (reverse events))))
-        (is-true (eventually (lambda () (null (stream-threads)))))))))
+        (is-true (eventually (lambda () (not (completion-running-p)))))))))
 
 (test a-request-cancelled-beforehand-never-reaches-the-backend
   (with-openai ((json-response +hello-reply+))

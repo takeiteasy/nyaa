@@ -406,3 +406,51 @@
     (nyaa:cancel token)
     (nyaa::on-cancel token (lambda () (incf runs)))
     (is (= 1 runs))))
+
+;;; --- the exchange's deadline -------------------------------------------------
+
+(test an-exchange-runs-on-the-calling-thread
+  (is (equal (list (bt:current-thread) nil)
+             (multiple-value-list
+              (nyaa::call-with-deadline 1000 (lambda (connect)
+                                               (declare (ignore connect))
+                                               (bt:current-thread)))))))
+
+(test the-deadline-unwinds-an-exchange-that-does-not-return
+  (let ((start (get-internal-real-time)))
+    (is (equal '(nil :timeout)
+               (multiple-value-list
+                (nyaa::call-with-deadline 200 (lambda (connect)
+                                                (declare (ignore connect))
+                                                (sleep 10))))))
+    (is (< (elapsed-since start) 2))))
+
+(test a-cancel-unwinds-an-exchange-that-does-not-return
+  (let ((token (nyaa:make-cancel-token))
+        (start (get-internal-real-time)))
+    (bt:make-thread (lambda () (sleep 0.2) (nyaa:cancel token)))
+    (is (equal '(nil :cancelled)
+               (multiple-value-list
+                (nyaa::call-with-deadline 10000 (lambda (connect)
+                                                  (declare (ignore connect))
+                                                  (sleep 10))
+                                          :cancel token))))
+    (is (< (elapsed-since start) 2))))
+
+(test a-finished-exchange-ignores-a-later-cancel-and-deadline
+  (let ((token (nyaa:make-cancel-token)))
+    (is (equal '(:done nil)
+               (multiple-value-list
+                (nyaa::call-with-deadline 300 (lambda (connect)
+                                                (declare (ignore connect))
+                                                :done)
+                                          :cancel token))))
+    (nyaa:cancel token)
+    ;; Past the deadline too: neither may reach this thread.
+    (sleep 0.5)
+    (is (equal '(:next nil)
+               (multiple-value-list
+                (nyaa::call-with-deadline 1000 (lambda (connect)
+                                                 (declare (ignore connect))
+                                                 (sleep 0.3)
+                                                 :next)))))))

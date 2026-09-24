@@ -213,7 +213,7 @@
         (is (equal '(:error :timeout) (getf (first events) :reason)))
         ;; The hold is still on, so the threads are gone only because the
         ;; deadline closed the connection.
-        (is-true (eventually (lambda () (null (stream-threads)))))
+        (is-true (eventually (lambda () (not (completion-running-p)))))
         (sleep 0.2)
         (is (= 2 (length events)))))))
 
