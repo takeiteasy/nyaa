@@ -31,6 +31,18 @@ schema. `:as`, if given, binds the step's result plist under a name; a later
 step's `:args` may reach into it with `(:ref "name.key")`, substituted
 before that step runs — `"readme.data"` is `(getf <readme's result> :data)`.
 
+## Literal values
+
+`(:quote x)` passes `x` as it is, so a step can hand a tool the shape
+`(:ref "...")` itself. Refs inside it are not substituted or checked.
+
+```lisp
+(:tool "tool-x" :args (:value (:quote (:ref "not.a.reference"))))
+```
+
+The tool receives `(:ref "not.a.reference")`. To pass a literal
+`(:quote ...)`, quote it: `(:quote (:quote 1))` arrives as `(:quote 1)`.
+
 ## The allow-list
 
 `tool-plan` is mounted with `:allow`, the tool names it may call:
@@ -89,6 +101,3 @@ A step also stops when the plan's own `:cancel` token is cancelled.
 - A tool that honours neither its `:timeout` nor its cancel token keeps
   running after the plan returns
   ([#145](https://todo.sr.ht/~takeiteasy/nyaa/145)).
-- A step cannot pass a literal `(:ref "...")` value as an argument — `:args`
-  has no way to say "this is not a reference"
-  ([#45](https://todo.sr.ht/~takeiteasy/nyaa/45)).

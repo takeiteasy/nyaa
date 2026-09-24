@@ -44,6 +44,15 @@
   (:invoke (timeout)
     (nyaa::ok :timeout timeout)))
 
+;;; Answers whatever :value it was given, unchanged.
+
+(nyaa:define-tool :tool-plan-echo
+    (:trust :agent
+     :summary "Answer :value"
+     :params ((:value any :doc "any value")))
+  (:invoke (value)
+    (nyaa::ok :value value)))
+
 (defvar *plan-sandbox* nil "The fs tool's sandbox root for the running test.")
 
 (defun call-with-plan (allow max-steps body &key sleep-tool extra)
@@ -222,6 +231,40 @@
         (is (<= (getf (getf (plan-results result) :own) :timeout) 5000))
         (is (<= (getf (getf (plan-results result) :default) :timeout) 5000))))
     :extra '(tool-timeout-echo)))
+
+;;; --- (:quote x) passes x as it is --------------------------------------
+
+(defun echoed (value)
+  "What tool-plan-echo answers when a plan step passes it VALUE."
+  (call-with-plan '(:tool-plan-echo) 16
+    (lambda ()
+      (getf (getf (plan-results (plan (list (list :as "e" :tool "tool-plan-echo"
+                                                  :args (list :value value)))))
+                  :e)
+            :value))
+    :extra '(tool-plan-echo)))
+
+(test quote-passes-a-ref-shape-literally
+  (is (equal '(:ref "x.y") (echoed '(:quote (:ref "x.y"))))))
+
+(test quote-nests
+  (is (equal '(:quote 1) (echoed '(:quote (:quote 1))))))
+
+(test a-marker-shaped-plist-tail-is-not-a-marker
+  (is (equal '(:x 1 :ref "a.b") (echoed '(:x 1 :ref "a.b"))))
+  (is (equal '(:x 1 :quote 2) (echoed '(:x 1 :quote 2)))))
+
+(test a-ref-inside-a-list-still-resolves
+  (call-with-plan '(:tool-plan-echo) 16
+    (lambda ()
+      (let ((result (plan (list (list :as "a" :tool "tool-plan-echo" :args (list :value "hi"))
+                                (list :as "b" :tool "tool-plan-echo"
+                                      :args (list :value (list 1 (list :ref "a.value"))))))))
+        (is (equal '(1 "hi") (getf (getf (plan-results result) :b) :value)))))
+    :extra '(tool-plan-echo)))
+
+(test a-quoted-ref-is-not-checked-against-earlier-steps
+  (is (not (null (echoed '(:quote (:ref "nobody.knows")))))))
 
 (test a-cancelled-plan-refuses-its-remaining-steps
   (call-with-plan '(:tool-fs :tool-sleep) 16

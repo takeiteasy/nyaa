@@ -16,7 +16,9 @@
 ;;;   (:as "name" :tool "tool-fs" :args (:op :read :path "README.md"))
 ;;;
 ;;; :AS binds the step's result plist under a name a later step's :ARGS may
-;;; reach with (:ref "name.key"), substituted before that step runs. :TOOL
+;;; reach with (:ref "name.key"), substituted before that step runs.
+;;; (:quote X) passes X as it is, so a step can hand a tool the shape
+;;; (:ref "...") itself. :TOOL
 ;;; must be in this service's own :ALLOW *and* the named tool's own
 ;;; :trust must be :agent -- an :ALLOW naming an operator-trusted tool is
 ;;; refused, so the gate cannot be used to re-export tool-shell. tool-plan
@@ -43,7 +45,7 @@
                                 :doc "tool name, e.g. \"tool-fs\"")
                                (:args any
                                 :doc "arguments for the tool; (:ref \"name.key\")
-substitutes an earlier step's result")))
+substitutes an earlier step's result, (:quote x) passes x as it is")))
                :required t :doc "the steps to run, in order")
               (:timeout (integer 1) :default +default-tool-timeout+
                :doc "whole-plan deadline in milliseconds; bounds each step")))
@@ -97,11 +99,13 @@ substitutes an earlier step's result")))
 
 (defun ref-form-p (value)
   "True when VALUE is (:ref \"name.key\") -- a one-key plist, so it survives
-the JSON round trip unchanged.
-
-There is no escape for a step that means this shape literally, rather than
-as a reference. Tracked in ~takeiteasy/nyaa#45."
+the JSON round trip unchanged."
   (and (consp value) (eq (first value) :ref) (stringp (second value))
+       (null (cddr value))))
+
+(defun quote-form-p (value)
+  "True when VALUE is (:quote X), which passes X through as it is."
+  (and (consp value) (eq (first value) :quote) (consp (cdr value))
        (null (cddr value))))
 
 (defun parse-ref (text)
@@ -113,16 +117,23 @@ TEXT does not have that shape."
 
 (defun check-refs (args seen)
   "NIL when every (:ref ...) in ARGS names one of SEEN, the steps declared
-before this one, or a message naming the first problem found."
+before this one, or a message naming the first problem found. ARGS' own
+elements are checked, never ARGS itself, and a list is walked by element so
+a plist tail is never taken for a marker."
+  (some (lambda (value) (check-value value seen))
+        (and (listp args) args)))
+
+(defun check-value (value seen)
   (cond
-    ((ref-form-p args)
-     (let ((parsed (parse-ref (second args))))
+    ((quote-form-p value) nil)
+    ((ref-form-p value)
+     (let ((parsed (parse-ref (second value))))
        (cond
-         ((null parsed) (format nil "malformed ref ~s" (second args)))
+         ((null parsed) (format nil "malformed ref ~s" (second value)))
          ((not (member (car parsed) seen :test #'string=))
-          (format nil "ref ~s names an unknown or later step" (second args)))
+          (format nil "ref ~s names an unknown or later step" (second value)))
          (t nil))))
-    ((consp args) (or (check-refs (car args) seen) (check-refs (cdr args) seen)))
+    ((a:proper-list-p value) (some (lambda (v) (check-value v seen)) value))
     (t nil)))
 
 ;;; --- execution ---------------------------------------------------------
@@ -180,11 +191,18 @@ absent or a number. Anything else is left for coercion to refuse."
         (list* :timeout (min own left-ms) (a:remove-from-plist args :timeout))
         args)))
 
-(defun resolve-refs (value results)
+(defun resolve-refs (args results)
+  "ARGS with each (:ref ...) replaced by its value and each (:quote X) by X."
+  (if (listp args)
+      (mapcar (lambda (value) (resolve-value value results)) args)
+      args))
+
+(defun resolve-value (value results)
   (cond
+    ((quote-form-p value) (second value))
     ((ref-form-p value) (resolve-ref (second value) results))
-    ((consp value) (cons (resolve-refs (car value) results)
-                         (resolve-refs (cdr value) results)))
+    ((a:proper-list-p value)
+     (mapcar (lambda (v) (resolve-value v results)) value))
     (t value)))
 
 (defun resolve-ref (text results)
