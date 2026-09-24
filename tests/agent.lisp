@@ -233,7 +233,7 @@ object)."
             (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
           (is-true (eventually (lambda () (null (stream-threads)))))
           (dolist (thread (stream-threads))
-            (sb-thread:interrupt-thread
+            (bt:interrupt-thread
              thread (lambda ()
                       (format *error* "~&LEAKED-BT~%")
                       (sb-debug:print-backtrace :count 30 :stream *error*))))
