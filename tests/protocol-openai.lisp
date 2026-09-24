@@ -347,6 +347,28 @@ needs and a user message."
         (sleep 0.2)
         (is (= 2 (length events)))))))
 
+(test a-blocking-sink-does-not-delay-the-timeout-reply
+  ;; The sink parks on its first event; the deadline still answers on time
+  ;; and the turn's :done queues behind it.
+  (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
+    (with-hold
+      (let* ((release (bt:make-semaphore))
+             (events '())
+             (lock (bt:make-lock))
+             (started (get-internal-real-time))
+             (result (ask :ref :r1 :timeout 400
+                            :stream (lambda (event)
+                                      (bt:wait-on-semaphore release :timeout 10)
+                                      (bt:with-lock-held (lock) (push event events)))))
+             (elapsed (/ (- (get-internal-real-time) started)
+                         internal-time-units-per-second)))
+        (is (eq :timeout (nyaa:tool-error result)))
+        (is (< elapsed 2))
+        (bt:signal-semaphore release :count 2)
+        (is-true (eventually (lambda () (= 2 (length (bt:with-lock-held (lock) events))))))
+        (is (equal '(:text-delta :done)
+                   (mapcar (lambda (event) (getf event :type)) (reverse events))))))))
+
 (test a-streamed-non-ok-status-ends-in-one-failed-done
   (with-openai ('(429 ("Content-Type" "application/json") "{\"error\":\"slow down\"}"))
     (multiple-value-bind (events result) (collect-stream)

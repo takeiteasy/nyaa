@@ -368,27 +368,52 @@ handshake in the clear."
 
 ;;; The worker's deltas and the caller's :DONE reach the sink through one
 ;;; gate, so the sink sees exactly one :DONE and nothing after it, however
-;;; the worker and the deadline race.
+;;; the worker and the deadline race. A function sink is called from an
+;;; emitter of its own, fed through a mailbox, so a sink that blocks never
+;;; holds up the worker or the deadline.
 ;;;
-;;; TODO: events are emitted under the gate's lock, so a sink that blocks
-;;; delays the deadline's :DONE. Upgrade path: an emitter thread fed by a
-;;; queue. Tracked in ~takeiteasy/nyaa#108.
+;;; TODO: an emitter whose sink never returns outlives its turn. Upgrade
+;;; path: abandon it at the deadline as the exchange's own thread is.
+;;; Tracked in ~takeiteasy/nyaa#110.
 
 (defstruct (sink-gate (:conc-name gate-))
-  sink (lock (bt:make-lock)) closed)
+  sink (lock (bt:make-lock)) closed relay (drained (bt:make-semaphore)))
+
+(defun start-relay (gate)
+  "Give GATE's function sink an emitter, which stops after delivering :DONE."
+  (let ((sink (gate-sink gate))
+        (drained (gate-drained gate)))
+    (when (and sink (typep sink '(or function symbol)))
+      (setf (gate-relay gate)
+            (m:spawn (lambda ()
+                       (unwind-protect
+                            (loop for event = (m:receive)
+                                  do (ignore-errors (emit-event sink event))
+                                  until (eq :done (getf event :type)))
+                         (bt:signal-semaphore drained)))
+                     :name "nyaa-sink")))
+    gate))
+
+(defun gate-deliver (gate event)
+  (if (gate-relay gate)
+      (m:send (gate-relay gate) event)
+      (emit-event (gate-sink gate) event)))
 
 (defun gate-emitter (gate)
   (lambda (event)
     (bt:with-lock-held ((gate-lock gate))
       (unless (gate-closed gate)
-        (emit-event (gate-sink gate) event)))))
+        (gate-deliver gate event)))))
 
-(defun close-gate (gate ref result)
-  "End the turn: emit its :DONE, then drop whatever the worker still sends."
+(defun close-gate (gate ref result &optional wait)
+  "End the turn: emit its :DONE, then drop whatever the worker still sends.
+WAIT, in seconds, bounds how long to wait for the sink to have seen it."
   (bt:with-lock-held ((gate-lock gate))
     (unless (gate-closed gate)
       (setf (gate-closed gate) t)
-      (emit-event (gate-sink gate) (done ref (done-reason result))))))
+      (gate-deliver gate (done ref (done-reason result)))))
+  (when (and wait (gate-relay gate))
+    (bt:wait-on-semaphore (gate-drained gate) :timeout (max 0 wait))))
 
 (defun done-reason (result)
   (if (tool-error-p result)
@@ -402,17 +427,24 @@ takes (request connect) and answers (values stream status); READER takes
 (request stream status) and answers the reply. A request with a :STREAM sink
 ends it with exactly one :DONE."
   (let* ((sink (getf request :stream))
-         (gate (make-sink-gate :sink sink))
+         (gate (start-relay (make-sink-gate :sink sink)))
+         (timeout (getf request :timeout +default-tool-timeout+))
+         (started (get-internal-real-time))
          (request (if sink
                       (list* :stream (gate-emitter gate) request)
                       request)))
     (multiple-value-bind (result timed-out)
         (call-with-deadline
-         (getf request :timeout +default-tool-timeout+)
+         timeout
          (lambda (connect) (attempt-completion request opener reader connect))
          :name "nyaa-completion")
       (let ((result (if timed-out (fail :timeout) result)))
-        (when sink (close-gate gate (getf request :ref) result))
+        (when sink
+          (close-gate gate (getf request :ref) result
+                      (unless timed-out
+                        (- (/ timeout 1000)
+                           (/ (- (get-internal-real-time) started)
+                              internal-time-units-per-second)))))
         result))))
 
 (defun attempt-completion (request opener reader connect)
