@@ -231,7 +231,8 @@ object)."
           (multiple-value-bind (message received) (m:receive :timeout 5)
             (is-true received)
             (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
-          (is-true (eventually (lambda () (null (stream-threads))))))))))
+          (is-true (eventually (lambda () (null (stream-threads)))))
+          (is (null (mapcar #'bt:thread-name (stream-threads)))))))))
 
 (test steer-reaches-the-next-request
   (let ((n 0))
