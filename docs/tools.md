@@ -76,6 +76,11 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 
 `tool-error-p` and `tool-error` take a result apart.
 
+`invoke-tool` folds a call that fails below the tool itself -- its process
+already exited, or the call would have deadlocked -- into the same
+vocabulary: `:timeout`, `:unavailable` for the tool's process being gone, and
+`(:error detail)` for anything else, `detail` a printed string.
+
 ## Discovery
 
 `(tools)` scans registration props for `:kind :tool`. Props are a snapshot taken

@@ -43,6 +43,21 @@ aborts the caller while the tool runs on, and the tool's own (:error
 through, each of which needs that margin over the one it waits on."
   (+ (* 5 hops) (/ (getf args :timeout +default-tool-timeout+) 1000)))
 
+(defun %call-result (reply status)
+  "M:CALL's two values, folded into nyaa's own (:ok ...) | (:error ...)
+vocabulary. STATUS is nil when the tool answered; otherwise the call itself
+failed below the tool -- its process exited, the deadline lapsed, or the
+call would have deadlocked -- and REPLY carries nothing useful. A process
+or condition inside STATUS is not fit to print readably, so a shape M:CALL
+doesn't already give a plain reason for is stringified."
+  (if (null status)
+      reply
+      (case (and (consp status) (first status))
+        (:down (fail :unavailable))
+        (t (if (eq status :timeout)
+               (fail :timeout)
+               (fail (list :error (princ-to-string status))))))))
+
 (defun invoke-tool (name &rest args)
   "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason)."
   (multiple-value-bind (process props) (%tool-process name)
@@ -50,9 +65,10 @@ through, each of which needs that margin over the one it waits on."
         (coerce-args (tool-schema props) args)
       (if problem
           (bad-request "~a" problem)
-          (m:call process
-                  (list* :invoke coerced)
-                  :timeout (%caller-timeout coerced))))))
+          (multiple-value-call #'%call-result
+            (m:call process
+                    (list* :invoke coerced)
+                    :timeout (%caller-timeout coerced)))))))
 
 ;;; --- results ---------------------------------------------------------
 

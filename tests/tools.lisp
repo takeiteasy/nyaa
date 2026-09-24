@@ -51,13 +51,6 @@
 (defun result-value (result key)
   (getf (second result) key))
 
-(defun call-refused-p (reply status)
-  "True for either shape a queued call can fail with when tool-repl is torn
-down mid-eval: nyaa's own (:error ...) result, settled by the session, or a
-bare M:CALL failure (STATUS non-nil), settled by tool-repl's own process
-exiting first -- both mean the caller was not left hanging."
-  (or (nyaa:tool-error-p reply) (not (null status))))
-
 (defmacro tool-thread (&body body)
   ;; A plain BT:MAKE-THREAD does not inherit dynamic bindings, and
   ;; M:*REGISTRY* is one WITH-TOOLS establishes with a LET -- so a thread
@@ -100,6 +93,23 @@ last resort with no dedicated OS mechanism behind it."
         while (funcall predicate)
         do (sleep interval))
   (not (funcall predicate)))
+
+;;; --- M:CALL failures folded into the result vocabulary (~takeiteasy/nyaa#106)
+
+(test call-result-passes-through-a-real-reply
+  (is (equal '(:ok (:value "1")) (nyaa::%call-result '(:ok (:value "1")) nil))))
+
+(test call-result-folds-a-timeout
+  (is (equal '(:error :timeout) (nyaa::%call-result nil :timeout))))
+
+(test call-result-folds-a-down-status-to-unavailable
+  (is (equal '(:error :unavailable) (nyaa::%call-result nil (list :down :shutdown)))))
+
+(test call-result-stringifies-a-deadlock-status
+  (let ((result (nyaa::%call-result nil (list :deadlock (list :some-process)))))
+    (is (eq :error (first result)))
+    (is (eq :error (first (second result))))
+    (is (stringp (second (second result))))))
 
 ;;; --- the convention --------------------------------------------------
 
@@ -664,20 +674,20 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
 (test unmounting-tool-repl-answers-a-queued-call-promptly
   ;; Whichever settles the caller's cell first -- the session replying
   ;; (:error :unavailable), or tool-repl's own process exiting under it as
-  ;; an ordinary M:CALL failure -- the caller must not be left waiting out
-  ;; its full timeout.
+  ;; an ordinary M:CALL failure, folded by INVOKE-TOOL into the same shape
+  ;; (~takeiteasy/nyaa#106) -- the caller must not be left waiting out its
+  ;; full timeout, and either way sees a proper (:error ...) result.
   (with-tools
     (let* ((result nil)
            (thread (tool-thread
-                    (setf result (multiple-value-list
-                                  (tool :tool-repl :id "a" :form "(sleep 5)"))))))
+                    (setf result (tool :tool-repl :id "a" :form "(sleep 5)")))))
       (sleep 0.2) ;; let the session start its eval first
       (let ((start (get-internal-real-time)))
         (m:unmount *context* :tool-repl)
         (bt:join-thread thread)
         (is (< (- (get-internal-real-time) start)
                (* 2 internal-time-units-per-second))))
-      (is-true (apply #'call-refused-p result)))))
+      (is-true (nyaa:tool-error-p result)))))
 
 (test unmounting-tool-repl-refuses-an-eval-queued-behind-the-live-one
   ;; The second call sits in the session's mailbox behind the first, so it
@@ -686,15 +696,11 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   (with-tools
     (let* ((first-result nil) (second-result nil)
            (first (tool-thread
-                   (setf first-result
-                         (multiple-value-list
-                          (tool :tool-repl :id "a" :form "(sleep 5)")))))
+                   (setf first-result (tool :tool-repl :id "a" :form "(sleep 5)"))))
            (second (progn
                      (sleep 0.1) ;; let the first eval actually start
                      (tool-thread
-                      (setf second-result
-                            (multiple-value-list
-                             (tool :tool-repl :id "a" :form "1")))))))
+                      (setf second-result (tool :tool-repl :id "a" :form "1"))))))
       (sleep 0.1) ;; let the second cast actually queue behind the first
       (let ((start (get-internal-real-time)))
         (m:unmount *context* :tool-repl)
@@ -702,8 +708,8 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
         (bt:join-thread second)
         (is (< (- (get-internal-real-time) start)
                (* 2 internal-time-units-per-second))))
-      (is-true (apply #'call-refused-p first-result))
-      (is-true (apply #'call-refused-p second-result)))))
+      (is-true (nyaa:tool-error-p first-result))
+      (is-true (nyaa:tool-error-p second-result)))))
 
 ;;; --- elision and REPL history (~takeiteasy/nyaa#26) ---------------------
 
