@@ -41,6 +41,7 @@
                  :stream (funcall connect url)
                  :close t
                  :redirect nil
+                 :force-binary t
                  :external-format-out :utf-8
                  ;; Content-Type is drakma's own argument. Leaving it in
                  ;; ADDITIONAL-HEADERS too would send it twice; dropping it
@@ -57,15 +58,26 @@
             :headers (loop for (name . value) in response-headers
                            collect (string-downcase (string name))
                            collect value)
-            :body (response-string payload)))
+            :body (decode-body payload (cdr (assoc :content-type response-headers)))))
     (usocket:socket-error () (fail :unavailable))
     (error (e) (fail (list :error (princ-to-string e))))))
 
-;; FIXME: drakma decodes a text/* body with no charset as Latin-1
-;; (~takeiteasy/nyaa#137).
-(defun response-string (payload)
-  "Drakma decodes textual content types to a string and leaves everything
-else as octets."
-  (if (stringp payload)
-      payload
-      (flexi-streams:octets-to-string payload :external-format :utf-8)))
+(defun declared-charset (content-type)
+  "The external format CONTENT-TYPE's charset parameter names, or nil when it
+names none or one flexi-streams does not know."
+  (a:when-let* ((start (and content-type (search "charset=" content-type :test #'char-equal)))
+                (name (string-trim " \"'" (subseq content-type (+ start 8)
+                                                  (position #\; content-type :start start)))))
+    (find-symbol (string-upcase name) :keyword)))
+
+(defun decode-body (octets content-type)
+  "OCTETS as text: in the charset CONTENT-TYPE declares, else UTF-8, else
+Latin-1 when they are not valid UTF-8. Drakma is asked for octets because
+it would otherwise decode a text type with no charset as Latin-1."
+  (flet ((decode (format)
+           (ignore-errors (flexi-streams:octets-to-string octets :external-format format))))
+    (or (and (null octets) "")
+        (a:when-let ((format (declared-charset content-type)))
+          (decode format))
+        (decode :utf-8)
+        (decode :latin-1))))

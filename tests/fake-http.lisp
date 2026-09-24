@@ -78,6 +78,9 @@
         ((and (consp answer) (eq (first answer) :stall))
          (write-fake-bytes stream (second answer))
          (loop while (funcall (third answer)) do (sleep 0.02)))
+        ((and (consp answer) (eq (first answer) :octets))
+         (destructuring-bind (code headers payload) (rest answer)
+           (write-fake-payload stream code headers payload)))
         (t (destructuring-bind (code headers body) answer
              (write-fake-response stream code headers body)))))))
 
@@ -89,18 +92,23 @@
   (finish-output stream))
 
 (defun write-fake-response (stream code headers body)
-  (let ((payload (flexi-streams:string-to-octets body :external-format :utf-8)))
-    (write-fake-bytes
-     stream
-     (with-output-to-string (out)
-       (format out "HTTP/1.1 ~d Reason~c~c" code #\Return #\Newline)
-       (loop for (name value) on headers by #'cddr
-             do (format out "~a: ~a~c~c" name value #\Return #\Newline))
-       (format out "Content-Length: ~d~c~c" (length payload) #\Return #\Newline)
-       (format out "Connection: close~c~c~c~c"
-               #\Return #\Newline #\Return #\Newline)))
-    (write-sequence payload stream)
-    (finish-output stream)))
+  (write-fake-payload
+   stream code headers
+   (flexi-streams:string-to-octets body :external-format :utf-8)))
+
+(defun write-fake-payload (stream code headers payload)
+  "A response whose body is the octets PAYLOAD, sent as they are."
+  (write-fake-bytes
+   stream
+   (with-output-to-string (out)
+     (format out "HTTP/1.1 ~d Reason~c~c" code #\Return #\Newline)
+     (loop for (name value) on headers by #'cddr
+           do (format out "~a: ~a~c~c" name value #\Return #\Newline))
+     (format out "Content-Length: ~d~c~c" (length payload) #\Return #\Newline)
+     (format out "Connection: close~c~c~c~c"
+             #\Return #\Newline #\Return #\Newline)))
+  (write-sequence payload stream)
+  (finish-output stream))
 
 (defun read-fake-line (stream)
   (let ((line (make-array 0 :element-type '(unsigned-byte 8)

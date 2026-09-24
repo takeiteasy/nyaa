@@ -139,7 +139,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 |---|---|---|
 | `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
-| `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. |
+| `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the response body is decoded as text ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. An id idle past the mount's `:idle` (600 s by default) is dropped. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
@@ -195,6 +195,10 @@ stops) is dropped, killing its worker the same way an unmounted `tool-repl`
 does. An eval still running past `:idle` keeps its session; the check is
 against time since the last one finished, not time since the session
 started.
+
+<a id="tool-http-text"></a>
+`tool-http` decodes a response body in the charset its `Content-Type`
+declares, else as UTF-8, else as Latin-1 when the bytes are not valid UTF-8.
 
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
@@ -293,8 +297,8 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- `tool-http` decodes a `text/*` response with no `charset` as Latin-1, so a
-  UTF-8 body arrives garbled ([#137](https://todo.sr.ht/~takeiteasy/nyaa/137)).
+- `tool-http` returns a non-text body as garbled text rather than an error
+  ([#138](https://todo.sr.ht/~takeiteasy/nyaa/138)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

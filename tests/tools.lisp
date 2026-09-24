@@ -477,6 +477,60 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
                         (getf (first (fake-http-requests server)) :body))))
         (stop-fake-http server)))))
 
+(defun http-body-of (answer)
+  "The :body tool-http returns for a server that answers ANSWER."
+  (let ((server (start-fake-http (lambda (&rest request)
+                                   (declare (ignore request))
+                                   answer))))
+    (unwind-protect
+         (result-value (tool :tool-http :url (format nil "~a/any" (fake-http-url server)))
+                       :body)
+      (stop-fake-http server))))
+
+(defun octets (&rest bytes)
+  (coerce bytes '(vector (unsigned-byte 8))))
+
+(defun utf-8-octets (text)
+  (flexi-streams:string-to-octets text :external-format :utf-8))
+
+(test http-decodes-a-text-response-with-no-charset-as-utf-8
+  (with-tools
+    (is (equal +non-ascii-text+
+               (http-body-of (list :octets 200 '("Content-Type" "text/plain")
+                                   (utf-8-octets +non-ascii-text+)))))))
+
+(test http-decodes-a-response-in-its-declared-charset
+  (with-tools
+    (is (equal (format nil "h~cllo" (code-char #xe9))
+               (http-body-of (list :octets 200
+                                   '("Content-Type" "text/plain; charset=ISO-8859-1")
+                                   (octets 104 233 108 108 111)))))))
+
+(test http-falls-back-to-latin-1-when-a-body-is-not-utf-8
+  (with-tools
+    (is (equal (format nil "h~cllo" (code-char #xe9))
+               (http-body-of (list :octets 200 '("Content-Type" "text/plain")
+                                   (octets 104 233 108 108 111)))))))
+
+(test http-ignores-a-charset-it-does-not-know
+  (with-tools
+    (is (equal +non-ascii-text+
+               (http-body-of (list :octets 200
+                                   '("Content-Type" "text/plain; charset=x-no-such")
+                                   (utf-8-octets +non-ascii-text+)))))))
+
+(test http-decodes-an-empty-body-to-an-empty-string
+  (with-tools
+    (is (equal "" (http-body-of (list 204 '() ""))))))
+
+(test declared-charset-reads-the-charset-parameter
+  (is (eq :utf-8 (nyaa::declared-charset "text/plain; charset=UTF-8")))
+  (is (eq :utf-8 (nyaa::declared-charset "text/plain; charset=\"utf-8\"; format=flowed")))
+  (is (eq :iso-8859-1 (nyaa::declared-charset "text/html;charset=iso-8859-1")))
+  (is (null (nyaa::declared-charset "text/plain")))
+  (is (null (nyaa::declared-charset nil)))
+  (is (null (nyaa::declared-charset "text/plain; charset=x-no-such"))))
+
 (test http-honours-a-caller-supplied-content-type
   (with-tools
     (let ((server (start-fake-http #'echo-handler)))
