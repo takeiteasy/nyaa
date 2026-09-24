@@ -64,6 +64,16 @@ one definition serves a local backend, a remote host and a proxy.
             :model "qwen2.5-coder")
 ```
 
+## Concurrency
+
+A provider layers each request on its own process, then hands the call to
+its protocol, which answers the caller directly and holds no thread of the
+provider's. A provider with a `:rewrite-response` quirk or a `:max-in-flight`
+cap instead waits on its protocol from a [pooled](protocols.md#worker-pools)
+job, so it can rewrite the reply or count the completion; only then does
+stopping the provider cancel what it has in flight. Otherwise the protocol's
+own stop, or the caller's `:cancel`, does.
+
 ## Credentials
 
 Keys are BYOK. A key comes from the environment variable the declaration names,
@@ -135,5 +145,3 @@ OpenAI protocol's own live tests use.)
   rather than refused, since a protocol takes only what it knows.
 - Auth is BYOK. OAuth and other interactive flows are
   [#24](https://todo.sr.ht/~takeiteasy/nyaa/24).
-- A provider holds a pooled thread for the whole of its protocol's turn
-  ([#126](https://todo.sr.ht/~takeiteasy/nyaa/126)).

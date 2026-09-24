@@ -194,7 +194,7 @@ tier never waits on itself:
 |---|---|---|
 | `:tool` | an [agent](agent.md)'s tool calls | the tool |
 | `:turn` | an agent's model turns | a provider or protocol |
-| `:provider` | a provider's completions | its protocol |
+| `:provider` | a provider's completions, when it rewrites or caps them | its protocol |
 | `:protocol` | a protocol's completions | the backend |
 
 `*pool-sizes*` caps each tier's threads (`(:tool 32 :turn 32 :provider 64

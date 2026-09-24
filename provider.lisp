@@ -175,12 +175,10 @@ appending the provider's keys after the caller's is what lets the caller win."
 
 (defmethod completion-tier ((service provider)) :provider)
 
-;;; TODO: the job only waits on the protocol's. Upgrade path: with no
-;;; :REWRITE-RESPONSE, hand the reply cell to the protocol instead. Tracked in
-;;; ~takeiteasy/nyaa#126.
 (defun provider-complete (service request)
-  "Layer SERVICE's data under REQUEST and hand the call to its protocol from a
-pool job, so this service is free to take the next completion meanwhile."
+  "Layer SERVICE's data under REQUEST and hand the call to its protocol. With
+no :REWRITE-RESPONSE and no :MAX-IN-FLIGHT the call is forwarded whole, and
+the protocol answers the caller; otherwise a pool job waits on it."
   (a:if-let ((problem (provider-key-problem service)))
     (bad-request "~a" problem)
     (multiple-value-bind (process props)
@@ -192,15 +190,20 @@ pool job, so this service is free to take the next completion meanwhile."
         ((not (eq (getf props :kind) :protocol))
          (bad-request "~(~s~) is not a protocol" (provider-protocol service)))
         (t
-         (defer-completion
-          service (apply-quirk service :rewrite-request (layered-request service request))
-          ;; Carries the job's own :cancel and the :timeout left to it.
-          (lambda (layered)
-            (apply-quirk
-             service :rewrite-response
-             (multiple-value-call #'%call-result
-               (m:call process (list* :complete layered)
-                       :timeout (%caller-timeout layered)))))))))))
+         (let ((layered (apply-quirk service :rewrite-request
+                                     (layered-request service request))))
+           (if (or (getf (provider-declaration service) :rewrite-response)
+                   (host-max-in-flight service))
+               (defer-completion
+                service layered
+                ;; Carries the job's own :cancel and the :timeout left to it.
+                (lambda (layered)
+                  (apply-quirk
+                   service :rewrite-response
+                   (multiple-value-call #'%call-result
+                     (m:call process (list* :complete layered)
+                             :timeout (%caller-timeout layered))))))
+               (m:forward process (list* :complete layered)))))))))
 
 (defun apply-quirk (service hook value)
   "VALUE through SERVICE's HOOK, a quirk the declaration names, or unchanged."

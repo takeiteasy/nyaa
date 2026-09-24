@@ -43,6 +43,14 @@
   :protocol :protocol-echo
   :base-url "http://127.0.0.1:1")
 
+(nyaa:define-provider :test-rewriting
+  :protocol :protocol-echo
+  :base-url "http://127.0.0.1:1"
+  :rewrite-response (lambda (result)
+                      (if (eq :ok (first result))
+                          (list :ok (list* :rewritten t (second result)))
+                          result)))
+
 (nyaa:define-provider :test-stacked
   :protocol :provider-test-echo
   :base-url "http://127.0.0.1:1")
@@ -398,3 +406,23 @@ is the one MAKE-INSTANCE takes."
    (lambda (context)
      (m:mount context 'provider-test-stacked)
      (is (eq :bad-request (first (nyaa:tool-error (turn :provider-test-stacked))))))))
+
+(test a-provider-forwards-without-holding-a-pooled-thread
+  (call-with-echo-provider
+   (lambda (context)
+     (declare (ignore context))
+     (let* ((spawned (getf (nyaa:pool-stats :provider) :spawned))
+            (start (get-internal-real-time))
+            (results (concurrently 3 (lambda () (turn :provider-test-echo :delay 0.4)))))
+       (is (every (lambda (result) (eq :ok (first result))) results))
+       (is (< (elapsed-since start) 1))
+       (is (= spawned (getf (nyaa:pool-stats :provider) :spawned)))
+       (is (zerop (getf (nyaa:pool-stats :provider) :running)))))))
+
+(test a-provider-that-rewrites-the-response-still-does
+  (call-with-echo-provider
+   (lambda (context)
+     (m:mount context 'provider-test-rewriting)
+     (let ((result (turn :provider-test-rewriting)))
+       (is (eq :ok (first result)))
+       (is-true (getf (second result) :rewritten))))))
