@@ -158,3 +158,19 @@
         (is (eq :timeout (nyaa:tool-error result)))
         (is (not (sandbox-file-exists-p "never.txt")))))
     :sleep-tool t))
+
+(test a-cancelled-plan-refuses-its-remaining-steps
+  (call-with-plan '(:tool-fs :tool-sleep) 16
+                  (lambda ()
+                    (let ((token (nyaa:make-cancel-token)))
+                      (bt:make-thread (lambda () (sleep 0.2) (nyaa:cancel token)))
+                      (let ((result (nyaa:invoke-tool
+                                     :tool-plan :cancel token
+                                     :steps (list (list :tool "tool-sleep" :args (list :ms 600))
+                                                  (list :tool "tool-fs"
+                                                        :args (list :op :write :path "after.txt"
+                                                                    :data "x"))))))
+                        (is (eql 2 (getf (nyaa:tool-error result) :step)))
+                        (is (eq :cancelled (getf (nyaa:tool-error result) :reason)))
+                        (is (not (sandbox-file-exists-p "after.txt"))))))
+                  :sleep-tool t))

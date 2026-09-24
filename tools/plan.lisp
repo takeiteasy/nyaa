@@ -52,14 +52,14 @@ substitutes an earlier step's result")))
     ;; whichever thread mounted it. Rebind it here, as the agent loop does
     ;; before its own calls back into INVOKE-TOOL.
     (let ((m:*registry* (m:service-registry service)))
-      (run-plan service steps timeout))))
+      (run-plan service steps timeout cancel-token))))
 
 ;;; --- validation, before any step runs ---------------------------------
 
-(defun run-plan (service steps timeout-ms)
+(defun run-plan (service steps timeout-ms &optional cancel)
   (a:if-let (problem (validate-plan service steps))
     (bad-request "~a" problem)
-    (execute-plan service steps timeout-ms)))
+    (execute-plan service steps timeout-ms cancel)))
 
 (defun validate-plan (service steps)
   "NIL when STEPS may run as given, or a message naming the problem."
@@ -126,7 +126,9 @@ before this one, or a message naming the first problem found."
 
 ;;; --- execution ---------------------------------------------------------
 
-(defun execute-plan (service steps timeout-ms)
+(defun execute-plan (service steps timeout-ms cancel)
+  "Run STEPS in order, handing each CANCEL, so a cancelled plan stops the
+step in flight and refuses the rest."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* timeout-ms internal-time-units-per-second) 1000)))
         (results (make-hash-table :test #'equal))
@@ -138,7 +140,8 @@ before this one, or a message naming the first problem found."
       (let* ((as (getf step :as))
              (tool-name (getf step :tool))
              (args (resolve-refs (getf step :args) results))
-             (result (apply #'invoke-tool (lisp-tool-name tool-name) args)))
+             (result (apply #'invoke-tool (lisp-tool-name tool-name)
+                            :cancel cancel args)))
         (when (tool-error-p result)
           (return-from execute-plan
             (fail (list :step n :tool tool-name :reason (tool-error result)

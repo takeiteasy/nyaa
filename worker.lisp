@@ -136,9 +136,10 @@ reuses is never reaped through them."
   (setf *boot* (list :boot))
   (bt:with-lock-held (*live-workers-lock*) (setf *live-workers* '())))
 
-(defun worker-eval (worker source timeout-ms)
+(defun worker-eval (worker source timeout-ms &optional cancel)
   "Evaluate SOURCE in WORKER. Returns a tool result; a worker that missed
-its deadline or died is dead afterwards and the caller must not reuse it."
+its deadline, was cancelled through CANCEL, or died is dead afterwards and
+the caller must not reuse it."
   (if (not (worker-alive-p worker))
       (fail :unavailable)
       (let ((stream (uiop:process-info-input (worker-process worker))))
@@ -146,12 +147,15 @@ its deadline or died is dead afterwards and the caller must not reuse it."
                              (terpri stream)
                              (finish-output stream))
           (error () (return-from worker-eval (fail :unavailable))))
-        (interpret-reply (read-reply worker timeout-ms)))))
+        (interpret-reply (read-reply worker timeout-ms cancel)))))
 
-(defun read-reply (worker timeout-ms)
-  "One reply form, or :TIMEOUT, or NIL on EOF or a malformed reply. A lapsed
-deadline kills the worker, which closes the pipe and ends the reader."
+(defun read-reply (worker timeout-ms &optional cancel)
+  "One reply form, :TIMEOUT or :CANCELLED, or NIL on EOF or a malformed
+reply. A lapsed deadline or a cancel of CANCEL kills the worker, which closes
+the pipe and ends the reader. A cancel only wakes this wait, so the kill
+always comes from here."
   (let ((reply nil)
+        (read nil)
         (done (bt:make-semaphore))
         (stream (uiop:process-info-output (worker-process worker))))
     (bt:make-thread
@@ -159,12 +163,16 @@ deadline kills the worker, which closes the pipe and ends the reader."
        (unwind-protect
             (setf reply (handler-case (let ((*read-eval* nil))
                                         (read stream nil nil))
-                          (error () nil)))
+                          (error () nil))
+                  read t)
          (bt:signal-semaphore done)))
      :name "nyaa-worker-reply")
-    (if (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
-        reply
-        (progn (kill-worker worker) :timeout))))
+    (when cancel
+      (on-cancel cancel (lambda () (bt:signal-semaphore done))))
+    (bt:wait-on-semaphore done :timeout (/ timeout-ms 1000))
+    (cond (read reply)
+          (t (kill-worker worker)
+             (if (and cancel (cancelled-p cancel)) :cancelled :timeout)))))
 
 (defun interpret-reply (reply)
   (case (and (consp reply) (first reply))
@@ -173,4 +181,4 @@ deadline kills the worker, which closes the pipe and ends the reader."
                :out (or (third reply) "") :elided (eq (fourth reply) :elided))))
     (:error (fail (list :error (second reply))))
     (:reader-error (bad-request "~a" (second reply)))
-    (t (if (eq reply :timeout) (fail :timeout) (fail :unavailable)))))
+    (t (if (member reply '(:timeout :cancelled)) (fail reply) (fail :unavailable)))))

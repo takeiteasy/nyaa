@@ -17,5 +17,5 @@
       (if (null worker)
           (fail :unavailable)
           (unwind-protect
-               (worker-eval worker form timeout)
+               (worker-eval worker form timeout cancel-token)
             (kill-worker worker))))))

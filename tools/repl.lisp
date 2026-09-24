@@ -9,7 +9,8 @@
 ;;; serialises them.
 ;;;
 ;;; Sessions start on first use; :pristine replaces one under the same id,
-;;; and so does a lapsed deadline, which kills the worker it belongs to. A
+;;; and so does a lapsed deadline or a cancel, which kills the worker it
+;;; belongs to. A
 ;;; worker inherited through a saved core is stale: its session is reported
 ;;; lost once and starts empty on the next call.
 ;;;
@@ -71,18 +72,21 @@ has been idle if so."
   ;; session crashes and the cell is settled (:down ...) by the M:DEFER-REPLY
   ;; :UNTIL hook tool-repl installed -- no reply is dropped either way.
   (when (and (consp message) (eq (first message) :eval))
-    (destructuring-bind (cell form pristine timeout) (rest message)
+    (destructuring-bind (cell form pristine timeout cancel) (rest message)
       (let ((box (session-box service)))
-        (unwind-protect (m:reply cell (%session-eval service form pristine timeout))
+        (unwind-protect (m:reply cell (%session-eval service form pristine timeout cancel))
           ;; Unconditional, so a signalling %SESSION-EVAL still marks the
           ;; session idle rather than pinning PENDING above zero forever.
           (%box-end-eval box)))))
   nil)
 
-(defun %session-eval (service form pristine timeout)
+(defun %session-eval (service form pristine timeout cancel)
   "Evaluate FORM in SERVICE's worker, started lazily and kept in its box
-across calls."
+across calls. A cancel of CANCEL kills the worker, as a lapsed deadline does."
   (let ((box (session-box service)))
+    ;; Queued behind another eval on this id while the agent gave up on it.
+    (when (and cancel (cancelled-p cancel))
+      (return-from %session-eval (fail :cancelled)))
     (when pristine
       (kill-worker (worker-box-worker box))
       (setf (worker-box-worker box) nil))
@@ -104,10 +108,10 @@ across calls."
             (setf (worker-box-worker box) nil)
             (fail (list :error "session lost to an image relaunch; it starts empty on the next call")))
            (t
-            (let ((result (worker-eval worker form timeout)))
-              ;; A worker that missed its deadline was killed; forget it so
-              ;; the id starts empty rather than answering :unavailable for
-              ;; ever.
+            (let ((result (worker-eval worker form timeout cancel)))
+              ;; A worker that missed its deadline or was cancelled was
+              ;; killed; forget it so the id starts empty rather than
+              ;; answering :unavailable for ever.
               (unless (worker-alive-p worker)
                 (setf (worker-box-worker box) nil))
               result))))))))
@@ -138,7 +142,7 @@ tool-repl itself stops."))
           (let ((session (repl-entry-session entry)))
             (%box-begin-eval (repl-entry-box entry))
             (m:cast session (list :eval (m:defer-reply :until session)
-                                   form pristine timeout)))))))
+                                   form pristine timeout cancel-token)))))))
 
 (defun repl-entry-for (service id)
   "ID's entry, mounted on first use or after its previous session died.

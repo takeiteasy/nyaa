@@ -41,6 +41,24 @@
   (sleep 0.5)
   (nyaa::ok :slept t))
 
+;;; Holds a call until it is cancelled, or 3s pass, and notes the cancel.
+
+(defvar *tool-wait-cancelled* nil)
+
+(m:defservice tool-wait () () (:name :tool-wait))
+
+(defmethod m:metadata ((service tool-wait))
+  (list :kind :tool :name :tool-wait :trust :agent
+        :summary "Wait until cancelled" :params nil))
+
+(nyaa::define-tool-handler tool-wait (service args cancel)
+  args
+  (let ((woken (bt:make-semaphore)))
+    (nyaa::on-cancel cancel (lambda () (bt:signal-semaphore woken)))
+    (if (bt:wait-on-semaphore woken :timeout 3)
+        (progn (setf *tool-wait-cancelled* t) (nyaa::fail :cancelled))
+        (nyaa::ok :waited t))))
+
 ;;; --- the harness --------------------------------------------------------
 
 (defun call-with-agent (answer tool-classes body)
@@ -382,6 +400,20 @@ sink's events, oldest first."
               (is (eq :tool (getf (nth 2 messages) :role)))
               (is (search "slept" (nyaa:content-text (getf (nth 2 messages) :content))))
               (is (equal "change of plan" (nyaa:content-text (getf (nth 3 messages) :content)))))))))))
+
+(test cancel-stops-a-dispatched-tool-call
+  (setf *tool-wait-cancelled* nil)
+  (with-agent ((tool-call-reply "c1" "tool-wait" "{}") 'tool-wait)
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :tools '(:tool-wait))))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (is-true (eventually
+                  (lambda ()
+                    (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls))))
+        (m:cast child '(:cancel))
+        (is-true (nth-value 1 (m:receive :timeout 5)))
+        (is-true (eventually (lambda () *tool-wait-cancelled*)))))))
 
 (test cancel-mid-tool-call-closes-the-call
   ;; A sink makes the request stream, so the backend answers in SSE.

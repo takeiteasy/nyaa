@@ -18,7 +18,7 @@ A tool registers under `:tool-<name>`, and its `metadata` plist carries
               (:timeout (integer 1) :default +default-tool-timeout+
                :doc "kill the command after this many milliseconds")))
   (:invoke (cmd timeout)
-    (run-command cmd timeout)))
+    (run-command cmd timeout cancel-token)))
 ```
 
 `NAME` is given once, as the leading keyword, and is used for the class, the
@@ -32,8 +32,9 @@ tool's `:invoke` clause reads its arguments already coerced — `(:invoke (cmd
 timeout) ...)` binds `cmd` and `timeout` from the plist, in their declared
 types — and it renders to the JSON Schema a model needs for tool calling.
 `tool-schema` reads it out of the metadata. `:slots` passes extra slots
-through to the generated class, as `tool-fs`'s sandbox root does; the
-anaphoric `service` is bound inside `:invoke` for a tool that needs it.
+through to the generated class, as `tool-fs`'s sandbox root does. Inside
+`:invoke`, the anaphoric `service` is the tool itself and `cancel-token` is
+the call's [cancel token](#cancelling-a-call), or nil.
 
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
@@ -70,6 +71,7 @@ Meow intercepts the heads `%update-config`, `%effects` and `%timer-fire` before
 |---|---|
 | `(:bad-request msg)` | The invoke arguments are malformed, or will not coerce. |
 | `:timeout` | The deadline lapsed. |
+| `:cancelled` | The call's cancel token was cancelled. |
 | `:unavailable` | The far end could not be reached. |
 | `(:error detail)` | Anything else. |
 | `(:forbidden msg)` | `tool-fs`: the path escapes the sandbox. `tool-self`: the op is not in `:enable`. |
@@ -107,6 +109,26 @@ model-supplied `:timeout "15000"` bounds the wait exactly as `15000` does.
 `(:error :timeout)` is what a caller sees. Calling a tool with a bare `m:call`
 instead would abort the *caller* after meow's 5-second default while the tool
 kept running.
+
+## Cancelling a call
+
+`:cancel` is a reserved argument: a cancel token, as
+[`complete`](protocols.md#cancelling) takes, handed to the tool rather than
+coerced against its schema.
+
+```lisp
+(let ((token (nyaa:make-cancel-token)))
+  (bt:make-thread (lambda () (sleep 1) (nyaa:cancel token)))
+  (nyaa:invoke-tool :tool-shell :cmd "sleep 30" :cancel token))
+; => (:error :cancelled)
+```
+
+Every tool refuses a call whose token is already cancelled, without running
+it -- a call queued behind another on the same tool included. Cancelling one
+already running stops its work, as a lapsed `:timeout` does, in `tool-shell`
+(the whole process group), `tool-http` (the connection), `tool-eval` and
+`tool-repl` (the worker, so that `:id` starts empty) and `tool-plan` (the step
+in flight, and none after it). The other tools finish what they started.
 
 ## The standard tools
 
@@ -267,6 +289,9 @@ cannot surface through either. Seeing a value stays `tool-eval`, `tool-repl`
 or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
+
+- `tool-self` finishes an `:eval` or `:define` already running when its call
+  is cancelled ([#123](https://todo.sr.ht/~takeiteasy/nyaa/123)).
 
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).

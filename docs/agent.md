@@ -125,10 +125,20 @@ way. `:stop-reason` is one of:
 `:cancel` and `:deadline` also cancel the model turn in flight, closing its
 connection rather than waiting out `:turn-timeout`.
 
-A `:cancelled` or `:timeout` run closes each tool call still awaiting a
-result with an `{"error":"interrupted"}` `:tool` message, so `:messages` is
-always well-formed to send back to a model. Each closed call also emits a
-`:tool-result` event carrying `(:error :interrupted)`.
+A `:cancelled` or `:timeout` run [cancels](#cancelling-tool-calls) each tool
+call still awaiting a result and closes it with an `{"error":"interrupted"}`
+`:tool` message, so `:messages` is always well-formed to send back to a
+model. Each closed call also emits a `:tool-result` event carrying `(:error
+:interrupted)`.
+
+### Cancelling tool calls
+
+Each call is dispatched with a [cancel token](tools.md#cancelling-a-call) of
+its own, cancelled when the call is closed unanswered. A call still queued
+behind another on the same tool never runs; one already running stops as its
+tool allows -- a shell command, HTTP exchange, worker or plan step is
+abandoned, and a sub-agent is sent `:cancel`. A reply that arrives after its
+call was closed is dropped, even when the next turn reuses its id.
 
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
 ends the run as that same `(:error reason)`, unwrapped.
@@ -161,8 +171,9 @@ With `:sub-agents t`, the model gets a reserved tool, `agent-task`, taking one
 `:task` string. Calling it delegates a child agent — under meow's own agent
 supervisor, via `m:delegate` — with this agent's model, allow-list and
 `:vault`, runs it to completion, and returns its final answer as the tool
-result. A child does not itself get `:sub-agents`, so delegation does not
-nest by default, and it is never registered under a name, so a steer
+result. The child's `:ref`, echoed on its events, is a cons of an internal
+step counter and the call id. A child does not itself get `:sub-agents`, so
+delegation does not nest by default, and it is never registered under a name, so a steer
 recorded against it carries no `:agent` (see [the vault](vault.md)).
 
 Reaching the parent's `handle` from a delegated child needs
@@ -194,6 +205,6 @@ not-running agent, ready for `(:run :continue t)`.
   concurrency cap ([#41](https://todo.sr.ht/~takeiteasy/nyaa/41)).
 - No retry or backoff on a transient backend error — the run ends on the
   first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).
-- `:cancel` and `:deadline` stop the model turn in flight but not the tool
-  calls already dispatched, which run to their own timeouts
-  ([#111](https://todo.sr.ht/~takeiteasy/nyaa/111)).
+- A cancelled `tool-self` call finishes the `:eval` or `:define` it started,
+  though the model is told the call was interrupted
+  ([#123](https://todo.sr.ht/~takeiteasy/nyaa/123)).

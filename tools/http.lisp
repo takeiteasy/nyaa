@@ -5,7 +5,7 @@
 ;;; untouched: callers decide what a 3xx or a 404 means for them.
 ;;;
 ;;; The exchange runs under CALL-WITH-DEADLINE, which owns the connection so
-;;; the deadline can close it.
+;;; the deadline or a cancel can close it.
 ;;;
 ;;; Trust posture: arbitrary network egress. Trusted operator only.
 
@@ -20,15 +20,16 @@
               (:timeout (integer 1) :default +default-tool-timeout+
                :doc "whole-exchange deadline in milliseconds")))
   (:invoke (url method headers body timeout)
-    (perform-request url method (header-alist headers) body timeout)))
+    (perform-request url method (header-alist headers) body timeout cancel-token)))
 
-(defun perform-request (url method headers body timeout-ms)
-  (multiple-value-bind (result timed-out)
+(defun perform-request (url method headers body timeout-ms &optional cancel)
+  (multiple-value-bind (result reason)
       (call-with-deadline timeout-ms
                           (lambda (connect)
                             (attempt-request url method headers body connect))
-                          :name "nyaa-http")
-    (if timed-out (fail :timeout) result)))
+                          :name "nyaa-http"
+                          :cancel cancel)
+    (if reason (fail reason) result)))
 
 (defun attempt-request (url method headers body connect)
   (handler-case

@@ -51,6 +51,7 @@ pathname: record there instead.")
    (allow-list :initform nil :accessor %allow-list)
    (pending :initform nil :accessor %pending)
    (pending-order :initform nil :accessor %pending-order)
+   (call-tokens :initform nil :accessor %call-tokens)
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
    (running-p :initform nil :accessor %running-p)
@@ -94,7 +95,9 @@ pathname: record there instead.")
     (:step (step-agent service))
     (:deadline (deadline-run service))
     (:turn-reply (turn-reply service (second message) (third message)))
-    (:tool-reply (tool-reply service (second message) (third message)))
+    (:tool-reply (destructuring-bind (ref id result) (rest message)
+                   (when (eql ref (%step-ref service))
+                     (tool-reply service id result))))
     ;; Reports from a delegated sub-agent, routed into HANDLE by the meow fix
     ;; for ~takeiteasy/meow#59.
     (:agent-done (sub-agent-done service (second message) (fourth message)))
@@ -116,6 +119,7 @@ pathname: record there instead.")
               (%turns service) 0
               (%pending service) nil
               (%pending-order service) nil
+              (%call-tokens service) nil
               ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
               ;; a vault :restore) sent while the agent was idle waits in
               ;; the queue rather than being dropped, and folds in on the
@@ -284,7 +288,9 @@ tools, and get back its final answer."
 
 (defun dispatch-calls (service calls)
   (setf (%pending service) (mapcar (lambda (call) (cons (getf call :id) :pending)) calls)
-        (%pending-order service) (mapcar (lambda (call) (getf call :id)) calls))
+        (%pending-order service) (mapcar (lambda (call) (getf call :id)) calls)
+        (%call-tokens service) (mapcar (lambda (call) (cons (getf call :id) (make-cancel-token)))
+                                       calls))
   (dolist (call calls)
     (emit-event (agent-sink service)
                 (tool-call-event (m:agent-ref service) (getf call :id)
@@ -306,15 +312,24 @@ to recover."
                      (bad-request "~(~a~) is not in this agent's tool allow-list"
                                   name))))))
 
+(defun call-token (service id)
+  (cdr (assoc id (%call-tokens service) :test #'equal)))
+
 (defun dispatch-tool (service call)
-  (let ((id (getf call :id))
-        (name (getf call :name))
-        (args (getf call :arguments))
-        (registry (m:service-registry service))
-        (parent (m:self)))
+  "The reply carries the step ref it was dispatched under: a provider may
+reuse a call id on the next turn, and a late reply from an interrupted call
+must not answer it."
+  (let* ((id (getf call :id))
+         (name (getf call :name))
+         (args (getf call :arguments))
+         (token (call-token service id))
+         (ref (%step-ref service))
+         (registry (m:service-registry service))
+         (parent (m:self)))
     (m:spawn (lambda ()
                (let ((m:*registry* registry))
-                 (m:cast parent (list :tool-reply id (apply #'invoke-tool name args))))))
+                 (m:cast parent (list :tool-reply ref id
+                                      (apply #'invoke-tool name :cancel token args))))))
     nil))
 
 (defun dispatch-sub-agent (service call)
@@ -324,11 +339,12 @@ here, directly on this agent's own process, which is what M:DELEGATE reads
 its parent from. The child inherits this agent's model and allow-list but
 not :SUB-AGENTS, so delegation does not nest by default; which models and
 tool sets a child may be given is ~takeiteasy/nyaa#22's policy, not this
-ticket's."
+ticket's. The child's ref pairs the step ref with the call id, for the same
+reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
   (let* ((id (getf call :id))
          (task (getf (getf call :arguments) :task))
          (context (m:service-process (m:service-context service)))
-         (child (m:delegate context 'agent :ref id
+         (child (m:delegate context 'agent :ref (cons (%step-ref service) id)
                             :model (agent-model service)
                             :tools (%allow-list service)
                             :sub-agents nil
@@ -337,17 +353,20 @@ ticket's."
                             :deadline (agent-deadline service)
                             :sink (agent-sink service)
                             :vault (agent-vault service))))
+    (on-cancel (call-token service id) (lambda () (m:cast child '(:cancel))))
     (m:cast child (list :run :messages (list (list :role :user :content task))))
     nil))
 
 (defun sub-agent-done (service ref result)
-  (tool-reply service ref
-              (if (tool-error-p result)
-                  result
-                  (ok :answer (content-text (getf (second result) :content))))))
+  (when (eql (car ref) (%step-ref service))
+    (tool-reply service (cdr ref)
+                (if (tool-error-p result)
+                    result
+                    (ok :answer (content-text (getf (second result) :content)))))))
 
 (defun sub-agent-down (service ref reason)
-  (tool-reply service ref (fail (list :sub-agent-down reason))))
+  (when (eql (car ref) (%step-ref service))
+    (tool-reply service (cdr ref) (fail (list :sub-agent-down reason)))))
 
 (defun tool-reply (service id result)
   (let ((cell (assoc id (%pending service) :test #'equal)))
@@ -367,7 +386,14 @@ or an :INTERRUPTED error where none has arrived."
               (tool-message id (if (eq result :pending) (fail :interrupted) result))))
           (%pending-order service)))
 
+(defun cancel-pending-calls (service)
+  "Cancel each call dispatched this turn that has no result yet."
+  (dolist (cell (%pending service))
+    (when (eq (cdr cell) :pending)
+      (cancel (call-token service (car cell))))))
+
 (defun close-pending-calls (service)
+  (cancel-pending-calls service)
   (dolist (cell (%pending service))
     (when (eq (cdr cell) :pending)
       (setf (cdr cell) (fail :interrupted))
@@ -376,7 +402,8 @@ or an :INTERRUPTED error where none has arrived."
   (dolist (message (pending-tool-messages service))
     (push-message service message))
   (setf (%pending service) nil
-        (%pending-order service) nil))
+        (%pending-order service) nil
+        (%call-tokens service) nil))
 
 (defun tool-message (id result)
   (list :role :tool :tool-call-id id :content (render-tool-result result)))
@@ -429,10 +456,6 @@ tell or keep."
           (get-output-stream-string (turn-stream-text stream)))
         "")))
 
-;;; TODO: only the model turn is cancelled; dispatched tool calls run to their
-;;; own timeouts. Upgrade path: a cancel token per call. Tracked in
-;;; ~takeiteasy/nyaa#111.
-
 (defun cancel-turn (service)
   "Stop the completion in flight, if any, rather than leave it to its own
 timeout."
@@ -445,7 +468,8 @@ timeout."
   (setf (%running-p service) nil
         (%turn-in-flight service) nil
         (%pending service) nil
-        (%pending-order service) nil)
+        (%pending-order service) nil
+        (%call-tokens service) nil)
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
   (incf (%step-ref service))
@@ -523,17 +547,18 @@ here but not assumed of the caller's own services)."
 (defmethod restore ((service agent) state)
   (cancel-deadline service)
   (cancel-turn service)
+  (cancel-pending-calls service)
   (release-steer-claims service)
   (setf (%messages service) (getf state :messages)
         (%turns service) (getf state :turns)
         (%pending service) nil
         (%pending-order service) nil
+        (%call-tokens service) nil
         (%steer-queue service) nil
         (%turn-in-flight service) nil
         (%running-p service) nil)
-  ;; As FINISH-RUN does: a turn or tool call already in flight has this
-  ;; agent's process as its :cast target, not a call RESTORE can cancel, so
-  ;; its late reply is made unmatchable instead -- TURN-REPLY and TOOL-REPLY
-  ;; both check the ref/id they were issued against.
+  ;; As FINISH-RUN does: the turn and tool calls just cancelled still reply
+  ;; to this agent's process, so their late replies are made unmatchable --
+  ;; each checks the step ref it was issued against.
   (incf (%step-ref service))
   t)

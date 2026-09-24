@@ -59,16 +59,22 @@ doesn't already give a plain reason for is stringified."
                (fail (list :error (princ-to-string status))))))))
 
 (defun invoke-tool (name &rest args)
-  "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason)."
+  "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason).
+:CANCEL is reserved: a cancel token, passed to the tool rather than coerced."
   (multiple-value-bind (process props) (%tool-process name)
     (multiple-value-bind (coerced problem)
-        (coerce-args (tool-schema props) args)
+        (coerce-args (tool-schema props) (a:remove-from-plist args :cancel))
       (if problem
           (bad-request "~a" problem)
           (multiple-value-call #'%call-result
             (m:call process
-                    (list* :invoke coerced)
+                    (list* :invoke :cancel (call-cancel-token args) coerced)
                     :timeout (%caller-timeout coerced)))))))
+
+(defun call-cancel-token (args)
+  "ARGS' :CANCEL, when it is a cancel token."
+  (let ((token (getf args :cancel)))
+    (and (cancel-token-p token) token)))
 
 ;;; --- results ---------------------------------------------------------
 
@@ -112,24 +118,31 @@ NIL by default.")
 
 ;;; --- the handler -----------------------------------------------------
 
-(defmacro define-tool-handler (class (service args) &body body)
+(defmacro define-tool-handler (class (service args &optional (cancel (gensym "CANCEL")))
+                               &body body)
   "Define HANDLE for CLASS: (:describe) answers METADATA and (:invoke . plist)
-runs BODY with ARGS bound to the plist, coerced against the metadata schema.
-Meow intercepts %update-config, %effects and %timer-fire before HANDLE, so a
-tool must not use those heads."
+runs BODY with ARGS bound to the plist, coerced against the metadata schema,
+and CANCEL to its :CANCEL token or NIL. A call whose token is already
+cancelled -- one queued behind another -- answers (:error :cancelled) without
+running BODY. Meow intercepts %update-config, %effects and %timer-fire before
+HANDLE, so a tool must not use those heads."
   (a:with-gensyms (problem)
     `(defmethod m:handle ((,service ,class) message)
        (case (first message)
          (:describe (m:metadata ,service))
          ;; INVOKE-TOOL coerces too; doing it here as well means a tool
          ;; reached by a bare M:CALL sees the same checked arguments.
-         (:invoke (multiple-value-bind (,args ,problem)
-                      (coerce-args (tool-schema (m:metadata ,service))
-                                   (rest message))
-                    (declare (ignorable ,args))
-                    (if ,problem
-                        (bad-request "~a" ,problem)
-                        (progn ,@body))))
+         (:invoke (let ((,cancel (call-cancel-token (rest message))))
+                    (declare (ignorable ,cancel))
+                    (if (and ,cancel (cancelled-p ,cancel))
+                        (fail :cancelled)
+                        (multiple-value-bind (,args ,problem)
+                            (coerce-args (tool-schema (m:metadata ,service))
+                                         (a:remove-from-plist (rest message) :cancel))
+                          (declare (ignorable ,args))
+                          (if ,problem
+                              (bad-request "~a" ,problem)
+                              (progn ,@body))))))
          ;; Checkpoints (~takeiteasy/nyaa#11): every tool answers these
          ;; through SNAPSHOT/RESTORE, which default to NIL, so a tool that
          ;; holds no state worth carrying needs no method of its own.
@@ -161,7 +174,8 @@ DEFSERVICE, as for TOOL-FS's sandbox root.
 
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
-anaphorically, as TOOL-FS and TOOL-REPL both need. A tool needing another
+anaphorically, as TOOL-FS and TOOL-REPL both need, and so is CANCEL-TOKEN,
+the call's cancel token or NIL. A tool needing another
 HANDLE clause -- %UPDATE-CONFIG and friends stay off limits regardless --
 falls back to DEFSERVICE and DEFINE-TOOL-HANDLER directly."
   (validate-schema params)
@@ -179,7 +193,7 @@ falls back to DEFSERVICE and DEFINE-TOOL-HANDLER directly."
                  :trust ,trust
                  :summary ,summary
                  :params (list ,@(mapcar #'%param-form params))))
-         (define-tool-handler ,class (service args)
+         (define-tool-handler ,class (service args cancel-token)
            (let (,@(mapcar (lambda (arg-name)
                               `(,arg-name (getf args ,(a:make-keyword arg-name))))
                             arg-names))

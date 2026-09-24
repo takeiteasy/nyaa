@@ -788,3 +788,85 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
       (sleep 0.5)
       (is (equal (princ-to-string pid)
                  (result-value (tool :tool-repl :id "a" :form +getpid-form+) :value))))))
+
+;;; --- cancelling a call (~takeiteasy/nyaa#111) --------------------------
+
+(defun cancelled-call (seconds name &rest args)
+  "Invoke NAME with ARGS and a cancel token cancelled SECONDS in. Answers the
+result and the seconds the call took."
+  (let ((token (nyaa:make-cancel-token))
+        (start (get-internal-real-time)))
+    (bt:make-thread (lambda () (sleep seconds) (nyaa:cancel token)))
+    (values (apply #'tool name :cancel token args)
+            (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
+
+(test a-call-cancelled-before-it-starts-never-runs
+  (with-tools
+    (let ((token (nyaa:make-cancel-token))
+          (marker (format nil "~a/nyaa-cancel-marker"
+                          (uiop:native-namestring (uiop:temporary-directory)))))
+      (ignore-errors (delete-file marker))
+      (nyaa:cancel token)
+      (is (eq :cancelled (nyaa:tool-error
+                          (tool :tool-shell :cancel token
+                                :cmd (format nil "touch ~a" marker)))))
+      (is (not (probe-file marker))))))
+
+(test a-call-queued-behind-a-busy-tool-is-refused-once-cancelled
+  (with-tools
+    (let* ((token (nyaa:make-cancel-token))
+           (marker (format nil "~a/nyaa-queued-marker"
+                           (uiop:native-namestring (uiop:temporary-directory))))
+           (busy (progn (ignore-errors (delete-file marker))
+                        (tool-thread (tool :tool-shell :cmd "sleep 1"))))
+           (queued (progn (sleep 0.2)
+                          (tool-thread (tool :tool-shell :cancel token
+                                             :cmd (format nil "touch ~a" marker))))))
+      (sleep 0.2)
+      (nyaa:cancel token)
+      (bt:join-thread busy)
+      (is (eq :cancelled (nyaa:tool-error (bt:join-thread queued))))
+      (is (not (probe-file marker))))))
+
+(test shell-kills-a-cancelled-command-and-its-group
+  (with-tools
+    (let ((pidfile (format nil "~a/nyaa-shell-cancel-test.pid"
+                           (uiop:native-namestring (uiop:temporary-directory)))))
+      (unwind-protect
+           (multiple-value-bind (result seconds)
+               (cancelled-call 0.5 :tool-shell
+                               :cmd (format nil "sleep 30 & echo $! > ~a; wait" pidfile))
+             (is (eq :cancelled (nyaa:tool-error result)))
+             (is (< seconds 5))
+             (let ((grandchild (with-open-file (s pidfile) (parse-integer (read-line s)))))
+               (is (wait-for-exit grandchild))))
+        (ignore-errors (delete-file pidfile))))
+    (is (equal "after
+" (result-value (tool :tool-shell :cmd "echo after") :out)))))
+
+(test http-closes-a-cancelled-exchange
+  (with-tools
+    (with-fake-http (url)
+      (setf *stall* t)
+      (unwind-protect
+           (multiple-value-bind (result seconds)
+               (cancelled-call 0.3 :tool-http :url (format nil "~a/stall" url))
+             (is (eq :cancelled (nyaa:tool-error result)))
+             (is (< seconds 5)))
+        (setf *stall* nil)))))
+
+(test eval-kills-a-cancelled-worker
+  (with-tools
+    (multiple-value-bind (result seconds) (cancelled-call 0.5 :tool-eval :form "(loop)")
+      (is (eq :cancelled (nyaa:tool-error result)))
+      (is (< seconds 5)))))
+
+(test repl-cancel-kills-the-session-worker
+  (with-tools
+    (tool :tool-repl :id "c" :form "(defparameter *kept* 1)")
+    (multiple-value-bind (result seconds)
+        (cancelled-call 0.5 :tool-repl :id "c" :form "(sleep 30)")
+      (is (eq :cancelled (nyaa:tool-error result)))
+      (is (< seconds 5)))
+    (is (equal "NIL" (result-value (tool :tool-repl :id "c" :form "(boundp '*kept*)")
+                                   :value)))))

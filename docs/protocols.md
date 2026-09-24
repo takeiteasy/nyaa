@@ -186,7 +186,8 @@ Cancelling closes the connection and ends the call at once with
 :cancelled))`. A token already cancelled fails the call before it reaches the
 network, and cancelling after the reply has arrived changes nothing.
 `cancelled-p` reads the token, and `cancel` answers true the first time. A
-provider passes `:cancel` through to its protocol.
+provider passes `:cancel` through to its protocol. A
+[tool call](tools.md#cancelling-a-call) takes the same token.
 
 ## The OpenAI protocol
 
