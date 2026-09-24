@@ -48,9 +48,15 @@ running at once. The rest wait their turn.")
 rendered text that reach the conversation; NIL is uncapped.")
    (max-context :initarg :max-context :initform nil
                 :type (or null (integer 1)) :reader agent-max-context
-                :documentation "The most characters of conversation a turn's
-request carries; the oldest turns past it are left out of the request, not the
+                :documentation "The most tokens of conversation and tool
+schemas a turn's request carries, estimated from characters at
+:CHARS-PER-TOKEN; the oldest turns past it are left out of the request, not the
 conversation. NIL is unbounded.")
+   (chars-per-token :initarg :chars-per-token :initform 3
+                    :type (real (0)) :accessor %chars-per-token
+                    :documentation "Characters per token, the estimate
+:MAX-CONTEXT is measured with. Starts here and is recalibrated from each
+reply's prompt-token count, so it follows the model's own tokenizer.")
    (turn-retries :initarg :turn-retries :initform 0
                  :type (integer 0) :reader agent-turn-retries
                  :documentation "How many times a turn that failed transiently
@@ -83,6 +89,7 @@ pathname: record there instead.")
    (attempt :initform 0 :accessor %attempt)
    (retry-pending :initform nil :accessor %retry-pending)
    (turn-stream :initform nil :accessor %turn-stream)
+   (last-request-chars :initform nil :accessor %last-request-chars)
    (emitter :initform nil :accessor %emitter))
   (:default-initargs :name nil))
 
@@ -96,6 +103,7 @@ pathname: record there instead.")
         :max-turns (agent-max-turns service)
         :max-tool-result (agent-max-tool-result service)
         :max-context (agent-max-context service)
+        :chars-per-token (%chars-per-token service)
         :turn-retries (agent-turn-retries service)
         :retry-backoff (agent-retry-backoff service)
         :vault (agent-vault service)))
@@ -312,19 +320,24 @@ status). A call that cannot be sent is answered at once."
                (tool-reply service id result))))))
 
 (defun build-request (service token stream)
-  (multiple-value-bind (messages record)
-      (fit-conversation (%messages service)
-                        :max-context (agent-max-context service)
-                        :max-tool-result (agent-max-tool-result service))
-    (when record
-      (emit-event (agent-events service)
-                  (context-trimmed-event (m:agent-ref service) (%turns service) record)))
-    (make-request service token stream messages)))
+  (let ((tools (request-tools service)))
+    (multiple-value-bind (messages record chars)
+        (fit-conversation (%messages service)
+                          :max-context (agent-max-context service)
+                          :max-tool-result (agent-max-tool-result service)
+                          :chars-per-token (%chars-per-token service)
+                          :margin +context-margin+
+                          :reserved (%printed-size tools))
+      (setf (%last-request-chars service) chars)
+      (when record
+        (emit-event (agent-events service)
+                    (context-trimmed-event (m:agent-ref service) (%turns service) record)))
+      (make-request service token stream messages tools))))
 
-(defun make-request (service token stream messages)
+(defun make-request (service token stream messages tools)
   (list* :cancel token
          :messages messages
-         :tools (request-tools service)
+         :tools tools
          :stream (and stream (turn-stream-sink stream (agent-events service)))
          :ref (m:agent-ref service)
          :timeout (agent-turn-timeout service)
@@ -354,6 +367,7 @@ tools, and get back its final answer."
        (finish-run service result))
       (t
        (let ((reply (second result)))
+         (calibrate service reply)
          (push-message service reply)
          (let ((calls (getf reply :tool-calls)))
            (cond
@@ -498,6 +512,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :max-parallel-tools (agent-max-parallel-tools service)
                             :max-tool-result (agent-max-tool-result service)
                             :max-context (agent-max-context service)
+                            :chars-per-token (%chars-per-token service)
                             :turn-retries (agent-turn-retries service)
                             :retry-backoff (agent-retry-backoff service)
                             :turn-timeout (agent-turn-timeout service)
@@ -580,6 +595,13 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
 ;;; comes back as a record, indexed into the whole conversation, that
 ;;; BUILD-REQUEST sends the sink as :CONTEXT-TRIMMED.
 
+(defparameter +context-margin+ 9/10
+  "The share of :MAX-CONTEXT a request may fill: the ratio drifts with content,
+and code and JSON tokenise worse than prose.")
+
+(defparameter +min-chars-per-token+ 1)
+(defparameter +max-chars-per-token+ 8)
+
 (defparameter +omitted-note+ "[~d earlier messages omitted to fit the context budget]")
 
 (defun %cut-text (text cap)
@@ -590,26 +612,26 @@ model knows it saw part of it."
               (subseq text 0 cap) (length text) cap)
       text))
 
-;; TODO: characters stand in for tokens, so a budget over- or under-fills a
-;; window by the model's own characters-per-token ratio. Calibrate from the
-;; last reply's :usage, or count with the model's tokenizer
-;; (~takeiteasy/nyaa#140).
+(defun %printed-size (object)
+  (length (let ((*print-pretty* nil)) (prin1-to-string object))))
+
 (defun %message-size (message)
   (+ (length (content-text (getf message :content)))
      (let ((calls (getf message :tool-calls)))
-       (if calls (length (let ((*print-pretty* nil)) (prin1-to-string calls))) 0))))
+       (if calls (%printed-size calls) 0))))
 
 (defun %conversation-units (messages)
   "The indices of MESSAGES that go together, oldest first: an assistant turn
 with tool calls and the :TOOL replies after it, or any other message alone.
 A :SYSTEM message is in none."
-  (let ((units '()) (i 0) (n (length messages)))
+  (let* ((messages (coerce messages 'vector))
+         (units '()) (i 0) (n (length messages)))
     (loop while (< i n)
-          do (let ((message (nth i messages)))
+          do (let ((message (aref messages i)))
                (cond ((eq (getf message :role) :system) (incf i))
                      ((getf message :tool-calls)
                       (let ((end (1+ i)))
-                        (loop while (and (< end n) (eq (getf (nth end messages) :role) :tool))
+                        (loop while (and (< end n) (eq (getf (aref messages end) :role) :tool))
                               do (incf end))
                         (push (loop for k from i below end collect k) units)
                         (setf i end)))
@@ -619,20 +641,21 @@ A :SYSTEM message is in none."
 ;; TODO: the oldest turns are dropped outright and only a note stands in for
 ;; them; summarise the dropped span instead, under the policy of the
 ;; orchestrator DSL (~takeiteasy/nyaa#139).
-;; TODO: every turn re-measures the whole conversation, O(n) in its length; a
-;; running size kept beside %MESSAGES would make it O(1) once conversations
-;; are long enough for that to show (~takeiteasy/nyaa#140).
-(defun fit-conversation (messages &key max-context max-tool-result)
-  "MESSAGES as a request should carry them, and a record of what was changed,
-or nil when nothing was. Each :TOOL message is cut to MAX-TOOL-RESULT
-characters. If the whole is still past MAX-CONTEXT, the oldest units -- see
-%CONVERSATION-UNITS -- are left out until it fits, a note in their place. A
-:SYSTEM message and the newest unit are never left out; if they alone are past
-the budget the request is sent anyway, and the record says so. Pure: no I/O,
-and MESSAGES is not changed.
+(defun fit-conversation (messages &key max-context max-tool-result
+                                    (chars-per-token 1) (margin 1) (reserved 0))
+  "MESSAGES as a request should carry them, a record of what was changed, or
+nil when nothing was, and the characters the request measures. Each :TOOL
+message is cut to MAX-TOOL-RESULT characters. MAX-CONTEXT is in tokens, each
+CHARS-PER-TOKEN characters, of which the request may fill MARGIN (a fraction);
+RESERVED characters, the tool schemas, count against it. If the whole is
+still past that, the oldest units -- see %CONVERSATION-UNITS -- are left out
+until it fits, a note in their place. A :SYSTEM message and the newest unit are
+never left out; if they alone are past the budget the request is sent anyway,
+and the record says so. Pure: no I/O, and MESSAGES is not changed.
 
 The record is (:OMITTED indices :TRUNCATED ((index :FROM n :TO m) ...) :SIZE n
-:BUDGET b :OVER-BUDGET bool), indices being positions in MESSAGES."
+:BUDGET b :RATIO r :OVER-BUDGET bool), indices being positions in MESSAGES,
+:SIZE and :BUDGET in estimated tokens, and :FROM and :TO in characters."
   (let* ((cut '())
          (view (loop for message in messages
                      for index from 0
@@ -645,32 +668,37 @@ The record is (:OMITTED indices :TRUNCATED ((index :FROM n :TO m) ...) :SIZE n
                                             cut)
                                       (list* :content kept (a:remove-from-plist message :content)))
                                      (t message)))))
-         (sizes (mapcar #'%message-size view))
-         (size (reduce #'+ sizes))
+         (sizes (map 'vector #'%message-size view))
+         (chars (+ reserved (reduce #'+ sizes)))
+         (limit (and max-context (* max-context margin chars-per-token)))
          (droppable (butlast (%conversation-units view)))
          (note-size (length (format nil +omitted-note+ (length messages))))
          (omitted '()))
-    (when max-context
-      (loop while (and droppable (> (+ size (if omitted note-size 0)) max-context))
+    (when limit
+      (loop while (and droppable (> (+ chars (if omitted note-size 0)) limit))
             do (dolist (index (pop droppable))
-                 (decf size (nth index sizes))
+                 (decf chars (aref sizes index))
                  (push index omitted))))
     (setf omitted (sort omitted #'<))
-    (let ((over-budget (and max-context (> (+ size (if omitted note-size 0)) max-context))))
+    (let* ((chars (+ chars (if omitted note-size 0)))
+           (over-budget (and limit (> chars limit))))
       (if (not (or omitted cut over-budget))
-          (values messages nil)
+          (values messages nil chars)
           (values (fit-view view omitted)
                   (list :omitted omitted :truncated (nreverse cut)
-                        :size (+ size (if omitted note-size 0)) :budget max-context
-                        :over-budget (and over-budget t)))))))
+                        :size (ceiling chars chars-per-token) :budget max-context
+                        :ratio chars-per-token :over-budget (and over-budget t))
+                  chars)))))
 
 (defun fit-view (view omitted)
   "VIEW without the messages at the indices OMITTED, a note standing in for
 them ahead of the first one kept that is not a :SYSTEM message."
-  (let ((noted (null omitted)) (out '()))
+  (let ((noted (null omitted)) (out '())
+        (gone (make-hash-table)))
+    (dolist (index omitted) (setf (gethash index gone) t))
     (loop for message in view
           for index from 0
-          unless (member index omitted)
+          unless (gethash index gone)
             do (unless (or noted (eq (getf message :role) :system))
                  (setf noted t)
                  (push (list :role :user
@@ -679,6 +707,19 @@ them ahead of the first one kept that is not a :SYSTEM message."
                (push message out))
     (nreverse out)))
 
+(defun calibrate (service reply)
+  "Set SERVICE's characters per token from REPLY's prompt-token count over the
+characters the request that drew it measured. A reply that reports no count, or
+one that reads implausibly, leaves the last ratio."
+  (let ((tokens (reply-prompt-tokens reply))
+        (chars (%last-request-chars service)))
+    (when (and tokens chars)
+      (let ((ratio (/ chars tokens 1d0)))
+        (when (<= +min-chars-per-token+ ratio +max-chars-per-token+)
+          (setf (%chars-per-token service) ratio))))))
+
+;; TODO: appending copies the whole conversation, O(n) per message
+;; (~takeiteasy/nyaa#144).
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
 

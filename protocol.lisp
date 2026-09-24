@@ -758,6 +758,12 @@ type names a charset."
                   :done t
                   :meta (list* :finish-reason reason meta))))
 
+(defun reply-prompt-tokens (reply)
+  "The prompt's size in tokens as the backend counted it, from REPLY's :META
+:USAGE :PROMPT-TOKENS, or nil when it reported none."
+  (let ((tokens (getf (getf (getf reply :meta) :usage) :prompt-tokens)))
+    (and (integerp tokens) (plusp tokens) tokens)))
+
 (defun finish-reason (value)
   "A wire finish/done reason as a keyword: tool_calls is :TOOL-CALLS."
   (when (stringp value) (lisp-key value)))

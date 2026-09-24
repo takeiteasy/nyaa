@@ -274,7 +274,10 @@ sampling parameters — `:temperature`, `:top-p`, `:max-tokens`, `:stop` and
 `:seed` — for a provider to layer defaults on.
 
 `:meta` carries `:finish-reason`, the backend's `:id`, and `:usage` as a plist
-of token counts.
+of token counts. `:usage` carries `:prompt-tokens`, the prompt's size as the
+backend counted it, whenever the backend reports one; every protocol names it
+so, and the [agent](agent.md#counting-tokens) calibrates its context budget
+from it.
 
 Tool schemas render into the `tools` array through
 [`schema->json-schema`](schema.md). A `tool_calls` reply comes back as
@@ -327,7 +330,7 @@ the native API has them.
 unlike OpenAI's single `usage` object, the native reply's counters
 (`prompt_eval_count`, `eval_count`, `total_duration`, `load_duration`,
 `prompt_eval_duration`, `eval_duration`) sit at the top level, and `:usage`
-collects them the same way.
+collects them the same way, with `prompt_eval_count` also as `:prompt-tokens`.
 
 Streaming is newline-delimited JSON, not SSE: one bare object per line, no
 `data:` prefix and no `[DONE]`. The turn ends on a line carrying `"done":

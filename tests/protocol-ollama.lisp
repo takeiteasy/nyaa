@@ -118,6 +118,7 @@
       (is (eq :stop (getf (getf reply :meta) :finish-reason)))
       (let ((usage (getf (getf reply :meta) :usage)))
         (is (= 26 (getf usage :prompt-eval-count)))
+        (is (= 26 (getf usage :prompt-tokens)))
         (is (= 298 (getf usage :eval-count)))
         (is (= 4883583458 (getf usage :total-duration)))
         (is (= 1073398416 (getf usage :load-duration)))))))
@@ -209,6 +210,7 @@
       (is (equal "hi there" (nyaa:content-text (getf (second result) :content))))
       ;; The counters arrive only on the final line, and must still land.
       (is (= 3 (getf (getf (getf (second result) :meta) :usage) :prompt-eval-count)))
+      (is (= 3 (nyaa::reply-prompt-tokens (second result))))
       (is (eq t (gethash "stream" (sent-body)))))))
 
 (test a-stream-ending-at-eof-without-done-is-a-backend-error

@@ -1269,6 +1269,98 @@ test's."
     (nyaa::fit-conversation messages :max-context 100 :max-tool-result 10)
     (is (equal copy messages))))
 
+(test the-budget-is-in-tokens-at-the-ratio-with-a-margin
+  (let ((messages (long-conversation)))
+    (multiple-value-bind (view record)
+        (nyaa::fit-conversation messages :max-context 250 :chars-per-token 4)
+      (is (equal messages view) "250 tokens at 4 characters each holds 1000")
+      (is (null record)))
+    (multiple-value-bind (view record)
+        (nyaa::fit-conversation messages :max-context 250 :margin 9/10)
+      (is (equal '(:system :user :assistant :user) (roles view)))
+      (is (<= (getf record :size) 225) "a tenth of the budget is held back")
+      (is (= 1 (getf record :ratio))))))
+
+(test reserved-characters-count-against-the-budget
+  (let ((messages (long-conversation)))
+    (is (null (nth-value 1 (nyaa::fit-conversation messages :max-context 400))))
+    (is (equal '(1 2 3)
+               (getf (nth-value 1 (nyaa::fit-conversation messages :max-context 400
+                                                          :reserved 200))
+                     :omitted)))))
+
+(test fitting-answers-the-characters-the-request-measures
+  (let ((messages (long-conversation)))
+    (is (= (+ 8 100 (nyaa::%printed-size (getf (third messages) :tool-calls)) 100 100 8 100)
+           (nth-value 2 (nyaa::fit-conversation messages :reserved 100))))))
+
+(defun usage-reply (reply tokens)
+  "REPLY, a whole reply from JSON-RESPONSE, with a usage object of TOKENS."
+  (let ((json (third reply)))
+    (json-response
+     (format nil "~a,\"usage\":{\"prompt_tokens\":~d}}"
+             (subseq json 0 (1- (length json))) tokens))))
+
+(defun calibration-backend (tokens &key (usage t))
+  "A tool call and then a final answer, each reporting TOKENS prompt tokens
+when USAGE."
+  (let ((n 0))
+    (lambda (&rest request)
+      (declare (ignore request))
+      (let ((reply (if (= (incf n) 1)
+                       (tool-call-reply "c1" "tool-echo" "{\"text\":\"x\"}")
+                       (final-reply "done"))))
+        (if usage (usage-reply reply tokens) reply)))))
+
+(defun calibration-run (backend)
+  "Two turns over a 600-character history, budgeted at 500 tokens, and the
+first message of each request as the backend saw it."
+  (with-agent (backend 'tool-echo)
+    (let ((result (agent-turn
+                   :messages (loop for c in '(#\a #\b #\c)
+                                   collect (msg :user (make-string 200 :initial-element c)))
+                   :max-context 500)))
+      (is (equal '(:ok :stop 2) (list (first result) (getf (second result) :stop-reason)
+                                      (getf (second result) :turns))))
+      (list (first (request-message-contents 1)) (first (request-message-contents 2))))))
+
+(defun noted-p (content)
+  (search "earlier messages omitted" content))
+
+(test the-ratio-is-calibrated-from-the-last-replys-prompt-tokens
+  (destructuring-bind (first second) (calibration-run (calibration-backend 600))
+    (is (not (noted-p first)) "the first turn is measured at the default ratio")
+    (is (noted-p second) "then at the characters per token the backend's count implies")))
+
+(test a-reply-with-no-usage-leaves-the-ratio
+  (destructuring-bind (first second) (calibration-run (calibration-backend 0 :usage nil))
+    (is (not (noted-p first)))
+    (is (not (noted-p second)))))
+
+(test an-implausible-prompt-count-is-ignored
+  (destructuring-bind (first second) (calibration-run (calibration-backend 1))
+    (is (not (noted-p first)))
+    (is (not (noted-p second)))))
+
+(defun calibrated (chars tokens)
+  (let ((service (make-instance 'nyaa:agent)))
+    (setf (nyaa::%last-request-chars service) chars)
+    (nyaa::calibrate service (list :meta (list :usage (list :prompt-tokens tokens))))
+    (nyaa::%chars-per-token service)))
+
+(test calibration-sets-characters-over-tokens-within-bounds
+  (is (= 4 (calibrated 400 100)))
+  (is (= 3 (calibrated 400 1)) "over 8 characters per token")
+  (is (= 3 (calibrated 40 100)) "under 1 character per token")
+  (is (= 3 (calibrated nil 100)) "no request measured"))
+
+(test the-ratio-is-in-the-metadata
+  (with-agent ((chatty-backend))
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :chars-per-token 9/2)))
+        (is (= 9/2 (getf (m:call child '(:describe)) :chars-per-token)))))))
+
 (defun chatty-backend ()
   (lambda (&rest request)
     (declare (ignore request))
@@ -1280,7 +1372,7 @@ test's."
                        (msg :assistant (make-string 100 :initial-element #\b))
                        (msg :user "again?"))))
     (with-agent ((chatty-backend))
-      (let* ((result (agent-turn :messages history :max-context 150
+      (let* ((result (agent-turn :messages history :max-context 100 :chars-per-token 1
                                  :sink (recorder-sink recorder)))
              (sent (request-message-contents 1))
              (event (find :context-trimmed (recorded-events recorder)
@@ -1291,7 +1383,8 @@ test's."
         (is (equal "again?" (second sent)))
         (is (equal '(0 1) (getf event :omitted)))
         (is (= 1 (getf event :turn)))
-        (is (= 150 (getf event :budget)))
+        (is (= 100 (getf event :budget)))
+        (is (= 1 (getf event :ratio)))
         (is (= 4 (length (getf (second result) :messages)))
             "the result keeps the whole conversation, plus the reply")))))
 

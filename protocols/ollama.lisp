@@ -125,13 +125,16 @@ Ollama correlates a tool result by position, not by id."
   '("prompt_eval_count" "eval_count" "total_duration" "load_duration"
     "prompt_eval_duration" "eval_duration")
   "Native counters, collected into :META :USAGE as a plist keyed the same way
-OpenAI's :usage arrives.")
+OpenAI's :usage arrives, plus :PROMPT-TOKENS, the key every protocol's :usage
+carries for the prompt's size.")
 
 (defun chat-meta (json)
   (let ((usage (loop for key in +ollama-usage-keys+
                      for value = (gethash key json)
                      when value
                        collect (lisp-key key) and collect value)))
+    (a:when-let ((prompt (getf usage :prompt-eval-count)))
+      (setf usage (list* :prompt-tokens prompt usage)))
     (append (when usage (list :usage usage))
             (a:when-let ((model (gethash "model" json)))
               (list :model model)))))

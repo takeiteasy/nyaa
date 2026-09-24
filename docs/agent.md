@@ -58,7 +58,8 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
 | `:max-tool-result` | nil | most characters of a tool result's text that reach the conversation; nil is uncapped |
-| `:max-context` | nil | most characters of conversation a request carries; the oldest turns past it are left out of the request. nil is unbounded |
+| `:max-context` | nil | most tokens (estimated) a request carries, conversation and tool schemas; the oldest turns past it are left out of the request. nil is unbounded |
+| `:chars-per-token` | 3 | characters per token the estimate starts from; recalibrated from each reply |
 | `:turn-retries` | 0 | times a turn that failed transiently is sent again |
 | `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, plus up to 25% jitter |
 | `:sink` | nil | a stream sink, as `complete` takes |
@@ -175,9 +176,8 @@ not valid JSON.
 
 ## Fitting the context
 
-With `:max-context`, a request that would carry more than that many
-characters leaves out the oldest turns until it fits, and a note stands in for
-them:
+With `:max-context`, a request that would carry more than that many tokens
+leaves out the oldest turns until it fits, and a note stands in for them:
 
 ```
 [6 earlier messages omitted to fit the context budget]
@@ -194,7 +194,26 @@ is sent anyway and the event says `:over-budget t`.
 The conversation is never shortened: the result's `:messages` and a
 [checkpoint](checkpoints.md) hold the whole of it, and each request trims a
 fresh view. A sink hears what a request left out or cut through
-[`:context-trimmed`](#events)[^chars].
+[`:context-trimmed`](#events).
+
+### Counting tokens
+
+The agent counts characters and converts at `:chars-per-token`[^ratio]:
+
+| Step | Detail |
+|---|---|
+| First turn | the ratio is `:chars-per-token`, 3 unless set |
+| After each reply | the ratio becomes the characters the request carried over the reply's prompt-token count (`:meta :usage :prompt-tokens`, see [protocols](protocols.md)) |
+| A reply with no count | the last ratio stays |
+| Margin | a request fills at most 90% of `:max-context` |
+| Counted | messages and the tool schemas sent with them |
+
+So a 4000-token budget at 4 characters per token fits 14,400 characters
+(4000 × 0.9 × 4), less the tool schemas.
+
+A sub-agent starts from its parent's ratio. A [checkpoint](checkpoints.md)
+does not hold it: an agent restored elsewhere starts from `:chars-per-token`
+again and recalibrates after one reply.
 
 ## Failed turns
 
@@ -233,13 +252,14 @@ A tool call is never retried; its side effects may not be safe to repeat.
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
 (:type :context-trimmed :ref r :turn n :omitted (1 2 3) :truncated ((4 :from 900 :to 50))
-       :size 240 :budget 250 :over-budget nil)
+       :size 240 :budget 250 :ratio 3.9 :over-budget nil)
 ```
 
 `:context-trimmed` precedes a request that left out or cut anything, before
 that turn's model call. `:omitted` and `:truncated` index into the whole
 conversation, so a listener can tell which messages were affected; `:truncated`
-entries are `(index :from characters :to kept)`. A retried turn is built again
+entries are `(index :from characters :to kept)`. `:size` and `:budget` are
+tokens, `:size` estimated at `:ratio` characters per token. A retried turn is built again
 and reports again.
 
 An interrupted turn ends with `:turn-interrupted` rather than a `:done`:
@@ -291,11 +311,16 @@ abandoned turn reaches the sink.
 
 - A request over `:max-context` drops old turns rather than summarising them
   ([#139](https://todo.sr.ht/~takeiteasy/nyaa/139)).
-- `:max-context` counts characters, not tokens
-  ([#140](https://todo.sr.ht/~takeiteasy/nyaa/140)).
+- A streamed turn on an OpenAI-style backend reports no prompt-token count,
+  so it does not recalibrate the ratio
+  ([#142](https://todo.sr.ht/~takeiteasy/nyaa/142)).
+- The first turn is measured at the default ratio; an exact count before it
+  needs a tokenizer ([#143](https://todo.sr.ht/~takeiteasy/nyaa/143)).
 - A retry ignores a backend's `Retry-After` header
   ([#135](https://todo.sr.ht/~takeiteasy/nyaa/135)).
 
-[^chars]: The budget counts characters, not tokens, so it fills a window by
-    the model's own characters-per-token ratio. Old turns are dropped, not
-    summarised.
+[^ratio]: The ratio is per agent, not per content type: code and JSON
+    tokenise worse than prose, which the 10% margin absorbs. A reading under 1
+    or over 8 characters per token is ignored. `:max-tool-result` stays in
+    characters, as do `:from` and `:to` in `:context-trimmed`. `:max-context`
+    is the prompt's share of the window; leave room below it for the reply.
