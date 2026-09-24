@@ -1172,36 +1172,139 @@ test's."
                          (format nil "{\"text\":\"~a\"}" (make-string 200 :initial-element #\x)))
           (streamed-reply "done")))))
 
-(test a-capped-tool-result-is-cut-with-a-note
+;;; The cut is made per request, so what the conversation holds and what the
+;;; sink sees stay whole. Request N's (1-based) `messages` are read back from
+;;; the wire.
+
+(defun request-message-contents (n)
+  (let ((body (com.inuoe.jzon:parse (getf (nth (1- n) (requests)) :body))))
+    (map 'list (lambda (message) (gethash "content" message))
+         (gethash "messages" body))))
+
+(test a-capped-tool-result-is-cut-in-the-request-with-a-note
   (let ((recorder (make-recorder)))
     (with-agent ((long-text-backend) 'tool-echo)
       (let* ((result (agent-turn :messages '((:role :user :content "go"))
                                  :max-tool-result 50
                                  :sink (recorder-sink recorder)))
-             (text (first (tool-message-texts result))))
+             (sent (car (last (request-message-contents 2))))
+             (whole (first (tool-message-texts result))))
         (is (eq :stop (getf (second result) :stop-reason)))
-        (is (search "[truncated: " text))
-        (is (= 50 (search "... [truncated: " text)))
-        (is (search "first 50 kept]" text))
+        (is (= 50 (search "... [truncated: " sent)))
+        (is (search "first 50 kept]" sent))
+        (is (not (search "truncated" whole)) "the conversation keeps the whole result")
+        (is (> (length whole) 200))
         (let ((event (find :tool-result (recorded-events recorder)
                            :key (lambda (e) (getf e :type)))))
-          (is (= 200 (length (getf (second (getf event :result)) :text)))))))))
+          (is (= 200 (length (getf (second (getf event :result)) :text)))))
+        (let ((trimmed (find :context-trimmed (recorded-events recorder)
+                             :key (lambda (e) (getf e :type)))))
+          (is (equal `((2 :from ,(length whole) :to 50)) (getf trimmed :truncated)))
+          (is (null (getf trimmed :omitted))))))))
 
 (test a-tool-result-is-not-cut-by-default
-  (with-agent ((let ((n 0))
-                 (lambda (&rest request)
-                   (declare (ignore request))
-                   (if (= (incf n) 1)
-                       (tool-call-reply "c1" "tool-echo"
-                                        (format nil "{\"text\":\"~a\"}"
-                                                (make-string 200 :initial-element #\x)))
-                       (final-reply "done"))))
-              'tool-echo)
-    (let ((text (first (tool-message-texts
-                        (agent-turn :messages '((:role :user :content "go")))))))
-      (is (not (search "truncated" text)))
-      (is (> (length text) 200)))))
+  (let ((recorder (make-recorder)))
+    (with-agent ((long-text-backend) 'tool-echo)
+      (let ((text (first (tool-message-texts
+                          (agent-turn :messages '((:role :user :content "go"))
+                                      :sink (recorder-sink recorder))))))
+        (is (not (search "truncated" text)))
+        (is (> (length text) 200))
+        (is (not (recorder-has recorder :context-trimmed)))))))
 
 (test a-result-within-the-cap-is-untouched
-  (is (equal "{\"a\":1}" (nyaa::render-tool-result (nyaa::ok :a 1) 100)))
-  (is (equal "{\"a\":1}" (nyaa::render-tool-result (nyaa::ok :a 1) 7))))
+  (let ((text (nyaa::render-tool-result (nyaa::ok :a 1))))
+    (is (equal "{\"a\":1}" (nyaa::%cut-text text 100)))
+    (is (equal "{\"a\":1}" (nyaa::%cut-text text 7)))))
+
+;;; --- fitting the conversation (~takeiteasy/nyaa#39) ----------------------
+
+(defun msg (role text &rest more) (list* :role role :content text more))
+
+(defun roles (messages) (mapcar (lambda (m) (getf m :role)) messages))
+
+(defun long-conversation ()
+  "A system prompt, an old exchange with a tool call, and a recent one."
+  (list (msg :system "be brief")
+        (msg :user (make-string 100 :initial-element #\a))
+        (msg :assistant "" :tool-calls '((:id "c1" :name :tool-echo :arguments (:text "x"))))
+        (msg :tool (make-string 100 :initial-element #\b) :tool-call-id "c1")
+        (msg :assistant (make-string 100 :initial-element #\c))
+        (msg :user "and now?")))
+
+(test a-conversation-within-budget-is-sent-as-is
+  (let ((messages (long-conversation)))
+    (multiple-value-bind (view record) (nyaa::fit-conversation messages :max-context 10000)
+      (is (equal messages view))
+      (is (null record)))
+    (is (null (nth-value 1 (nyaa::fit-conversation messages))))))
+
+(test the-oldest-turns-are-left-out-with-a-note
+  (multiple-value-bind (view record)
+      (nyaa::fit-conversation (long-conversation) :max-context 250)
+    (is (equal '(:system :user :assistant :user) (roles view)))
+    (is (equal "be brief" (getf (first view) :content)) "a system message is kept")
+    (is (search "earlier messages omitted" (getf (second view) :content)))
+    (is (equal "and now?" (getf (car (last view)) :content)) "the newest turn is kept")
+    (is (equal '(1 2 3) (getf record :omitted)))
+    (is-false (getf record :over-budget))
+    (is (<= (getf record :size) 250))))
+
+(test a-tool-call-and-its-results-are-left-out-together
+  (dolist (budget '(120 150 200 250))
+    (let* ((view (nyaa::fit-conversation (long-conversation) :max-context budget))
+           (calls (count-if (lambda (m) (getf m :tool-calls)) view))
+           (results (count :tool (roles view))))
+      (is (= calls results) "budget ~d: a call is never left without its result" budget))))
+
+(test a-conversation-that-cannot-fit-is-sent-and-said-to-be-over
+  (multiple-value-bind (view record)
+      (nyaa::fit-conversation (long-conversation) :max-context 5)
+    (is (equal '(:system :user :user) (roles view)) "only the note and the newest turn are left")
+    (is-true (getf record :over-budget))
+    (is (equal "and now?" (getf (car (last view)) :content)))))
+
+(test fitting-a-conversation-changes-nothing-it-was-given
+  (let* ((messages (long-conversation)) (copy (copy-tree messages)))
+    (nyaa::fit-conversation messages :max-context 100 :max-tool-result 10)
+    (is (equal copy messages))))
+
+(defun chatty-backend ()
+  (lambda (&rest request)
+    (declare (ignore request))
+    (streamed-reply (make-string 100 :initial-element #\y))))
+
+(test a-request-past-the-budget-is-trimmed-and-the-sink-is-told
+  (let ((recorder (make-recorder))
+        (history (list (msg :user (make-string 100 :initial-element #\a))
+                       (msg :assistant (make-string 100 :initial-element #\b))
+                       (msg :user "again?"))))
+    (with-agent ((chatty-backend))
+      (let* ((result (agent-turn :messages history :max-context 150
+                                 :sink (recorder-sink recorder)))
+             (sent (request-message-contents 1))
+             (event (find :context-trimmed (recorded-events recorder)
+                          :key (lambda (e) (getf e :type)))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (= 2 (length sent)))
+        (is (search "earlier messages omitted" (first sent)))
+        (is (equal "again?" (second sent)))
+        (is (equal '(0 1) (getf event :omitted)))
+        (is (= 1 (getf event :turn)))
+        (is (= 150 (getf event :budget)))
+        (is (= 4 (length (getf (second result) :messages)))
+            "the result keeps the whole conversation, plus the reply")))))
+
+(test a-request-within-budget-emits-no-trim-event
+  (let ((recorder (make-recorder)))
+    (with-agent ((chatty-backend))
+      (agent-turn :messages '((:role :user :content "hi")) :max-context 5000
+                  :sink (recorder-sink recorder))
+      (is (not (recorder-has recorder :context-trimmed))))))
+
+(test the-context-budget-is-in-the-metadata
+  (with-agent ((chatty-backend))
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                               :max-context 1234)))
+        (is (= 1234 (getf (m:call child '(:describe)) :max-context)))))))

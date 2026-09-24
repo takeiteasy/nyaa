@@ -46,6 +46,11 @@ running at once. The rest wait their turn.")
                     :type (or null (integer 1)) :reader agent-max-tool-result
                     :documentation "The most characters of a tool result's
 rendered text that reach the conversation; NIL is uncapped.")
+   (max-context :initarg :max-context :initform nil
+                :type (or null (integer 1)) :reader agent-max-context
+                :documentation "The most characters of conversation a turn's
+request carries; the oldest turns past it are left out of the request, not the
+conversation. NIL is unbounded.")
    (turn-retries :initarg :turn-retries :initform 0
                  :type (integer 0) :reader agent-turn-retries
                  :documentation "How many times a turn that failed transiently
@@ -90,6 +95,7 @@ pathname: record there instead.")
         :sub-agents (agent-sub-agents service)
         :max-turns (agent-max-turns service)
         :max-tool-result (agent-max-tool-result service)
+        :max-context (agent-max-context service)
         :turn-retries (agent-turn-retries service)
         :retry-backoff (agent-retry-backoff service)
         :vault (agent-vault service)))
@@ -306,8 +312,18 @@ status). A call that cannot be sent is answered at once."
                (tool-reply service id result))))))
 
 (defun build-request (service token stream)
+  (multiple-value-bind (messages record)
+      (fit-conversation (%messages service)
+                        :max-context (agent-max-context service)
+                        :max-tool-result (agent-max-tool-result service))
+    (when record
+      (emit-event (agent-events service)
+                  (context-trimmed-event (m:agent-ref service) (%turns service) record)))
+    (make-request service token stream messages)))
+
+(defun make-request (service token stream messages)
   (list* :cancel token
-         :messages (%messages service)
+         :messages messages
          :tools (request-tools service)
          :stream (and stream (turn-stream-sink stream (agent-events service)))
          :ref (m:agent-ref service)
@@ -481,6 +497,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :max-turns (agent-max-turns service)
                             :max-parallel-tools (agent-max-parallel-tools service)
                             :max-tool-result (agent-max-tool-result service)
+                            :max-context (agent-max-context service)
                             :turn-retries (agent-turn-retries service)
                             :retry-backoff (agent-retry-backoff service)
                             :turn-timeout (agent-turn-timeout service)
@@ -521,8 +538,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
 or an :INTERRUPTED error where none has arrived."
   (mapcar (lambda (id)
             (let ((result (cdr (assoc id (%pending service) :test #'equal))))
-              (tool-message id (if (outstanding-p result) (fail :interrupted) result)
-                            (agent-max-tool-result service))))
+              (tool-message id (if (outstanding-p result) (fail :interrupted) result))))
           (%pending-order service)))
 
 (defun cancel-pending-calls (service)
@@ -545,22 +561,123 @@ or an :INTERRUPTED error where none has arrived."
         (%pending-order service) nil
         (%call-tokens service) nil))
 
-(defun tool-message (id result cap)
-  (list :role :tool :tool-call-id id :content (render-tool-result result cap)))
+(defun tool-message (id result)
+  (list :role :tool :tool-call-id id :content (render-tool-result result)))
 
-(defun render-tool-result (result &optional cap)
+(defun render-tool-result (result)
   "RESULT, an (:ok plist) or (:error reason), as JSON text -- more legible to
-a model than PRINC-TO-STRING, and jzon is already a dependency. Text past CAP
-characters is cut there, with a note of how much was dropped, so the model
-knows it saw part of it."
-  (let ((text (json:stringify
-               (if (tool-error-p result)
-                   (json-object "error" (untyped->json (tool-error result)))
-                   (untyped->json (second result))))))
-    (if (and cap (> (length text) cap))
-        (format nil "~a... [truncated: ~d characters, first ~d kept]"
-                (subseq text 0 cap) (length text) cap)
-        text)))
+a model than PRINC-TO-STRING, and jzon is already a dependency."
+  (json:stringify
+   (if (tool-error-p result)
+       (json-object "error" (untyped->json (tool-error result)))
+       (untyped->json (second result)))))
+
+;;; --- fitting the conversation to a request --------------------------------
+
+;;; The conversation is kept whole; each request carries a view of it. A tool
+;;; result past :MAX-TOOL-RESULT is cut in the view, and when the view is
+;;; still past :MAX-CONTEXT the oldest turns are left out of it. What changed
+;;; comes back as a record, indexed into the whole conversation, that
+;;; BUILD-REQUEST sends the sink as :CONTEXT-TRIMMED.
+
+(defparameter +omitted-note+ "[~d earlier messages omitted to fit the context budget]")
+
+(defun %cut-text (text cap)
+  "TEXT, cut at CAP characters with a note of how much was dropped, so the
+model knows it saw part of it."
+  (if (and cap (> (length text) cap))
+      (format nil "~a... [truncated: ~d characters, first ~d kept]"
+              (subseq text 0 cap) (length text) cap)
+      text))
+
+;; TODO: characters stand in for tokens, so a budget over- or under-fills a
+;; window by the model's own characters-per-token ratio. Calibrate from the
+;; last reply's :usage, or count with the model's tokenizer
+;; (~takeiteasy/nyaa#140).
+(defun %message-size (message)
+  (+ (length (content-text (getf message :content)))
+     (let ((calls (getf message :tool-calls)))
+       (if calls (length (let ((*print-pretty* nil)) (prin1-to-string calls))) 0))))
+
+(defun %conversation-units (messages)
+  "The indices of MESSAGES that go together, oldest first: an assistant turn
+with tool calls and the :TOOL replies after it, or any other message alone.
+A :SYSTEM message is in none."
+  (let ((units '()) (i 0) (n (length messages)))
+    (loop while (< i n)
+          do (let ((message (nth i messages)))
+               (cond ((eq (getf message :role) :system) (incf i))
+                     ((getf message :tool-calls)
+                      (let ((end (1+ i)))
+                        (loop while (and (< end n) (eq (getf (nth end messages) :role) :tool))
+                              do (incf end))
+                        (push (loop for k from i below end collect k) units)
+                        (setf i end)))
+                     (t (push (list i) units) (incf i)))))
+    (nreverse units)))
+
+;; TODO: the oldest turns are dropped outright and only a note stands in for
+;; them; summarise the dropped span instead, under the policy of the
+;; orchestrator DSL (~takeiteasy/nyaa#139).
+;; TODO: every turn re-measures the whole conversation, O(n) in its length; a
+;; running size kept beside %MESSAGES would make it O(1) once conversations
+;; are long enough for that to show (~takeiteasy/nyaa#140).
+(defun fit-conversation (messages &key max-context max-tool-result)
+  "MESSAGES as a request should carry them, and a record of what was changed,
+or nil when nothing was. Each :TOOL message is cut to MAX-TOOL-RESULT
+characters. If the whole is still past MAX-CONTEXT, the oldest units -- see
+%CONVERSATION-UNITS -- are left out until it fits, a note in their place. A
+:SYSTEM message and the newest unit are never left out; if they alone are past
+the budget the request is sent anyway, and the record says so. Pure: no I/O,
+and MESSAGES is not changed.
+
+The record is (:OMITTED indices :TRUNCATED ((index :FROM n :TO m) ...) :SIZE n
+:BUDGET b :OVER-BUDGET bool), indices being positions in MESSAGES."
+  (let* ((cut '())
+         (view (loop for message in messages
+                     for index from 0
+                     collect (let* ((text (and max-tool-result
+                                               (eq (getf message :role) :tool)
+                                               (content-text (getf message :content))))
+                                    (kept (and text (%cut-text text max-tool-result))))
+                               (cond ((and text (/= (length text) (length kept)))
+                                      (push (list index :from (length text) :to max-tool-result)
+                                            cut)
+                                      (list* :content kept (a:remove-from-plist message :content)))
+                                     (t message)))))
+         (sizes (mapcar #'%message-size view))
+         (size (reduce #'+ sizes))
+         (droppable (butlast (%conversation-units view)))
+         (note-size (length (format nil +omitted-note+ (length messages))))
+         (omitted '()))
+    (when max-context
+      (loop while (and droppable (> (+ size (if omitted note-size 0)) max-context))
+            do (dolist (index (pop droppable))
+                 (decf size (nth index sizes))
+                 (push index omitted))))
+    (setf omitted (sort omitted #'<))
+    (let ((over-budget (and max-context (> (+ size (if omitted note-size 0)) max-context))))
+      (if (not (or omitted cut over-budget))
+          (values messages nil)
+          (values (fit-view view omitted)
+                  (list :omitted omitted :truncated (nreverse cut)
+                        :size (+ size (if omitted note-size 0)) :budget max-context
+                        :over-budget (and over-budget t)))))))
+
+(defun fit-view (view omitted)
+  "VIEW without the messages at the indices OMITTED, a note standing in for
+them ahead of the first one kept that is not a :SYSTEM message."
+  (let ((noted (null omitted)) (out '()))
+    (loop for message in view
+          for index from 0
+          unless (member index omitted)
+            do (unless (or noted (eq (getf message :role) :system))
+                 (setf noted t)
+                 (push (list :role :user
+                             :content (format nil +omitted-note+ (length omitted)))
+                       out))
+               (push message out))
+    (nreverse out)))
 
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
@@ -673,6 +790,9 @@ timeout."
 
 (defun tool-call-event (ref id name arguments)
   (list :type :tool-call :ref ref :id id :name name :arguments arguments))
+
+(defun context-trimmed-event (ref n record)
+  (list* :type :context-trimmed :ref ref :turn n record))
 
 (defun tool-result-event (ref id result)
   (list :type :tool-result :ref ref :id id :result result))

@@ -58,6 +58,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
 | `:max-tool-result` | nil | most characters of a tool result's text that reach the conversation; nil is uncapped |
+| `:max-context` | nil | most characters of conversation a request carries; the oldest turns past it are left out of the request. nil is unbounded |
 | `:turn-retries` | 0 | times a turn that failed transiently is sent again |
 | `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, plus up to 25% jitter |
 | `:sink` | nil | a stream sink, as `complete` takes |
@@ -159,15 +160,41 @@ other.
 
 ### Capping a tool result
 
-With `:max-tool-result`, a result whose rendered text is longer is cut there,
-and a note says how much was dropped, so the model knows it saw part of it:
+With `:max-tool-result`, a `:tool` message in the request whose text is longer
+is cut there, and a note says how much was dropped, so the model knows it saw
+part of it:
 
 ```
 {"text":"xxxxxxxx... [truncated: 211 characters, first 50 kept]
 ```
 
-Only the `:tool` message is cut; the `:tool-result` event a sink sees carries
-the whole result. The cut text is not valid JSON.
+The cut is made on the request only. The conversation, the result's
+`:messages` and the `:tool-result` event a sink sees carry the whole result,
+and the [`:context-trimmed`](#events) event lists each cut. The cut text is
+not valid JSON.
+
+## Fitting the context
+
+With `:max-context`, a request that would carry more than that many
+characters leaves out the oldest turns until it fits, and a note stands in for
+them:
+
+```
+[6 earlier messages omitted to fit the context budget]
+```
+
+| Kept | Left out |
+|---|---|
+| `:system` messages | the oldest turns first |
+| the newest turn | an assistant turn with its tool calls and their `:tool` replies, always together |
+
+If the system messages and the newest turn alone pass the budget, the request
+is sent anyway and the event says `:over-budget t`.
+
+The conversation is never shortened: the result's `:messages` and a
+[checkpoint](checkpoints.md) hold the whole of it, and each request trims a
+fresh view. A sink hears what a request left out or cut through
+[`:context-trimmed`](#events)[^chars].
 
 ## Failed turns
 
@@ -205,7 +232,15 @@ A tool call is never retried; its side effects may not be safe to repeat.
 (:type :tool-call   :ref r :id "c1" :name :tool-shell :arguments (:cmd "ls"))
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
+(:type :context-trimmed :ref r :turn n :omitted (1 2 3) :truncated ((4 :from 900 :to 50))
+       :size 240 :budget 250 :over-budget nil)
 ```
+
+`:context-trimmed` precedes a request that left out or cut anything, before
+that turn's model call. `:omitted` and `:truncated` index into the whole
+conversation, so a listener can tell which messages were affected; `:truncated`
+entries are `(index :from characters :to kept)`. A retried turn is built again
+and reports again.
 
 An interrupted turn ends with `:turn-interrupted` rather than a `:done`:
 nothing it streams reaches the sink after it, and the next `:turn` follows.
@@ -254,8 +289,13 @@ abandoned turn reaches the sink.
 
 ## Limitations
 
-- Conversation growth is unbounded: there is no context-window accounting or
-  compaction, so a long run eventually overruns the model's window
-  ([#39](https://todo.sr.ht/~takeiteasy/nyaa/39)).
+- A request over `:max-context` drops old turns rather than summarising them
+  ([#139](https://todo.sr.ht/~takeiteasy/nyaa/139)).
+- `:max-context` counts characters, not tokens
+  ([#140](https://todo.sr.ht/~takeiteasy/nyaa/140)).
 - A retry ignores a backend's `Retry-After` header
   ([#135](https://todo.sr.ht/~takeiteasy/nyaa/135)).
+
+[^chars]: The budget counts characters, not tokens, so it fills a window by
+    the model's own characters-per-token ratio. Old turns are dropped, not
+    summarised.
