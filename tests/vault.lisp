@@ -94,10 +94,9 @@ after the message that triggered it has already returned."
         (is (equal "also do this" (getf (first entries) :content)))
         (is (eq :folded (getf (first entries) :status)))))))
 
-(test a-steer-after-the-last-turn-stays-pending
-  ;; The backend replies to the one and only turn with no tool call, so the
-  ;; run finishes as soon as it returns -- a steer queued while that request
-  ;; is still in flight is never folded, and stays :pending in the vault.
+(test a-steer-during-the-last-turn-gets-a-turn-of-its-own
+  ;; The backend never calls a tool, so the first turn would finish the run;
+  ;; a steer queued while it is in flight earns a second turn instead.
   (with-vault-path (path)
     (with-agent ((lambda (&rest request)
                    (declare (ignore request))
@@ -107,16 +106,36 @@ after the message that triggered it has already returned."
         (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed :vault path)))
           (m:cast child (list :run :messages '((:role :user :content "go"))))
           ;; A moment for :RUN's own :STEP to fold the (empty) queue and
-          ;; spawn the request -- so this steer queues into a run already
-          ;; past its only fold point, and finish-run never revisits it.
+          ;; spawn the request, so this steer queues into the turn in flight.
+          (sleep 0.05)
+          (m:cast child (list :steer :content "one more thing"))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (eq :agent-done (first message)))
+            (is (eql 2 (getf (second (fourth message)) :turns)))
+            (is (eq :stop (getf (second (fourth message)) :stop-reason))))))
+      (is (eql 2 (length (requests))))
+      (is (search "one more thing" (getf (second (requests)) :body))))
+    (is (eq :folded (getf (first (nyaa:vault-entries path)) :status)))))
+
+(test a-steer-during-the-last-allowed-turn-stays-pending
+  ;; With :max-turns spent there is no turn left to fold into, so the run
+  ;; finishes as the model did and the steer waits for the next :run.
+  (with-vault-path (path)
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (sleep 0.3)
+                   (final-reply "done")))
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :vault path :max-turns 1)))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
           (sleep 0.05)
           (m:cast child (list :steer :content "too late"))
           (multiple-value-bind (message received) (m:receive :timeout 5)
             (is-true received)
-            (is (eq :agent-done (first message)))))))
-    (let ((entries (nyaa:vault-entries path)))
-      (is (eql 1 (length entries)))
-      (is (eq :pending (getf (first entries) :status))))))
+            (is (eq :stop (getf (second (fourth message)) :stop-reason)))))))
+    (is (eq :pending (getf (first (nyaa:vault-entries path)) :status)))))
 
 (test a-steer-before-run-is-folded-after-the-seed
   (with-vault-path (path)

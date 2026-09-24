@@ -83,7 +83,7 @@ end a plain `complete` turn early inside a working conversation.
 |---|---|
 | `(:describe)` | the metadata plist |
 | `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero |
-| `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle |
+| `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
 
 `:steer` takes an optional `:vault-id`, naming an entry already in the

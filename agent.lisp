@@ -243,12 +243,17 @@ tools, and get back its final answer."
         (let ((reply (second result)))
           (push-message service reply)
           (let ((calls (getf reply :tool-calls)))
-            (if calls
-                (dispatch-calls service calls)
-                (finish-run service (ok :messages (%messages service)
-                                        :content (getf reply :content)
-                                        :turns (%turns service)
-                                        :stop-reason :stop))))))))
+            (cond
+              (calls (dispatch-calls service calls))
+              ;; A steer that arrived while this turn was in flight gets a
+              ;; turn of its own rather than waiting for the next :RUN.
+              ((and (%steer-queue service)
+                    (< (%turns service) (agent-max-turns service)))
+               (issue-turn service))
+              (t (finish-run service (ok :messages (%messages service)
+                                         :content (getf reply :content)
+                                         :turns (%turns service)
+                                         :stop-reason :stop)))))))))
 
 (defun dispatch-calls (service calls)
   (setf (%pending service) (mapcar (lambda (call) (cons (getf call :id) :pending)) calls)
