@@ -123,7 +123,7 @@
     (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
       (m:unmount *ckpt-context* :stateful-thing)
       (is (equal '(:stateful-thing)
-                 (getf (second (nyaa:rollback *ckpt-context* path)) :missing))))))
+                 (getf (second (nyaa:rollback *ckpt-context* path :remount nil)) :missing))))))
 
 (test rollback-reports-a-class-mismatch-and-does-not-restore-it
   (with-checkpoints (dir)
@@ -406,3 +406,158 @@ once it is released."
     (let ((path (format nil "~aa.log" dir)))
       (nyaa::%append-log path '(:kind :x))
       (is-true (probe-file (format nil "~a.lock" (nyaa::%log-key path)))))))
+
+;;; --- remounting (~takeiteasy/nyaa#49) -------------------------------------
+
+(defun rolled-back (path &rest args)
+  (second (apply #'nyaa:rollback *ckpt-context* path args)))
+
+(defun generation-text (path) (uiop:read-file-string path))
+
+(defun service-entry (path name)
+  (find name (getf (nyaa::%read-generation path) :services)
+        :key (lambda (entry) (getf entry :name))))
+
+(test rollback-mounts-a-service-unmounted-since-the-checkpoint-again
+  (with-checkpoints (dir)
+    (set-thing 9)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (m:unmount *ckpt-context* :stateful-thing)
+      (let ((result (rolled-back path)))
+        (is (equal '(:stateful-thing) (getf result :remounted)))
+        (is (null (getf result :missing)))
+        (is (null (getf result :unremounted)))
+        (is (member :stateful-thing (getf result :restored))))
+      (is (= 9 (thing)) "the remounted service has its state back"))))
+
+(test rollback-can-be-told-not-to-remount
+  (with-checkpoints (dir)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (m:unmount *ckpt-context* :stateful-thing)
+      (let ((result (rolled-back path :remount nil)))
+        (is (null (getf result :remounted)))
+        (is (equal '(:stateful-thing) (getf result :missing)))
+        (is (null (m:lookup :stateful-thing)))))))
+
+(test a-generation-records-how-a-service-was-mounted
+  (with-checkpoints (dir)
+    (m:unmount *ckpt-context* :tool-fs)
+    (m:mount *ckpt-context* 'nyaa:tool-fs :root "/tmp/x/" :restart :permanent :shutdown 9)
+    (let ((entry (service-entry (nyaa:checkpoint *ckpt-context* :dir dir) :tool-fs)))
+      (is (equal "NYAA" (getf entry :package)))
+      (is (equal "TOOL-FS" (getf entry :symbol)))
+      (is (eq :permanent (getf entry :restart)))
+      (is (= 9 (getf entry :shutdown)))
+      (is (null (getf entry :parent)))
+      (is (search "/tmp/x/" (getf entry :initargs))))))
+
+(test a-remounted-service-keeps-its-mount-options-and-initargs
+  (with-checkpoints (dir)
+    (m:unmount *ckpt-context* :tool-fs)
+    (m:mount *ckpt-context* 'nyaa:tool-fs :root (make-sandbox-directory) :restart :permanent)
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (m:unmount *ckpt-context* :tool-fs)
+      (is (equal '(:tool-fs) (getf (rolled-back path) :remounted)))
+      (let ((child (find :tool-fs (m:children *ckpt-context*)
+                         :key (lambda (c) (getf c :name)))))
+        (is (eq :permanent (getf child :restart)))))))
+
+(test a-nested-service-is-mounted-again-under-its-context-and-declared-children-once
+  (with-checkpoints (dir)
+    (let ((inner (m:mount *ckpt-context* 'm:context :name :inner
+                          :children '((stateful-thing :name :declared)))))
+      (m:mount inner 'stateful-thing :name :hand)
+      (m:call (m:lookup :hand) '(:set 5))
+      (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+        (is (equal :inner (getf (service-entry path :hand) :parent)))
+        (m:unmount *ckpt-context* :inner)
+        (let ((result (rolled-back path)))
+          (is (equal '(:inner :hand) (getf result :remounted)))
+          (is (null (getf result :unremounted)) "the declared child is not mounted twice")
+          (is (null (getf result :missing)))
+          (is (member :declared (getf result :restored))))
+        (is (= 5 (m:call (m:lookup :hand) '(:get))))))))
+
+(defun mount-keyed-provider (&rest initargs)
+  (unless (m:lookup :protocol-openai) (m:mount *ckpt-context* 'nyaa:protocol-openai))
+  (apply #'m:mount *ckpt-context* 'nyaa/tests::provider-test-keyed
+         :model "test-model" :base-url "http://127.0.0.1:1" initargs))
+
+(defun provider-key ()
+  (nyaa::provider-api-key (m:service-of (m:lookup :provider-test-keyed))))
+
+(test a-generation-never-holds-a-credential
+  (with-checkpoints (dir)
+    (mount-keyed-provider :api-key "sk-very-secret")
+    (let* ((path (nyaa:checkpoint *ckpt-context* :dir dir))
+           (entry (service-entry path :provider-test-keyed)))
+      (is (null (search "sk-very-secret" (generation-text path))))
+      (is (equal '(:api-key) (getf entry :withheld)))
+      (is (search ":model" (getf entry :initargs))))))
+
+(test a-provider-remounted-without-its-key-takes-it-back-from-rollback
+  (with-checkpoints (dir)
+    (mount-keyed-provider :api-key "sk-very-secret")
+    (let ((path (nyaa:checkpoint *ckpt-context* :dir dir)))
+      (m:unmount *ckpt-context* :provider-test-keyed)
+      (is (equal '(:provider-test-keyed) (getf (rolled-back path) :remounted)))
+      (is (null (provider-key)))
+      (is (equal "test-model" (nyaa::provider-model
+                               (m:service-of (m:lookup :provider-test-keyed)))))
+      (m:unmount *ckpt-context* :provider-test-keyed)
+      (rolled-back path :initargs '((:provider-test-keyed :api-key "sk-again")))
+      (is (equal "sk-again" (provider-key))))))
+
+(test a-credential-inside-a-declared-child-is-left-out-too
+  (multiple-value-bind (kept withheld)
+      (nyaa::%persistable-initargs
+       'm:context '(:name :c :children ((nyaa/tests::provider-test-keyed
+                                         :api-key "k" :model "m"))))
+    (is (equal '(:name :c :children ((nyaa/tests::provider-test-keyed :model "m"))) kept))
+    (is (equal '("provider-test-keyed :api-key") withheld))))
+
+(test a-value-that-cannot-be-read-back-is-left-out
+  (with-checkpoints (dir)
+    (m:mount *ckpt-context* 'nyaa:agent :name :a1 :model :nothing :sink (lambda (e) e))
+    (let ((entry (service-entry (nyaa:checkpoint *ckpt-context* :dir dir) :a1)))
+      (is (equal '(:sink) (getf entry :withheld)))
+      (is (null (search "sink" (getf entry :initargs)))))))
+
+(test an-entry-that-cannot-be-mounted-again-is-reported-and-the-rest-carry-on
+  (with-checkpoints (dir)
+    (ensure-directories-exist dir)
+    (set-thing 4)
+    (let ((path (merge-pathnames "ghost.generation" dir)))
+      (nyaa::%write-generation
+       path
+       (list :nyaa-generation 2 :created "2026-01-01T00:00:00Z" :label nil
+             :services (list (list :name :ghost :class "ghost" :package "NO-SUCH-PACKAGE"
+                                   :symbol "GHOST" :parent nil :initargs "nil" :state nil)
+                             (list :name :orphan :class "stateful-thing" :package "NYAA/TESTS"
+                                   :symbol "STATEFUL-THING" :parent :nowhere :initargs "nil"
+                                   :state nil)
+                             (list :name :stateful-thing :class "stateful-thing"
+                                   :state (list :value 8)))))
+      (let ((result (rolled-back path)))
+        (is (equal '(:ghost :orphan) (mapcar #'first (getf result :unremounted))))
+        (is (search "NO-SUCH-PACKAGE" (second (first (getf result :unremounted)))))
+        (is (search "nowhere" (second (second (getf result :unremounted)))))
+        (is (equal '(:ghost :orphan) (getf result :missing)))
+        (is (equal '(:stateful-thing) (getf result :restored)))
+        (is (= 8 (thing)))))))
+
+(test a-version-1-generation-still-rolls-back
+  (with-checkpoints (dir)
+    (ensure-directories-exist dir)
+    (let ((path (merge-pathnames "old.generation" dir)))
+      (nyaa::%write-generation
+       path
+       (list :nyaa-generation 1 :created "2026-01-01T00:00:00Z" :label nil
+             :services (list (list :name :old-thing :class "stateful-thing" :state nil)
+                             (list :name :stateful-thing :class "stateful-thing"
+                                   :state (list :value 3)))))
+      (let ((result (rolled-back path)))
+        (is (equal '(:old-thing) (getf result :missing)))
+        (is (null (getf result :remounted)))
+        (is (null (getf result :unremounted)))
+        (is (= 3 (thing)))))))

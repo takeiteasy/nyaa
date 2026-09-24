@@ -80,7 +80,9 @@ Keys are BYOK. A key comes from the environment variable the declaration names,
 or from an `:api-key` mount option that overrides it. Keys are never read from
 the user config file, which is startup code and should not also be a secret
 store, and never appear in metadata — `:auth` publishes the kind, the header
-name and the variable, nothing more.
+name and the variable, nothing more. A [checkpoint](checkpoints.md#credentials)
+leaves `:api-key` out of a generation, so a provider mounted again by a
+rollback takes its key from the variable unless the rollback is given one.
 
 A provider whose key is absent still mounts, so discovery lists it and the
 failure is legible:

@@ -6,12 +6,15 @@
 ;;; recording every named service's own declared state, taken through the
 ;;; SNAPSHOT/RESTORE convention (tool.lisp) shared by every tool, the agent
 ;;; and a provider. Rollback restores that state onto the services mounted
-;;; now; it does not remount, so a service unmounted since the checkpoint is
-;;; reported rather than rebuilt. A generation therefore carries a manifest
-;;; of each child's name and class -- both already reported by M:CHILDREN --
-;;; never its mount initargs, which is where a provider's :api-key would
-;;; otherwise end up on disk (providers.md's credentials line, held the same
-;;; way in tools/image.lisp).
+;;; now, first remounting one unmounted since the checkpoint from what the
+;;; generation recorded of how it was mounted (~takeiteasy/nyaa#49).
+;;;
+;;; That record is where a provider's :api-key would otherwise end up on disk
+;;; (providers.md's credentials line, held the same way in tools/image.lisp),
+;;; so a class names its credential initargs through SECRET-INITARGS and they
+;;; are left out, as is any value that cannot be printed and read back, such
+;;; as an agent's :sink. What was left out is recorded by name, as :WITHHELD,
+;;; and a remount takes it back from ROLLBACK's :INITARGS.
 ;;;
 ;;; Image generations -- SAVE-LISP-AND-DIE, relaunch-and-restore, an
 ;;; install-time recovery image (~takeiteasy/nyaa#48) -- live in
@@ -22,25 +25,115 @@
 ;;; The agent's own SNAPSHOT/RESTORE methods live at the end of agent.lisp,
 ;;; alongside the slots they read and write.
 
+(defgeneric secret-initargs (service)
+  (:documentation "The mount initargs of SERVICE's class that hold a credential,
+which a generation never writes to disk. NIL by default. A class is asked
+through its prototype, so the method reads nothing but the class.")
+  (:method ((service m:service)) nil))
+
 (defvar *generations-directory*
   (merge-pathnames ".nyaa/generations/" (user-homedir-pathname))
   "Default directory CHECKPOINT writes to and GENERATIONS lists from.")
 
 ;;; --- walking the mount tree ---------------------------------------------
 
-(defun %context-entries (context-process)
-  "Every named child under CONTEXT-PROCESS, recursively, as a flat list of
-(:name :class :process). An unregistered child -- a delegated sub-agent,
-whose name is nil (agent.lisp) -- is skipped, as is its own subtree."
+(defun %context-entries (context-process &key specs parent)
+  "Every named child under CONTEXT-PROCESS, recursively and parent first, as a
+flat list of (:name :class :process). An unregistered child -- a delegated
+sub-agent, whose name is nil (agent.lisp) -- is skipped, as is its own subtree.
+SPECS adds each child's :SPEC, how to mount it again (%ENTRY-SPEC), PARENT
+being the name of the context CONTEXT-PROCESS is."
   (loop for child in (m:children context-process)
         for name = (getf child :name)
         for class = (getf child :class)
         for process = (getf child :process)
         when name
-          collect (list :name name :class (string-downcase (symbol-name class))
-                        :process process)
+          collect (append (list :name name :class (string-downcase (symbol-name class))
+                                :process process)
+                          (and specs (%entry-spec context-process name class parent)))
         when (and name (subtypep class 'm:context) process)
-          append (%context-entries process)))
+          append (%context-entries process :specs specs :parent name)))
+
+;;; --- how a service was mounted ---------------------------------------------
+
+(defun %secret-initargs (class)
+  "CLASS's SECRET-INITARGS, or :ALL when it cannot be asked, which fails
+closed: a class that cannot say which initargs are credentials records none."
+  (handler-case
+      (let ((class (find-class class)))
+        (sb-mop:finalize-inheritance class)
+        (secret-initargs (sb-mop:class-prototype class)))
+    (error () :all)))
+
+(defun %readable-p (value)
+  "Whether VALUE prints and reads back as it would be remounted: SBCL prints
+a function readably as a #. form, which the guarded read then refuses."
+  (handler-case (let ((*print-readably* t))
+                  (%read-initargs (%print-initargs value))
+                  t)
+    (error () nil)))
+
+(defun %persistable-initargs (class initargs)
+  "INITARGS of a CLASS mount as a generation may record them, then the ones
+left out: those CLASS's SECRET-INITARGS name, any value that does not print
+readably, and, inside a :CHILDREN spec list, the same for each spec's own
+class. A left-out key is a keyword, or a string \"class key\" from a child spec."
+  (let ((secret (%secret-initargs class)) kept withheld)
+    (if (eq secret :all)
+        (loop for (key) on initargs by #'cddr do (push key withheld))
+        (loop for (key value) on initargs by #'cddr
+              do (cond ((member key secret) (push key withheld))
+                       ((and (eq key :children) (a:proper-list-p value))
+                        (multiple-value-bind (specs gone) (%persistable-children value)
+                          (setf kept (append kept (list key specs))
+                                withheld (append (reverse gone) withheld))))
+                       ((%readable-p value) (setf kept (append kept (list key value))))
+                       (t (push key withheld)))))
+    (values kept (nreverse withheld))))
+
+(defun %persistable-children (specs)
+  "SPECS, a :CHILDREN list of (class . initargs), as %PERSISTABLE-INITARGS
+records each, then what it left out. A spec whose class is not defined cannot
+be asked, so it is left out whole."
+  (let (kept withheld)
+    (dolist (spec specs)
+      (let ((class (and (consp spec) (symbolp (car spec)) (find-class (car spec) nil))))
+        (cond (class
+               (multiple-value-bind (args gone) (%persistable-initargs (car spec) (cdr spec))
+                 (push (cons (car spec) args) kept)
+                 (dolist (key gone)
+                   (push (format nil "~(~a~) ~(~s~)" (car spec) key) withheld))))
+              (t (push (format nil "~(~a~) :all" (if (consp spec) (car spec) spec)) withheld)))))
+    (values (nreverse kept) (nreverse withheld))))
+
+(defun %print-initargs (initargs)
+  "INITARGS as text, so that reading a generation never depends on every
+package they name being loaded: an entry whose package is gone fails alone,
+when it is remounted, rather than the whole file failing to read."
+  (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+    (prin1-to-string initargs)))
+
+(defun %read-initargs (text)
+  (let ((*read-eval* nil) (*package* (find-package "KEYWORD")))
+    (read-from-string text)))
+
+(defun %entry-spec (context-process name class parent)
+  "(:SPEC plist) of what a generation records to mount NAME again, or nil
+when it cannot be: its class is not a symbol in a package, or CONTEXT-PROCESS
+no longer has it."
+  (let ((spec (m:child-spec context-process name)))
+    (when (and spec (symbolp class) (symbol-package class))
+      (multiple-value-bind (initargs withheld)
+          (%persistable-initargs class (getf spec :initargs))
+        (list :spec (list :parent parent
+                          :package (package-name (symbol-package class))
+                          :symbol (symbol-name class)
+                          :restart (getf spec :restart)
+                          :shutdown (getf spec :shutdown)
+                          :backoff (getf spec :backoff)
+                          :backoff-max (getf spec :backoff-max)
+                          :initargs (%print-initargs initargs)
+                          :withheld withheld))))))
 
 ;;; --- snapshot / restore across a process boundary ------------------------
 
@@ -199,7 +292,8 @@ through this, and always compare equal to each other."
 
 (defun %snapshot-entry (entry outcome)
   (destructuring-bind (reply status) outcome
-    (let ((base (list :name (getf entry :name) :class (getf entry :class))))
+    (let ((base (append (list :name (getf entry :name) :class (getf entry :class))
+                        (getf entry :spec))))
       (cond (status (append base (list :unavailable (%unavailable-reason status))))
             ((tool-error-p reply) (append base (list :state nil)))
             (t (append base (list :state reply)))))))
@@ -218,7 +312,7 @@ asked at once and given TIMEOUT seconds; one that does not answer is
 recorded :UNAVAILABLE. KEEP, given, prunes DIR to its KEEP newest
 generations afterwards. Returns the generation's pathname, then the names
 of the services snapshotted mid-work and of those unavailable."
-  (let* ((entries (%context-entries context))
+  (let* ((entries (%context-entries context :specs t))
          (outcomes (m:call-all (mapcar (lambda (entry) (getf entry :process)) entries)
                                '(:snapshot) :timeout timeout))
          (services (mapcar #'%snapshot-entry entries outcomes))
@@ -226,7 +320,7 @@ of the services snapshotted mid-work and of those unavailable."
          (path (merge-pathnames (%generation-filename) directory)))
     (ensure-directories-exist directory)
     (%write-generation path
-                       (list :nyaa-generation 1 :created (%now-iso8601)
+                       (list :nyaa-generation 2 :created (%now-iso8601)
                              :label label :services services))
     (when keep (%prune-generations directory keep))
     (values (%canonical-path path)
@@ -271,23 +365,74 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
     (a:when-let ((image (getf stale :image)))
       (ignore-errors (delete-file image)))))
 
-(defun rollback (context path &key (timeout 30))
+;; TODO: OVERRIDES reach only a service mounted here. A context mounts its
+;; declared :children itself, from a spec with its credentials left out, so a
+;; credential cannot be given back to one (~takeiteasy/nyaa#141).
+(defun %remount-entry (context entries entry overrides)
+  "Mount ENTRY, a generation entry, again, under the context it was under
+among ENTRIES -- CONTEXT's current entries -- or CONTEXT itself. OVERRIDES is
+ROLLBACK's :INITARGS. Signals an error saying why it cannot."
+  (let* ((parent-name (getf entry :parent))
+         (parent (if parent-name
+                     (getf (find parent-name entries :key (lambda (e) (getf e :name)))
+                           :process)
+                     context))
+         (package (find-package (getf entry :package)))
+         (class (and package (find-symbol (getf entry :symbol) package))))
+    (unless parent (error "its parent ~(~a~) is not mounted" parent-name))
+    (unless (and class (find-class class nil))
+      (error "its class ~a::~a is not defined" (getf entry :package) (getf entry :symbol)))
+    (apply #'m:mount parent class
+           (append (cdr (assoc (getf entry :name) overrides))
+                   (%read-initargs (getf entry :initargs))
+                   (loop for key in '(:restart :shutdown :backoff :backoff-max)
+                         when (getf entry key) append (list key (getf entry key)))))))
+
+(defun %remount (context recorded overrides)
+  "Mount again each of RECORDED, generation entries, that has no service of
+its name now and was recorded with how it was mounted. Parent first, as the
+generation lists them, looking again after each so that a context's declared
+children, which it mounts itself, are not mounted twice. Returns the names
+remounted, then (name reason) for each that could not be."
+  (let (remounted failed)
+    (dolist (entry recorded)
+      (let ((name (getf entry :name)) (entries (%context-entries context)))
+        (when (and (getf entry :symbol)
+                   (not (find name entries :key (lambda (e) (getf e :name)))))
+          (handler-case (progn (%remount-entry context entries entry overrides)
+                               (push name remounted))
+            (error (e) (push (list name (princ-to-string e)) failed))))))
+    (values (nreverse remounted) (nreverse failed))))
+
+(defun rollback (context path &key (timeout 30) (remount t) initargs)
   "Restore the generation at PATH onto CONTEXT's named services now. Every
-restore is sent at once and given TIMEOUT seconds.
+restore is sent at once and given TIMEOUT seconds. Unless REMOUNT is nil, a
+service unmounted since the checkpoint is first mounted again from what the
+generation recorded of it, and restored like the rest. INITARGS, an alist of
+(name . initargs), is added to a remounted service's own -- the way to give
+back a credential the generation left out, which a provider otherwise takes
+from its environment variable.
 Returns (:ok (:restored names :failed names :failures entries :interrupted names
-:unavailable names :missing names :mismatched entries :extra names)). FAILED names a
+:unavailable names :remounted names :unremounted entries :missing names
+:mismatched entries :extra names)). FAILED names a
 restore that got no answer and FAILURES lists each as (name reason); INTERRUPTED a restored service that was
 snapshotted mid-work, whose in-flight work is gone; UNAVAILABLE an entry the
-checkpoint could not snapshot, left as it is. MISSING names a generation
-entry with no service mounted under that name now; MISMATCHED one mounted
+checkpoint could not snapshot, left as it is. REMOUNTED names a service
+mounted again, UNREMOUNTED lists each that could not be as (name reason), and
+MISSING names a generation entry with no service mounted under that name
+now, one from a version 1 generation included; MISMATCHED one mounted
 under a different class, which is reported rather than restored; EXTRA a
 service mounted now the generation does not name. None of these fails the
 call -- the caller decides what drift means."
   (let* ((generation (%read-generation path))
          (recorded (getf generation :services))
-         (current (%context-entries context))
+         (remounted '()) (unremounted '())
+         (current '())
          (targets '())
          (unavailable '()) (missing '()) (mismatched '()))
+    (when remount
+      (setf (values remounted unremounted) (%remount context recorded initargs)))
+    (setf current (%context-entries context))
     (dolist (entry recorded)
       (let* ((name (getf entry :name))
              (found (find name current :key (lambda (e) (getf e :name)))))
@@ -316,6 +461,7 @@ call -- the caller decides what drift means."
                           (push name interrupted)))))
       (ok :restored (nreverse restored) :failed (nreverse failed)
           :failures (nreverse failures) :interrupted (nreverse interrupted) :unavailable (nreverse unavailable)
+          :remounted remounted :unremounted unremounted
           :missing (nreverse missing) :mismatched (nreverse mismatched)
           :extra (set-difference (mapcar (lambda (e) (getf e :name)) current)
                                  (mapcar (lambda (e) (getf e :name)) recorded))))))

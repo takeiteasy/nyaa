@@ -27,6 +27,8 @@
   (:documentation "The mount-time half of a provider: the fields a mount may
 override. The declared half is PROVIDER-DECLARATION."))
 
+(defmethod secret-initargs ((service provider)) '(:api-key))
+
 (defgeneric provider-declaration (service)
   (:documentation "SERVICE's checked declaration plist, as DEFINE-PROVIDER
 wrote it."))

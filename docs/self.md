@@ -63,8 +63,8 @@ once, and the reload's own result is logged as a `:late-outcome` entry.
 There is no `:mount` or `:unmount` here -- caller-supplied initargs would
 have to be logged, and a provider's `:api-key` is exactly the kind of
 initarg that must never reach disk (see
-[checkpoints](checkpoints.md#the-generation-file)). Arbitrary remount stays
-with [#49](https://todo.sr.ht/~takeiteasy/nyaa/49).
+[checkpoints](checkpoints.md#credentials)). A rollback does mount a service
+again, from what its generation recorded.
 
 `:eval` and `:define` run on their own thread, interrupted at `:timeout` --
 the same shape as `tool-http`'s deadline (see [tools](tools.md#workers)) --

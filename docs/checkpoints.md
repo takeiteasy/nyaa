@@ -1,8 +1,8 @@
 # Checkpoints and rollback
 
-A generation is a snapshot of every named service's own declared state,
-written as one s-expression file. `checkpoint` takes one; `rollback` puts it
-back.
+A generation is a snapshot of every named service's own declared state and of
+how each was mounted, written as one s-expression file. `checkpoint` takes
+one; `rollback` puts it back, mounting again a service that has gone.
 
 ```lisp
 (nyaa:checkpoint *ctx* :label "before edit")
@@ -15,7 +15,8 @@ back.
 (nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774.generation"
                :timeout 30)
 ;; => (:ok (:restored (:tool-fs :assistant) :failed nil :failures nil :interrupted nil
-;;          :unavailable nil :missing nil :mismatched nil :extra nil))
+;;          :unavailable nil :remounted nil :unremounted nil :missing nil
+;;          :mismatched nil :extra nil))
 ```
 
 `checkpoint` returns the path, then the names of the services snapshotted
@@ -53,36 +54,60 @@ as interrupted.
 ## The generation file
 
 ```lisp
-(:nyaa-generation 1
+(:nyaa-generation 2
  :created "2026-09-22T17:16:10Z"
  :label "before edit"
- :services ((:name :tool-fs :class "tool-fs" :state nil)
-            (:name :assistant :class "agent"
+ :services ((:name :tool-fs :class "tool-fs"
+             :parent nil :package "NYAA" :symbol "TOOL-FS"
+             :restart :transient :shutdown 5 :backoff nil :backoff-max nil
+             :initargs "(:root \"/work/\")" :withheld nil
+             :state nil)
+            (:name :assistant :class "agent" ...
              :state (:messages (...) :turns 3))
-            (:name :slow :class "slow-thing" :unavailable :timeout)))
+            (:name :slow :class "slow-thing" ... :unavailable :timeout)))
 ```
 
 A service that does not answer within the deadline, or exits or deadlocks
 first, is recorded `:unavailable` with the reason and no `:state`.
+
+Each entry also records how it was mounted: the context it was under
+(`:parent`, nil at the root), its class by package and symbol name, its mount
+options, and its `:initargs` as text[^text]. Services are listed parent first.
 
 Read with `*read-eval*` bound to `nil` — the same guard `tool-eval`'s worker
 applies to a submitted form — so a generation can never run code merely by
 being read back in. Written through a temporary file and renamed in, so a
 torn write never replaces a good one.
 
-A generation records each named child's `:name` and `:class`, both already
-published by `m:children`, never its mount initargs. A provider's `:api-key`
-is one, and keeping a credential out of published state is the same line
-[providers](providers.md#credentials) and [`tool-image`](introspection.md)
-both hold — a generation on disk holds it too, so it draws the line there
-rather than at metadata alone.
+## Credentials
+
+A generation never holds a credential. A class names its own with
+`secret-initargs`, which a provider answers with `(:api-key)`:
+
+```lisp
+(defmethod nyaa:secret-initargs ((service my-service)) '(:token))
+```
+
+Left out of `:initargs`, and named in `:withheld`:
+
+| Left out | Shown in `:withheld` as |
+|---|---|
+| a key `secret-initargs` names | the key, `:api-key` |
+| a value that does not print and read back, such as an agent's `:sink` | the key, `:sink` |
+| either of those inside a context's `:children` specs | `"provider-x :api-key"` |
+| every initarg of a class that cannot be asked | its keys |
+
+A service mounted again without its key takes it from wherever it would
+have: a provider from its environment variable. `rollback`'s `:initargs`
+gives it back explicitly.
 
 ## Rollback and drift
 
-`rollback` restores state onto the services mounted now; it does not
-remount. Every restore is sent at once and given `:timeout` seconds (default
-30), so one busy service does not delay the rest. Drift since the checkpoint is reported rather than silently
-accepted:
+`rollback` mounts again each service the generation names that is not
+mounted now, parent first, then restores state onto every service mounted.
+Every restore is sent at once and given `:timeout` seconds (default 30), so
+one busy service does not delay the rest. Drift since the checkpoint is
+reported rather than silently accepted:
 
 | Key | Meaning |
 |---|---|
@@ -91,9 +116,25 @@ accepted:
 | `:failures` | each failed name with its reason: `(name :timeout)`, `(name :down)`, `(name :error)` or `(name :deadlock)` |
 | `:interrupted` | restored names that were snapshotted mid-work; the in-flight work is gone |
 | `:unavailable` | names the checkpoint could not snapshot — left as they are |
-| `:missing` | a generation entry with no service mounted under that name now |
+| `:remounted` | names mounted again from the generation |
+| `:unremounted` | each name that could not be, with why: `(name "its class NO-PKG::X is not defined")` |
+| `:missing` | a generation entry with no service mounted under that name now, `:unremounted` ones and those of a version 1 generation included |
 | `:mismatched` | mounted now, but under a different class — not restored |
 | `:extra` | mounted now, not named by the generation |
+
+```lisp
+(nyaa:rollback *ctx* path :remount nil)                 ; restore what is mounted, nothing more
+(nyaa:rollback *ctx* path
+               :initargs '((:provider-example :api-key "sk-...")))
+```
+
+`:remount nil` restores onto what is mounted now. `:initargs` is an alist of
+`(name . initargs)`, put ahead of a remounted service's own.
+
+A context mounted again mounts its declared `:children` itself, so those are
+not mounted a second time; only what was mounted onto it by hand is.
+A version 1 generation records no mount, so a service it names that has gone
+is `:missing`.
 
 ## `tool-checkpoint`
 
@@ -121,6 +162,10 @@ instead, as [`tool-self`](self.md) does before every write it makes.
 
 ## Limitations
 
-- Rollback restores state, not the mount set: a service unmounted since the
-  checkpoint is reported as `:missing`, never remounted
-  ([#49](https://todo.sr.ht/~takeiteasy/nyaa/49)).
+- `:initargs` cannot give a credential back to a child a remounted context
+  declares itself; it takes its key from its environment variable
+  ([#141](https://todo.sr.ht/~takeiteasy/nyaa/141)).
+
+[^text]: Printed as text so that a generation reads back even when a package
+    it names is gone: that entry alone is `:unremounted`, when it is
+    remounted, and the rest of the file is unaffected.
