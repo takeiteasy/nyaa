@@ -36,7 +36,7 @@ and stays off the model's own allow-list the same way.
 |---|---|---|
 | `:eval` | `:form` (required), `:package` (default `"CL-USER"`), `:timeout` | `:value`, `:values`, `:out`, `:elided` |
 | `:define` | `:form` (required), `:package`, `:timeout` | `:name` |
-| `:reload` | `:name` (required) | `:name` |
+| `:reload` | `:name` (required), `:timeout` | `:name` |
 | `:log` | `:limit` (default 50) | `:entries`, `:total` |
 
 `:eval` answers the same value shape `tool-eval` and `tool-repl` do (see
@@ -56,7 +56,10 @@ checkpoint and log entry describe an actual definition; anything else is
 `:eval`'s job.
 
 `:reload` is `m:reload` on the tool's own context: the named child is
-stopped, reinitialised with its own mount initargs and started again.
+stopped, reinitialised with its own mount initargs and started again. A
+reload that has begun always runs to its end: at `:timeout`, or when the
+call's token is cancelled, the caller gets `:timeout` or `:cancelled` at
+once, and the reload's own result is logged as a `:late-outcome` entry.
 There is no `:mount` or `:unmount` here -- caller-supplied initargs would
 have to be logged, and a provider's `:api-key` is exactly the kind of
 initarg that must never reach disk (see
@@ -173,5 +176,3 @@ or a slot (see [introspection](introspection.md#trust-posture)), `tool-self`
 - The checkpoint taken before a write waits up to `checkpoint`'s own 30
   second `:timeout` for a busy service, independent of `:timeout`, and
   does not report which services it caught mid-run.
-- A cancelled `:reload` still finishes
-  ([#124](https://todo.sr.ht/~takeiteasy/nyaa/124)).

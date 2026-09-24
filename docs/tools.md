@@ -130,7 +130,7 @@ it -- a call queued behind another on the same tool included. Cancelling one
 already running stops its work, as a lapsed `:timeout` does, in `tool-shell`
 (the whole process group), `tool-http` (the connection), `tool-eval` and
 `tool-repl` (the worker, so that `:id` starts empty), `tool-plan` (the step
-in flight, and none after it) and `tool-self` (an `:eval` or `:define`; see
+in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the wait on a `:reload`; see
 [self-modification](self.md)). The other tools finish what they started.
 
 ## The standard tools

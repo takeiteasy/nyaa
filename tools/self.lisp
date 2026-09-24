@@ -76,7 +76,7 @@ then the only way an operator can still redefine anything, and every
               (:label string :doc "a note for this write's checkpoint and log entry")
               (:limit (integer 1 1000) :default 50 :doc "entries to answer, for :log")
               (:timeout (integer 1) :default +default-tool-timeout+
-               :doc "kill a wedged :eval or :define after this many milliseconds")))
+               :doc "stop waiting on a write after this many milliseconds")))
   (:invoke (op form package name label limit timeout)
     (case op
       (:log (op-self-log (self-log-file service) limit))
@@ -187,19 +187,47 @@ immediately before the write."
   (ecase op
     ((:eval :define) (run-in-host parsed timeout :package package :cancel cancel
                                                  :on-late on-late))
-    (:reload (op-self-reload service parsed timeout))))
+    (:reload (op-self-reload service parsed timeout cancel on-late))))
 
-;;; TODO: M:RELOAD runs on this tool's own process, so a cancel cannot stop
-;;; it. Upgrade path: run it off the process, as RUN-IN-HOST does. Tracked
-;;; in ~takeiteasy/nyaa#124.
-(defun op-self-reload (service name timeout)
-  (declare (ignore timeout))
-  (let ((context (m:service-context service)))
-    (handler-case
-        (a:if-let (process (m:reload (m:service-process context) name))
-          (ok :name (string-downcase (symbol-name name)) :process (princ-to-string process))
-          (bad-request "no child named ~(~a~)" name))
-      (error (e) (fail (list :error (princ-to-string e)))))))
+;;; --- reload, waited on off the tool's process ---------------------------
+
+;;; The context stops and restarts the child on its own process, and a
+;;; reload it has begun cannot be undone half way. So a cancel or a lapsed
+;;; :TIMEOUT only stops the wait: the reload runs to its end, and its result
+;;; reaches ON-LATE. A reload not yet begun is never started. STATE is the
+;;; same hand-off RUN-IN-HOST uses.
+
+(defun op-self-reload (service name timeout cancel on-late)
+  (let ((context (m:service-process (m:service-context service))))
+    ;; Refused here: waited on from another thread, the context would stop
+    ;; this process while its HANDLE still waits on the reload.
+    (if (eq (m:lookup name :registry (m:service-registry service))
+            (m:service-process service))
+        (fail (list :error "tool-self cannot reload itself"))
+        (let* ((result nil)
+               (state (list :running))
+               (wake (bt:make-semaphore)))
+          (bt:make-thread
+           (lambda ()
+             (when (eq :running (car state))
+               (setf result (reload-child context name))
+               (unless (eq :running (sb-ext:compare-and-swap (car state) :running :done))
+                 (ignore-errors (funcall on-late result))))
+             (bt:signal-semaphore wake))
+           :name "nyaa-self-reload")
+          (when cancel
+            (on-cancel cancel (lambda () (bt:signal-semaphore wake))))
+          (bt:wait-on-semaphore wake :timeout (/ timeout 1000))
+          (if (eq :running (sb-ext:compare-and-swap (car state) :running :stopped))
+              (fail (if (and cancel (cancelled-p cancel)) :cancelled :timeout))
+              result)))))
+
+(defun reload-child (context name)
+  (handler-case
+      (a:if-let (process (m:reload context name))
+        (ok :name (string-downcase (symbol-name name)) :process (princ-to-string process))
+        (bad-request "no child named ~(~a~)" name))
+    (error (e) (fail (list :error (princ-to-string e))))))
 
 ;;; --- CLOS mutation latch (~takeiteasy/nyaa#79, #81) --------------------
 ;;;

@@ -334,16 +334,15 @@ interrupt still has to land and unwind."
 
 (defvar *self-eval-started* nil)
 
-(defun cancel-self-eval-once (started form)
-  "Invoke :eval FORM on a thread of its own, cancel it once STARTED answers
+(defun cancel-self-once (started op &rest args)
+  "Invoke OP with ARGS on a thread of its own, cancel it once STARTED answers
 true, and return its result."
   (let* ((token (nyaa:make-cancel-token))
          (registry m:*registry*)
          (thread (bt:make-thread
                   (lambda ()
                     (let ((m:*registry* registry))
-                      (self :eval :form form :package "NYAA-SELF-TEST"
-                                  :timeout 30000 :cancel token))))))
+                      (apply #'self op :timeout 30000 :cancel token args))))))
     (is-true (eventually started 5))
     (nyaa:cancel token)
     (bt:join-thread thread)))
@@ -356,9 +355,10 @@ true, and return its result."
   (with-self ()
     (setf *self-eval-started* nil)
     (let* ((started (get-internal-real-time))
-           (result (cancel-self-eval-once
+           (result (cancel-self-once
                     (lambda () *self-eval-started*)
-                    "(progn (setf nyaa/tests::*self-eval-started* t) (sleep 5))")))
+                    :eval :package "NYAA-SELF-TEST"
+                    :form "(progn (setf nyaa/tests::*self-eval-started* t) (sleep 5))")))
       (is (equal :cancelled (nyaa:tool-error result)))
       (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 4))
       (is-true (no-nyaa-self-eval-thread-p))
@@ -366,9 +366,10 @@ true, and return its result."
 
 (test self-eval-cancelled-after-a-mutation-logs-it-abandoned
   (with-self ()
-    (let ((result (cancel-self-eval-once
+    (let ((result (cancel-self-once
                    (lambda () (class-named "SELF-TEST-CANCEL-A"))
-                   "(progn (defclass self-test-cancel-a () ()) (sleep 5))")))
+                   :eval :package "NYAA-SELF-TEST"
+                   :form "(progn (defclass self-test-cancel-a () ()) (sleep 5))")))
       (is (equal :cancelled (nyaa:tool-error result)))
       (is-true (eventually #'late-outcome-entry))
       (is (equal '(:error :abandoned) (getf (late-outcome-entry) :outcome))))))
@@ -383,6 +384,38 @@ true, and return its result."
     ;; reload keeps the instance's own slots (meow's reload.md): still
     ;; answering, and still holding the value set before the reload.
     (is (eql 9 (thing)))))
+
+;;; A child a second in stopping, so a reload is still running when its
+;;; call's deadline lapses or its token is cancelled.
+
+(defvar *slow-stopper-stopping* nil)
+
+(m:defservice slow-stopper () () (:name :slow-stopper))
+
+(defmethod m:dispose ((service slow-stopper) reason)
+  (declare (ignore reason))
+  (setf *slow-stopper-stopping* t)
+  (sleep 1))
+
+(test self-reload-past-its-timeout-stops-waiting-and-logs-the-late-outcome
+  (with-self ()
+    (m:mount *self-context* 'slow-stopper)
+    (let ((result (self :reload :name "slow-stopper" :timeout 100)))
+      (is (equal :timeout (nyaa:tool-error result)))
+      (is-true (eventually #'late-outcome-entry 5))
+      (is (eq :ok (getf (late-outcome-entry) :outcome)))
+      (is-true (m:lookup :slow-stopper)))))
+
+(test self-reload-cancelled-mid-run-stops-waiting-and-logs-the-late-outcome
+  (with-self ()
+    (setf *slow-stopper-stopping* nil)
+    (m:mount *self-context* 'slow-stopper)
+    (let ((result (cancel-self-once (lambda () *slow-stopper-stopping*)
+                                    :reload :name "slow-stopper")))
+      (is (equal :cancelled (nyaa:tool-error result)))
+      (is (equal '(:error :cancelled) (getf (last-entry :outcome) :outcome)))
+      (is-true (eventually #'late-outcome-entry 5))
+      (is (eq :ok (getf (late-outcome-entry) :outcome))))))
 
 (test self-reload-an-unknown-name-is-a-bad-request
   (with-self ()
