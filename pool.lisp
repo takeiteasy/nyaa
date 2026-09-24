@@ -1,24 +1,32 @@
 (in-package #:nyaa)
 
 ;;; Shared worker pools. Work that only waits -- a completion -- runs on a
-;;; pooled thread rather than one spawned for it, and each tier caps how many
+;;; pooled thread rather than one spawned for it, and each pool caps how many
 ;;; threads it keeps. A job may carry a key and a limit: no more than LIMIT
 ;;; jobs of one key run at once, and a job held back by its key waits in the
 ;;; queue without holding a thread.
 ;;;
-;;; The tiers are ordered :PROVIDER > :PROTOCOL, and a job only ever waits on
-;;; work in a lower tier, so a full tier can never be waiting on itself. See
-;;; docs/protocols.md.
+;;; A completion pool is keyed by depth: a completion called directly runs at
+;;; depth 0, and each completion a job makes runs one deeper. A job only ever
+;;; waits on the next depth, so a full pool can never be waiting on itself.
+;;; Emitters drain in a pool of their own, :SINK. See docs/protocols.md.
 
-(defparameter *pool-sizes* '(:provider 64 :protocol 64)
-  "The most threads each tier keeps, read when the tier's pool is first
-used. Nil for a tier leaves it uncapped.")
+(defparameter *pool-size* 64
+  "The most threads each completion pool keeps, read when the pool is first
+used. Nil leaves it uncapped.")
+
+(defparameter *sink-pool-size* 64
+  "The most threads the sink pool keeps, read when it is first used. Nil leaves
+it uncapped.")
+
+(defparameter *max-completion-depth* 8
+  "The deepest a completion may nest; a deeper one is refused.")
 
 (defparameter *pool-idle-seconds* 30
   "Seconds a pooled thread waits for work before it exits.")
 
-(defstruct (pool (:constructor %make-pool (tier max-threads)))
-  tier max-threads
+(defstruct (pool (:constructor %make-pool (key max-threads)))
+  key max-threads
   (lock (bt:make-lock :name "nyaa-pool"))
   (cv (bt:make-condition-variable))
   (queue '())
@@ -30,13 +38,15 @@ used. Nil for a tier leaves it uncapped.")
                          (function &key key limit (registry m:*registry*))))
   function key limit registry pool (state :queued))
 
-(defvar *pools* (make-hash-table :test 'eq))
+(defvar *pools* (make-hash-table :test 'eql))
 (defvar *pools-lock* (bt:make-lock :name "nyaa-pools"))
 
-(defun tier-pool (tier)
+(defun pool-for (key)
+  "The pool for KEY, a completion depth or :SINK."
   (bt:with-lock-held (*pools-lock*)
-    (or (gethash tier *pools*)
-        (setf (gethash tier *pools*) (%make-pool tier (getf *pool-sizes* tier))))))
+    (or (gethash key *pools*)
+        (setf (gethash key *pools*)
+              (%make-pool key (if (eq key :sink) *sink-pool-size* *pool-size*))))))
 
 (defun %key-running (pool key)
   (if key (gethash key (pool-running-by-key pool) 0) 0))
@@ -63,7 +73,7 @@ used. Nil for a tier leaves it uncapped.")
 
 (defun pool-submit (pool job)
   "Queue JOB on POOL and wake or start a thread for it. Never blocks. True
-when JOB cannot start at once: its key is at its limit or the tier is full."
+when JOB cannot start at once: its key is at its limit or the pool is full."
   (bt:with-lock-held ((pool-lock pool))
     (setf (pool-job-pool job) pool
           (pool-queue pool) (append (pool-queue pool) (list job)))
@@ -92,7 +102,7 @@ of withdrawing it and running it ever happens."
   (incf (pool-starting pool))
   (incf (pool-spawned pool))
   (m:spawn (lambda () (pool-worker-loop pool))
-           :name (format nil "nyaa-pool-~(~a~)" (pool-tier pool))))
+           :name (format nil "nyaa-pool-~(~a~)" (pool-key pool))))
 
 (defun %take-job (pool)
   "The first queued job its key lets start, marked running. Called holding
@@ -151,8 +161,8 @@ uncounted here, under the lock, so a lowered cap sheds exactly the excess."
         (bt:with-lock-held ((pool-lock pool))
           (decf (pool-threads pool)))))))
 
-(defun pool-stats (tier)
-  (let ((pool (tier-pool tier)))
+(defun pool-stats (key)
+  (let ((pool (pool-for key)))
     (bt:with-lock-held ((pool-lock pool))
       (list :threads (pool-threads pool) :idle (pool-idle pool)
             :queued (length (pool-queue pool))

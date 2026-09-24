@@ -1,8 +1,8 @@
 (in-package #:nyaa/tests)
 (in-suite :nyaa)
 
-;;; The shared worker pools: thread reuse, each tier's cap, and withdrawing a
-;;; job that has not started.
+;;; The shared worker pools: thread reuse, each pool's cap, completions nested
+;;; by depth, and withdrawing a job that has not started.
 
 (defun pool-threads ()
   (remove-if-not (lambda (thread) (search "nyaa-pool" (or (bt:thread-name thread) "")))
@@ -11,20 +11,20 @@
 (test the-pool-reuses-threads
   (with-protocol
     (apply #'nyaa:complete :protocol-echo (hello))
-    (let ((spawned (getf (nyaa:pool-stats :protocol) :spawned)))
+    (let ((spawned (getf (nyaa:pool-stats 0) :spawned)))
       (dotimes (i 10)
         (is (eq :ok (first (apply #'nyaa:complete :protocol-echo (hello))))))
-      (is (<= (- (getf (nyaa:pool-stats :protocol) :spawned) spawned) 1)))))
+      (is (<= (- (getf (nyaa:pool-stats 0) :spawned) spawned) 1)))))
 
 (test a-tier-never-exceeds-its-size
-  (with-pool-sizes (:protocol 2)
+  (with-pool-sizes (0 2)
     (with-protocol
       (let* ((peak 0)
              (done nil)
              (poller (bt:make-thread
                       (lambda ()
                         (loop until done
-                              do (setf peak (max peak (getf (nyaa:pool-stats :protocol) :threads)))
+                              do (setf peak (max peak (getf (nyaa:pool-stats 0) :threads)))
                                  (sleep 0.01)))))
              (start (get-internal-real-time))
              (results (concurrently 5 (lambda ()
@@ -36,8 +36,8 @@
         (is (<= peak 2))
         (is (>= (elapsed-since start) 0.85))))))
 
-(test one-thread-per-tier-does-not-deadlock
-  (with-pool-sizes (:provider 1 :protocol 1)
+(test one-thread-per-depth-does-not-deadlock
+  (with-pool-sizes (0 1 1 1)
     (call-with-echo-provider
      (lambda (context)
        (let* ((agent (in-thread (lambda ()
@@ -47,6 +47,36 @@
               (results (concurrently 3 (lambda () (turn :provider-test-echo :delay 0.1)))))
          (is (every (lambda (result) (eq :ok (first result))) results))
          (is (eq :stop (getf (second (bt:join-thread agent)) :stop-reason))))))))
+
+;;; A protocol whose body completes on another waits a depth below itself.
+
+(m:defservice protocol-router (nyaa:completion-host) ()
+  (:name :protocol-router))
+
+(defmethod m:metadata ((service protocol-router))
+  (list :kind :protocol :name :protocol-router :summary "Complete on :TARGET"))
+
+(nyaa:define-protocol-handler protocol-router (service request)
+  (let ((target (getf request :target :protocol-echo)))
+    (apply #'nyaa:complete target (hello :delay 0.1 :target target))))
+
+(test a-protocol-that-completes-does-not-wait-in-its-own-pool
+  (with-pool-sizes (0 1 1 1)
+    (with-protocol
+      (m:mount *protocol-context* 'protocol-router)
+      (let ((results (concurrently 3 (lambda ()
+                                       (nyaa:complete :protocol-router
+                                                      :messages '((:role :user :content "hi"))
+                                                      :timeout 3000)))))
+        (is (every (lambda (result) (eq :ok (first result))) results))))))
+
+(test completions-nested-past-the-limit-are-refused
+  (with-protocol
+    (m:mount *protocol-context* 'protocol-router)
+    (let ((result (nyaa:complete :protocol-router :target :protocol-router
+                                 :messages '((:role :user :content "hi"))
+                                 :timeout 5000)))
+      (is (eq :bad-request (first (nyaa:tool-error result)))))))
 
 (test withdrawing-is-exact
   (let* ((pool (nyaa::%make-pool :test 1))

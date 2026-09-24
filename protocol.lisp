@@ -233,11 +233,32 @@ is what COERCE-ARGS matches a schema on."
   (unless (and (listp call) (getf call :id) (getf call :name))
     (format nil "a tool call must carry :id and :name, got ~s" call)))
 
+;;; A request's :DEPTH, stamped by NESTED-REQUEST, picks the pool its job runs
+;;; in. Nothing else sets it, and it never reaches the wire.
+
+(defvar *completion-depth* nil
+  "The depth of the completion job this thread is running, or nil outside one.")
+
+;;; TODO: the depth is a thread-local, so a COMPLETE from a thread a body
+;;; spawns starts at depth 0. Upgrade path: pass :DEPTH explicitly. Tracked in
+;;; ~takeiteasy/nyaa#132.
+(defun nested-request (request)
+  "REQUEST as a completion made from this thread: one deeper than the job
+running it, or unchanged in depth when made outside a job."
+  (let ((request (a:remove-from-plist request :depth)))
+    (if *completion-depth*
+        (list* :depth (1+ *completion-depth*) request)
+        request)))
+
 (defun %completion-call (name request &key (registry m:*registry*))
   "What to send NAME for REQUEST: (values process message timeout), TIMEOUT
-in seconds. A request that fails its pre-flight answers (values nil result)
-instead. Signals when nothing is registered under NAME."
-  (let ((problem (check-request request)))
+in seconds. A request that fails its pre-flight, or nests too deep, answers
+(values nil result) instead. Signals when nothing is registered under NAME."
+  (let* ((request (nested-request request))
+         (problem (or (check-request request)
+                      (and (> (getf request :depth 0) *max-completion-depth*)
+                           (format nil "completions nested past depth ~d"
+                                   *max-completion-depth*)))))
     (if problem
         (values nil (bad-request "~a" problem))
         (multiple-value-bind (process props) (%protocol-process name :registry registry)
@@ -310,13 +331,6 @@ malformed payload, a stream cut short."
 its cap, the cancel tokens of those in flight or queued, and whether the
 service is stopping."))
 
-;;; TODO: a protocol whose body calls COMPLETE waits within its own tier.
-;;; Upgrade path: tiers as a per-service depth. Tracked in
-;;; ~takeiteasy/nyaa#128.
-(defgeneric completion-tier (host)
-  (:documentation "The pool tier HOST's completions run in. A job only waits
-on work in a lower tier, so a host that waits on another must sit above it.")
-  (:method ((host completion-host)) :protocol))
 
 (defun track-completion (host token)
   (bt:with-lock-held ((host-lock host))
@@ -353,10 +367,12 @@ on work in a lower tier, so a host that waits on another must sit above it.")
   "Call from HANDLE while answering a :complete call: queue FUNCTION on
 REQUEST as a pool job and answer the call from there. FUNCTION's request
 carries a :CANCEL token of the job's own, which cancelling the caller's token
-or stopping HOST also cancels, and the :TIMEOUT left once it starts."
+or stopping HOST also cancels, and the :TIMEOUT left once it starts. The job
+runs in the pool of REQUEST's :DEPTH, and completions it makes run one deeper."
   (a:when-let ((cell (m:defer-reply)))
     (let* ((token (make-cancel-token))
            (timeout (getf request :timeout +default-tool-timeout+))
+           (depth (getf request :depth 0))
            (queued-at (get-internal-real-time))
            (job nil))
       (labels ((answer (result)
@@ -381,16 +397,17 @@ or stopping HOST also cancels, and the :TIMEOUT left once it starts."
                                     (let ((left (remaining)))
                                       (if (plusp left)
                                           (handler-case
-                                              (funcall function
-                                                       (list* :cancel token :timeout (setf ran left)
-                                                              (a:remove-from-plist request :cancel :timeout)))
+                                              (let ((*completion-depth* depth))
+                                                (funcall function
+                                                         (list* :cancel token :timeout (setf ran left)
+                                                                (a:remove-from-plist request :cancel :timeout :depth))))
                                             (error (e) (fail (list :error (princ-to-string e)))))
                                           (fail :timeout))))
                            (if ran (answer result) (answer-unrun result)))))
                      :key host :limit (host-max-in-flight host)
                      :registry (m:service-registry host)))
           (track-completion host token)
-          (when (pool-submit (tier-pool (completion-tier host)) job)
+          (when (pool-submit (pool-for depth) job)
             (m:after host (/ timeout 1000) (lambda () (withdraw :timeout))))
           (on-cancel token (lambda () (withdraw :cancelled)))
           (a:when-let ((caller (getf request :cancel)))

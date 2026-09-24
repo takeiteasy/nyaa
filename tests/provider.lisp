@@ -401,23 +401,23 @@ is the one MAKE-INSTANCE takes."
        (bt:join-thread busy)))
    :max-in-flight 1))
 
-(test a-provider-over-a-provider-is-refused
+(test a-provider-over-a-provider-completes
   (call-with-echo-provider
    (lambda (context)
      (m:mount context 'provider-test-stacked)
-     (is (eq :bad-request (first (nyaa:tool-error (turn :provider-test-stacked))))))))
+     (is (eq :ok (first (turn :provider-test-stacked)))))))
 
 (test a-provider-forwards-without-holding-a-pooled-thread
   (call-with-echo-provider
    (lambda (context)
      (declare (ignore context))
-     (let* ((spawned (getf (nyaa:pool-stats :provider) :spawned))
+     (let* ((spawned (getf (nyaa:pool-stats 0) :spawned))
             (start (get-internal-real-time))
             (results (concurrently 3 (lambda () (turn :provider-test-echo :delay 0.4)))))
        (is (every (lambda (result) (eq :ok (first result))) results))
        (is (< (elapsed-since start) 1))
-       (is (= spawned (getf (nyaa:pool-stats :provider) :spawned)))
-       (is (zerop (getf (nyaa:pool-stats :provider) :running)))))))
+       (is (= spawned (getf (nyaa:pool-stats 0) :spawned)))
+       (is (zerop (getf (nyaa:pool-stats 0) :running)))))))
 
 (test a-provider-that-rewrites-the-response-still-does
   (call-with-echo-provider

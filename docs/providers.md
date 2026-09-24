@@ -30,7 +30,7 @@ protocol answers `(:error :unavailable)`.
 
 | Key | Meaning |
 |---|---|
-| `:protocol` | required; the protocol service to delegate to, a literal keyword. A provider is refused. |
+| `:protocol` | required; the protocol or provider service to delegate to, a literal keyword. A provider over a provider layers both declarations' headers and defaults. |
 | `:base-url` | required; the API root, http or https |
 | `:auth` | `:none` (the default), `(:bearer :env "VAR")`, `(:header "name" :env "VAR")` |
 | `:models` | the catalogue, for discovery |

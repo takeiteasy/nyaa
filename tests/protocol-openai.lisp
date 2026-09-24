@@ -299,7 +299,7 @@ needs and a user message."
 
 (defun completion-running-p ()
   "True while a pooled thread is running a completion."
-  (plusp (getf (nyaa:pool-stats :protocol) :running)))
+  (plusp (getf (nyaa:pool-stats 0) :running)))
 
 (defun expect-one-failed-done (events)
   "EVENTS end in exactly one :done, carrying a failed result."

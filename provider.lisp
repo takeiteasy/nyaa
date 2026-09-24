@@ -173,8 +173,6 @@ appending the provider's keys after the caller's is what lets the caller win."
     (:restore (restore service (second message)))
     (t (bad-request "unknown message ~s" (first message)))))
 
-(defmethod completion-tier ((service provider)) :provider)
-
 (defun provider-complete (service request)
   "Layer SERVICE's data under REQUEST and hand the call to its protocol. With
 no :REWRITE-RESPONSE and no :MAX-IN-FLIGHT the call is forwarded whole, and
@@ -185,9 +183,7 @@ the protocol answers the caller; otherwise a pool job waits on it."
         (m:lookup (provider-protocol service) :registry (m:service-registry service))
       (cond
         ((null process) (fail :unavailable))
-        ;; A provider's job waits on its protocol's, one tier down; another
-        ;; provider's would share the tier.
-        ((not (eq (getf props :kind) :protocol))
+        ((not (member (getf props :kind) '(:protocol :provider)))
          (bad-request "~(~s~) is not a protocol" (provider-protocol service)))
         (t
          (let ((layered (apply-quirk service :rewrite-request
@@ -201,7 +197,7 @@ the protocol answers the caller; otherwise a pool job waits on it."
                   (apply-quirk
                    service :rewrite-response
                    (multiple-value-call #'%call-result
-                     (m:call process (list* :complete layered)
+                     (m:call process (list* :complete (nested-request layered))
                              :timeout (%caller-timeout layered))))))
                (m:forward process (list* :complete layered)))))))))
 

@@ -192,23 +192,28 @@ shares, or a cancel shuts the socket down and unwinds the exchange.
 
 ### Worker pools
 
-Waiting completions run on pooled threads rather than one spawned per job.
-There are two pools, or tiers, and a job only ever waits on a lower one, so a
-full tier never waits on itself:
+Waiting completions run on pooled threads rather than one spawned per job. A
+pool is keyed by depth: a completion called directly runs at depth 0, and each
+completion a job makes runs one deeper, so a job only ever waits on the next
+pool down and a full pool never waits on itself. A router or fallback chain
+is a protocol whose body calls `complete`:
 
-| Tier | Runs | Waits on |
+| Depth | Runs | Waits on |
 |---|---|---|
-| `:provider` | a provider's completions, when it rewrites or caps them | its protocol |
-| `:protocol` | a protocol's completions | the backend |
+| 0 | a service called directly; a provider's completions, when it rewrites or caps them | its protocol, at depth 1 |
+| 1 | what a depth 0 job completes on | the backend, or depth 2 |
+
+Completions nested past `*max-completion-depth*` (8) answer `(:bad-request ...)`
+rather than running, which stops a protocol that completes on itself. A
+`complete` made from a thread a body spawns itself starts at depth 0 again.
 
 An [agent](agent.md)'s turns and tool calls hold no thread while they wait: the
 reply arrives as a message.
 
-`*pool-sizes*` caps each tier's threads (`(:provider 64 :protocol 64)`), read
-when a tier is first used. A thread idle for
-`*pool-idle-seconds*` (30) exits, and one is started again as work arrives.
-`(nyaa:pool-stats tier)` reports a tier's threads, idle threads, queued and
-running jobs.
+`*pool-size*` (64) caps each pool's threads, read when a pool is first used. A
+thread idle for `*pool-idle-seconds*` (30) exits, and one is started again as
+work arrives. `(nyaa:pool-stats depth)` reports a pool's threads, idle threads,
+queued and running jobs.
 
 ## Cancelling
 
@@ -352,9 +357,8 @@ the same way, since a provider answers the same messages.
 - An exchange stuck where neither the socket shutdown nor the interrupt
   reaches it holds its pooled thread
   ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).
-- A protocol whose body calls `complete` waits within its own tier, so a full
-  tier stalls it until timeout
-  ([#128](https://todo.sr.ht/~takeiteasy/nyaa/128)).
+- A `complete` made from a thread a protocol body spawns itself starts at
+  depth 0 ([#132](https://todo.sr.ht/~takeiteasy/nyaa/132)).
 - A tool call naming a tool absent from the request's `:tools` has no schema to
   render its arguments by, and falls back to a heuristic
   ([#36](https://todo.sr.ht/~takeiteasy/nyaa/36)).
