@@ -401,6 +401,12 @@ visible on the helper thread."
    :name "nyaa-self-grace"))
 
 (defun eval-in-host (form package)
+  ;; TODO: only EVAL's primary value is kept, and RENDER-SELF-VALUE's own
+  ;; cap never reports elision the way worker-program.lisp's does -- a
+  ;; caller has no signal a value came back truncated. Upgrade path:
+  ;; capture (multiple-value-list (eval form)) and add :values/:elided the
+  ;; way ~takeiteasy/nyaa#105 added them to tool-eval and tool-repl.
+  ;; Tracked in ~takeiteasy/nyaa#107.
   (let ((out (make-string-output-stream)))
     (handler-case
         (let ((value (let ((*standard-output* out) (*error-output* out)

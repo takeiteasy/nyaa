@@ -278,3 +278,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 - `tool-vault`'s compaction is safe within one process only
   ([#84](https://todo.sr.ht/~takeiteasy/nyaa/84)). See
   [the vault](vault.md#limitations).
+- `tool-self`'s `:eval` only keeps a form's primary value, and never
+  reports elision the way `tool-eval` and `tool-repl` do
+  ([#107](https://todo.sr.ht/~takeiteasy/nyaa/107)).
