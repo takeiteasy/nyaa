@@ -168,8 +168,10 @@ message, and the next turn folds the steer in. Re-stepping through
 STEP-AGENT keeps :MAX-TURNS in force, so the abandoned turn counts."
   (setf (%turn-in-flight service) nil)
   (incf (%step-ref service))
-  (cancel-turn service)
+  ;; Superseded before it is cancelled, so the cancelled :DONE the protocol
+  ;; then emits meets a closed stream rather than racing :TURN-INTERRUPTED.
   (let ((partial (supersede-turn-stream service)))
+    (cancel-turn service)
     (when (plusp (length partial))
       (push-message service (list :role :assistant :content partial))))
   (step-agent service))
@@ -401,6 +403,10 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
   (lock (bt:make-lock :name "nyaa-turn-stream"))
   (text (make-string-output-stream))
   (superseded nil))
+
+;;; TODO: the sink is called under the stream's lock, so an interrupt waits
+;;; on a sink call in progress, however slow. Upgrade path: one emitter per
+;;; agent feeding the sink, as protocols have. Tracked in ~takeiteasy/nyaa#122.
 
 (defun turn-stream-sink (stream sink)
   (lambda (event)
