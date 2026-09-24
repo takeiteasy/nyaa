@@ -444,7 +444,11 @@ worker unwinds instead of running until the backend answers or hangs up."
       (bt:signal-semaphore done))))
 
 (defun close-socket (socket)
-  (when socket (ignore-errors (usocket:socket-close socket))))
+  "Shut SOCKET down before closing it: on Linux a close alone leaves a thread
+blocked in a read on it asleep, and a shutdown wakes it."
+  (when socket
+    (ignore-errors (usocket:socket-shutdown socket :io))
+    (ignore-errors (usocket:socket-close socket))))
 
 (defun abandon-connection (socket name)
   "Closing the socket from a thread of its own reliably wakes the worker's
