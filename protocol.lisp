@@ -233,21 +233,27 @@ is what COERCE-ARGS matches a schema on."
   (unless (and (listp call) (getf call :id) (getf call :name))
     (format nil "a tool call must carry :id and :name, got ~s" call)))
 
+(defun %completion-call (name request &key (registry m:*registry*))
+  "What to send NAME for REQUEST: (values process message timeout), TIMEOUT
+in seconds. A request that fails its pre-flight answers (values nil result)
+instead. Signals when nothing is registered under NAME."
+  (let ((problem (check-request request)))
+    (if problem
+        (values nil (bad-request "~a" problem))
+        (multiple-value-bind (process props) (%protocol-process name :registry registry)
+          (values process
+                  (list* :complete request)
+                  ;; A provider delegates to its protocol, so the reply
+                  ;; travels two hops and each waiter needs its own margin.
+                  (%caller-timeout request (if (eq (getf props :kind) :provider) 2 1)))))))
+
 (defun complete (name &rest request)
   "Perform one turn against protocol or provider NAME. Returns (:ok plist) or
 (:error reason)."
-  (let ((problem (check-request request)))
-    (if problem
-        (bad-request "~a" problem)
-        (multiple-value-bind (process props) (%protocol-process name)
-          (multiple-value-call #'%call-result
-            (m:call process
-                    (list* :complete request)
-                    ;; A provider delegates to its protocol, so the reply
-                    ;; travels two hops and each waiter needs its own margin.
-                    :timeout (%caller-timeout
-                              request
-                              (if (eq (getf props :kind) :provider) 2 1))))))))
+  (multiple-value-bind (process message timeout) (%completion-call name request)
+    (if process
+        (multiple-value-call #'%call-result (m:call process message :timeout timeout))
+        message)))
 
 ;;; --- streaming --------------------------------------------------------
 

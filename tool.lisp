@@ -63,18 +63,26 @@ doesn't already give a plain reason for is stringified."
                (fail :timeout)
                (fail (list :error (princ-to-string status))))))))
 
-(defun invoke-tool (name &rest args)
-  "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason).
-:CANCEL is reserved: a cancel token, passed to the tool rather than coerced."
-  (multiple-value-bind (process props) (%tool-process name)
+(defun %tool-call (name args &key (registry m:*registry*))
+  "What to send NAME to invoke it with ARGS: (values process message timeout),
+TIMEOUT in seconds. Arguments that fail their schema answer (values nil
+result) instead. Signals when no tool is registered under NAME."
+  (multiple-value-bind (process props) (%tool-process name :registry registry)
     (multiple-value-bind (coerced problem)
         (coerce-args (tool-schema props) (a:remove-from-plist args :cancel))
       (if problem
-          (bad-request "~a" problem)
-          (multiple-value-call #'%call-result
-            (m:call process
-                    (list* :invoke :cancel (call-cancel-token args) coerced)
-                    :timeout (%caller-timeout coerced)))))))
+          (values nil (bad-request "~a" problem))
+          (values process
+                  (list* :invoke :cancel (call-cancel-token args) coerced)
+                  (%caller-timeout coerced))))))
+
+(defun invoke-tool (name &rest args)
+  "Invoke NAME with ARGS, a plist. Returns (:ok plist) or (:error reason).
+:CANCEL is reserved: a cancel token, passed to the tool rather than coerced."
+  (multiple-value-bind (process message timeout) (%tool-call name args)
+    (if process
+        (multiple-value-call #'%call-result (m:call process message :timeout timeout))
+        message)))
 
 (defun call-cancel-token (args)
   "ARGS' :CANCEL, when it is a cancel token."

@@ -1,16 +1,16 @@
 (in-package #:nyaa)
 
-;;; Shared worker pools. Work that only waits -- a model turn, a tool call, a
-;;; completion -- runs on a pooled thread rather than one spawned for it, and
-;;; each tier caps how many threads it keeps. A job may carry a key and a
-;;; limit: no more than LIMIT jobs of one key run at once, and a job held back
-;;; by its key waits in the queue without holding a thread.
+;;; Shared worker pools. Work that only waits -- a completion -- runs on a
+;;; pooled thread rather than one spawned for it, and each tier caps how many
+;;; threads it keeps. A job may carry a key and a limit: no more than LIMIT
+;;; jobs of one key run at once, and a job held back by its key waits in the
+;;; queue without holding a thread.
 ;;;
-;;; The tiers are ordered :TOOL > :TURN > :PROVIDER > :PROTOCOL, and a job
-;;; only ever waits on work in a lower tier, so a full tier can never be
-;;; waiting on itself. See docs/protocols.md.
+;;; The tiers are ordered :PROVIDER > :PROTOCOL, and a job only ever waits on
+;;; work in a lower tier, so a full tier can never be waiting on itself. See
+;;; docs/protocols.md.
 
-(defparameter *pool-sizes* '(:tool 32 :turn 32 :provider 64 :protocol 64)
+(defparameter *pool-sizes* '(:provider 64 :protocol 64)
   "The most threads each tier keeps, read when the tier's pool is first
 used. Nil for a tier leaves it uncapped.")
 

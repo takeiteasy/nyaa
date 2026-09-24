@@ -9,9 +9,9 @@
 ;;;
 ;;; Every outbound piece of work -- a model turn, a tool call, a sub-agent --
 ;;; is issued off the agent's process and reported back as a message, so
-;;; HANDLE is never blocked waiting on one. A turn and a tool call each run as
-;;; a job on the shared worker pool (pool.lisp), under the service's own
-;;; M:*REGISTRY*; a sub-agent is a delegated agent of its own.
+;;; HANDLE is never blocked waiting on one. A turn and a tool call are sent
+;;; with M:CALL-ASYNC and answer as a (:REPLY tag value status) message,
+;;; holding no thread meanwhile; a sub-agent is a delegated agent of its own.
 ;;;
 ;;; Finishing a run returns (values :done result) from HANDLE, which is
 ;;; M:AGENT's own convention: the parent gets :agent-done and the agent
@@ -100,10 +100,8 @@ pathname: record there instead.")
     (:cancel (cancel-run service))
     (:step (step-agent service))
     (:deadline (deadline-run service))
-    (:turn-reply (turn-reply service (second message) (third message)))
-    (:tool-reply (destructuring-bind (ref id result) (rest message)
-                   (when (eql ref (%step-ref service))
-                     (tool-reply service id result))))
+    (:reply (destructuring-bind (tag value status) (rest message)
+              (route-reply service tag (%call-result value status))))
     ;; Reports from a delegated sub-agent, routed into HANDLE by the meow fix
     ;; for ~takeiteasy/meow#59.
     (:agent-done (sub-agent-done service (second message) (fourth message)))
@@ -257,26 +255,28 @@ another process holds or that is already consumed."
   (let ((ref (incf (%step-ref service)))
         (request (build-request service
                                 (setf (%turn-token service) (make-cancel-token))
-                                (%turn-stream service)))
-        (registry (m:service-registry service))
-        (parent (m:self)))
-    (submit-waiter :turn (%turn-token service) registry
-                   (lambda ()
-                     (m:cast parent (list :turn-reply ref
-                                          (apply #'complete (agent-model service) request)))))
+                                (%turn-stream service))))
+    (send-call service (list :turn ref) #'%completion-call (agent-model service) request)
     nil))
 
-;;; TODO: a waiter holds a pooled thread for the whole call, and a tool that
-;;; runs an agent can stall behind its child's own tool calls at a full :tool
-;;; tier. Upgrade path: a reply delivered as a message (~takeiteasy/meow#74).
-;;; Tracked in ~takeiteasy/nyaa#125.
-(defun submit-waiter (tier token registry function)
-  "Run FUNCTION as a job on TIER's pool, withdrawn if TOKEN is cancelled
-before it starts. Its reply is keyed by step ref, so a withdrawn job needs
-none."
-  (let ((job (make-pool-job function :registry registry)))
-    (pool-submit (tier-pool tier) job)
-    (on-cancel token (lambda () (pool-withdraw job)))))
+(defun send-call (service tag prepare name args)
+  "Send the call PREPARE builds for NAME and ARGS -- %COMPLETION-CALL or
+%TOOL-CALL -- without waiting. Its reply reaches HANDLE as (:REPLY TAG value
+status). A call that cannot be sent is answered at once."
+  (multiple-value-bind (process message timeout)
+      (handler-case (funcall prepare name args :registry (m:service-registry service))
+        (error (e) (values nil (fail (list :error (princ-to-string e))))))
+    (if process
+        (m:call-async process message :timeout timeout :tag tag)
+        (m:cast (m:self) (list :reply tag message nil)))))
+
+(defun route-reply (service tag result)
+  "Hand RESULT to the turn or tool call TAG names."
+  (destructuring-bind (kind ref &optional id) tag
+    (ecase kind
+      (:turn (turn-reply service ref result))
+      (:tool (when (eql ref (%step-ref service))
+               (tool-reply service id result))))))
 
 (defun build-request (service token stream)
   (list* :cancel token
@@ -375,12 +375,8 @@ must not answer it."
          (name (getf call :name))
          (args (getf call :arguments))
          (token (call-token service id))
-         (ref (%step-ref service))
-         (parent (m:self)))
-    (submit-waiter :tool token (m:service-registry service)
-                   (lambda ()
-                     (m:cast parent (list :tool-reply ref id
-                                          (apply #'invoke-tool name :cancel token args)))))
+         (ref (%step-ref service)))
+    (send-call service (list :tool ref id) #'%tool-call name (list* :cancel token args))
     nil))
 
 (defun dispatch-sub-agent (service call)
@@ -608,8 +604,8 @@ here but not assumed of the caller's own services)."
 
 ;;; --- checkpoints (~takeiteasy/nyaa#11) ----------------------------------
 
-;;; The turn and tool calls in flight reference pooled jobs a restore
-;;; cannot bring back, so only their ids are recorded, under :IN-FLIGHT, for
+;;; The turn and tool calls in flight are replies a restore cannot bring
+;;; back, so only their ids are recorded, under :IN-FLIGHT, for
 ;;; a caller to see the checkpoint was taken mid-run. RESTORE lands a
 ;;; not-running agent and ignores it. A call with no result yet is recorded
 ;;; closed as :INTERRUPTED, so the restored conversation is well-formed.

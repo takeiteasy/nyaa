@@ -186,19 +186,20 @@ caller receives `(:error :cancelled)`.
 
 ### Worker pools
 
-Waiting work runs on pooled threads rather than one spawned per job. There
-are four pools, or tiers, and a job only ever waits on a lower one, so a full
-tier never waits on itself:
+Waiting completions run on pooled threads rather than one spawned per job.
+There are two pools, or tiers, and a job only ever waits on a lower one, so a
+full tier never waits on itself:
 
 | Tier | Runs | Waits on |
 |---|---|---|
-| `:tool` | an [agent](agent.md)'s tool calls | the tool |
-| `:turn` | an agent's model turns | a provider or protocol |
 | `:provider` | a provider's completions, when it rewrites or caps them | its protocol |
 | `:protocol` | a protocol's completions | the backend |
 
-`*pool-sizes*` caps each tier's threads (`(:tool 32 :turn 32 :provider 64
-:protocol 64)`), read when a tier is first used. A thread idle for
+An [agent](agent.md)'s turns and tool calls hold no thread while they wait: the
+reply arrives as a message.
+
+`*pool-sizes*` caps each tier's threads (`(:provider 64 :protocol 64)`), read
+when a tier is first used. A thread idle for
 `*pool-idle-seconds*` (30) exits, and one is started again as work arrives.
 `(nyaa:pool-stats tier)` reports a tier's threads, idle threads, queued and
 running jobs.

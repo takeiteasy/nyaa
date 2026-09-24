@@ -37,7 +37,7 @@
         (is (>= (elapsed-since start) 0.85))))))
 
 (test one-thread-per-tier-does-not-deadlock
-  (with-pool-sizes (:tool 1 :turn 1 :provider 1 :protocol 1)
+  (with-pool-sizes (:provider 1 :protocol 1)
     (call-with-echo-provider
      (lambda (context)
        (let* ((agent (in-thread (lambda ()

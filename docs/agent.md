@@ -152,10 +152,11 @@ With `:max-parallel-tools`, calls past the cap wait, in order, and each starts
 as a running one answers. A sub-agent holds its slot for its whole run; a call
 refused by the allow-list answers at once and holds none. A call still waiting
 when the calls are closed never runs, and closes as `interrupted` like any
-other. Each call and turn runs on a [pooled thread](protocols.md#worker-pools).
+other.
 
 A `complete` failure — `(:backend-error ...)`, `:timeout`, `:unavailable` —
-ends the run as that same `(:error reason)`, unwrapped.
+ends the run as that same `(:error reason)`, unwrapped. So does a `:model`
+nothing is registered under.
 
 ## Events
 
@@ -223,9 +224,5 @@ abandoned turn reaches the sink.
   ([#39](https://todo.sr.ht/~takeiteasy/nyaa/39)).
 - A tool result is rendered whole with no size cap, so one large result can
   fill the context ([#40](https://todo.sr.ht/~takeiteasy/nyaa/40)).
-- A tool call waits on a pooled thread for as long as the tool runs, and a
-  tool that itself runs an agent can stall behind that agent's own tool calls
-  when the `:tool` tier is full
-  ([#125](https://todo.sr.ht/~takeiteasy/nyaa/125)).
 - No retry or backoff on a transient backend error — the run ends on the
   first one ([#42](https://todo.sr.ht/~takeiteasy/nyaa/42)).

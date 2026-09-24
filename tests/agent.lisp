@@ -982,3 +982,60 @@ test's."
   (with-agent ((final-reply "hi"))
     (signals error (agent-turn :messages '((:role :user :content "go"))
                                :max-parallel-tools 0))))
+
+;;; --- replies as messages --------------------------------------------------
+
+(test an-unregistered-model-fails-the-run-at-once
+  (with-agent ((final-reply "unused"))
+    (let* ((start (get-internal-real-time))
+           (result (nyaa:run-agent *ctx* :model :no-such-model :deadline 20000
+                                         :messages '((:role :user :content "go")))))
+      (is (eq :error (first result)))
+      (is (< (elapsed-since start) 5)))))
+
+(test a-call-its-schema-refuses-comes-back-as-a-tool-message
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-call-reply "c1" "tool-echo" "{}")
+                       (final-reply "recovered")))
+                 'tool-echo)
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :tools '(:tool-echo))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (search "error" (first (tool-message-texts result))))))))
+
+;;; A tool that runs an agent of its own, which calls a tool in turn.
+
+(m:defservice tool-nested () () (:name :tool-nested))
+
+(defmethod m:metadata ((service tool-nested))
+  (list :kind :tool :name :tool-nested :trust :agent
+        :summary "Run an agent of its own" :params nil))
+
+(nyaa::define-tool-handler tool-nested (service args)
+  args
+  (let ((result (nyaa:run-agent (m:service-process (m:service-context service))
+                                :model :provider-test-keyed :tools '(:tool-echo)
+                                :messages '((:role :user :content "inner")))))
+    (if (nyaa::tool-error-p result)
+        result
+        (nyaa::ok :answer (nyaa:content-text (getf (second result) :content))))))
+
+(test a-tool-that-runs-an-agent-completes
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (case (incf n)
+                     (1 (tool-call-reply "outer" "tool-nested" "{}"))
+                     (2 (tool-call-reply "inner" "tool-echo" "{\"text\":\"hi\"}"))
+                     (3 (final-reply "inner done"))
+                     (t (final-reply "outer done"))))
+                 'tool-nested 'tool-echo)
+      (let* ((start (get-internal-real-time))
+             (result (agent-turn :messages '((:role :user :content "go"))
+                                 :tools '(:tool-nested))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (is (search "inner done" (first (tool-message-texts result))))
+        (is (< (elapsed-since start) 10))))))
