@@ -47,6 +47,20 @@
       (is (null nyaa::*live-workers*))
       (is (notany #'nyaa::worker-alive-p workers)))))
 
+(test a-worker-is-killed-once
+  ;; A second kill must not signal a pid the first has already reaped.
+  (let ((worker (nyaa::start-worker))
+        (kills 0))
+    (sb-int:encapsulate 'nyaa::terminate-process-group 'count-kills
+                        (lambda (function process)
+                          (incf kills)
+                          (funcall function process)))
+    (unwind-protect
+         (progn (nyaa::kill-worker worker)
+                (nyaa::kill-worker worker)
+                (is (eql 1 kills)))
+      (sb-int:unencapsulate 'nyaa::terminate-process-group 'count-kills))))
+
 ;;; --- elision (~takeiteasy/nyaa#26) --------------------------------------
 
 (test a-small-value-is-not-elided

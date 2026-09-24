@@ -82,8 +82,11 @@ pipes belong to that image, so nothing here may signal or touch them."
   (bt:with-lock-held (*live-workers-lock*) (push worker *live-workers*)))
 
 (defun %unregister-worker (worker)
+  "True when WORKER was registered, so exactly one caller gets to kill it."
   (bt:with-lock-held (*live-workers-lock*)
-    (setf *live-workers* (remove worker *live-workers*))))
+    (when (member worker *live-workers*)
+      (setf *live-workers* (remove worker *live-workers*))
+      t)))
 
 (defun start-worker ()
   "A running worker, or NIL if the child never answered its handshake."
@@ -107,10 +110,10 @@ pipes belong to that image, so nothing here may signal or touch them."
        (uiop:process-alive-p (worker-process worker))))
 
 (defun kill-worker (worker)
-  (when worker
-    (%unregister-worker worker)
-    (unless (worker-stale-p worker)
-      (terminate-process-group (worker-process worker))))
+  "Kill WORKER once: a second call finds it unregistered and leaves alone a
+pid the first has already reaped."
+  (when (and worker (%unregister-worker worker) (not (worker-stale-p worker)))
+    (terminate-process-group (worker-process worker)))
   nil)
 
 (defun kill-live-workers ()
