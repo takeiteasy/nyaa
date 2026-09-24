@@ -254,6 +254,135 @@ object)."
                      :key (lambda (m) (nyaa:content-text (getf m :content)))
                      :test #'equal))))))))
 
+;;; --- interrupting steers ---------------------------------------------
+
+(defun delta-chunk (text)
+  (format nil "{\"choices\":[{\"delta\":{\"content\":~a}}]}"
+          (com.inuoe.jzon:stringify text)))
+
+(defun streamed-reply (text)
+  (sse-response (delta-chunk text)
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"
+                "[DONE]"))
+
+(defun interruptible-backend (release)
+  "A backend whose first turn streams \"partial \" and then stalls until
+RELEASE's car is set, and whose later turns answer at once. The fake server
+serves one connection at a time, so the next request waits on the release."
+  (let ((n 0))
+    (lambda (&rest request)
+      (declare (ignore request))
+      (if (= (incf n) 1)
+          (list :stall
+                (format nil "HTTP/1.1 200 OK~c~cContent-Type: text/event-stream~c~cConnection: close~c~c~c~c~a"
+                        #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                        #\Return #\Newline (sse-body (delta-chunk "partial ")))
+                (lambda () (not (car release))))
+          (streamed-reply "done")))))
+
+(defun event-types (events)
+  (mapcar (lambda (e) (getf e :type)) events))
+
+(defun interrupt-mid-stream (&rest delegate-args)
+  "Run an agent against INTERRUPTIBLE-BACKEND, send an interrupting steer
+once its first turn has streamed, and return the :agent-done result and the
+sink's events, oldest first."
+  (let* ((release (list nil))
+         (lock (bt:make-lock))
+         (events '()))
+    (with-agent ((interruptible-backend release))
+      (unwind-protect
+           (m:with-process (runner)
+             (let ((child (apply #'m:delegate *ctx* 'nyaa:agent
+                                 :model :provider-test-keyed
+                                 :sink (lambda (event)
+                                         (bt:with-lock-held (lock) (push event events)))
+                                 delegate-args)))
+               (m:cast child (list :run :messages '((:role :user :content "go"))))
+               (is-true (eventually (lambda ()
+                                      (bt:with-lock-held (lock)
+                                        (find :text-delta events
+                                              :key (lambda (e) (getf e :type)))))))
+               (m:cast child (list :steer :content "change of plan" :interrupt t))
+               (setf (car release) t)
+               (multiple-value-bind (message received) (m:receive :timeout 5)
+                 (is-true received)
+                 (values (fourth message)
+                         (bt:with-lock-held (lock) (reverse events))
+                         (requests)))))
+        (setf (car release) t)))))
+
+(test an-interrupting-steer-keeps-the-streamed-text-and-folds-at-once
+  (multiple-value-bind (result events requests) (interrupt-mid-stream)
+    (is (eq :stop (getf (second result) :stop-reason)))
+    (is (eql 2 (getf (second result) :turns)))
+    (is (equal '((:assistant . "partial ") (:user . "change of plan") (:assistant . "done"))
+               (mapcar (lambda (m) (cons (getf m :role) (nyaa:content-text (getf m :content))))
+                       (last (getf (second result) :messages) 3))))
+    (let ((body (getf (second requests) :body)))
+      (is (< (search "partial " body) (search "change of plan" body))))
+    (is (equal '(:turn :text-delta :turn-interrupted :turn :text-delta :done :run-done)
+               (event-types events)))
+    (is (eql 1 (getf (find :turn-interrupted events :key (lambda (e) (getf e :type)))
+                     :turn)))))
+
+(test an-interrupt-without-a-sink-keeps-nothing
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (progn (sleep 0.5) (final-reply "too late"))
+                       (final-reply "done"))))
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed)))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually (lambda () (requests))))
+          (m:cast child (list :steer :content "change of plan" :interrupt t))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (is (equal '(:user :user :assistant)
+                       (mapcar (lambda (m) (getf m :role))
+                               (getf (second (fourth message)) :messages))))
+            (is (equal "done" (nyaa:content-text
+                               (getf (second (fourth message)) :content))))))))))
+
+(test an-interrupt-before-the-first-turn-issues-one-turn
+  ;; The :STEP that :RUN queues has not run yet, so there is no turn to
+  ;; interrupt: the steer folds into the first turn, and only one is issued.
+  (with-agent ((final-reply "done"))
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed)))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (m:cast child (list :steer :content "early" :interrupt t))
+        (multiple-value-bind (message received) (m:receive :timeout 5)
+          (is-true received)
+          (is (eql 1 (getf (second (fourth message)) :turns)))
+          (is (eql 1 (length (requests))))
+          (is (search "early" (getf (first (requests)) :body))))))))
+
+(test an-interrupt-during-the-tool-phase-waits-for-the-calls
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (tool-call-reply "c1" "tool-hold" "{}")
+                       (final-reply "done")))
+                'tool-hold)
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :tools '(:tool-hold))))
+          (m:cast child (list :run :messages '((:role :user :content "go"))))
+          (is-true (eventually
+                    (lambda ()
+                      (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls))))
+          (m:cast child (list :steer :content "change of plan" :interrupt t))
+          (multiple-value-bind (message received) (m:receive :timeout 5)
+            (is-true received)
+            (let ((messages (getf (second (fourth message)) :messages)))
+              (is (eq :tool (getf (nth 2 messages) :role)))
+              (is (search "slept" (nyaa:content-text (getf (nth 2 messages) :content))))
+              (is (equal "change of plan" (nyaa:content-text (getf (nth 3 messages) :content)))))))))))
+
 (test cancel-mid-tool-call-closes-the-call
   ;; A sink makes the request stream, so the backend answers in SSE.
   (with-agent ((sse-response

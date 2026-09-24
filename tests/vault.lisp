@@ -137,6 +137,13 @@ after the message that triggered it has already returned."
             (is (eq :stop (getf (second (fourth message)) :stop-reason)))))))
     (is (eq :pending (getf (first (nyaa:vault-entries path)) :status)))))
 
+(test an-interrupt-on-the-last-allowed-turn-finishes-max-turns
+  (with-vault-path (path)
+    (multiple-value-bind (result events) (interrupt-mid-stream :max-turns 1 :vault path)
+      (is (eq :max-turns (getf (second result) :stop-reason)))
+      (is (equal '(:turn :text-delta :turn-interrupted :run-done) (event-types events))))
+    (is (eq :pending (getf (first (nyaa:vault-entries path)) :status)))))
+
 (test a-steer-before-run-is-folded-after-the-seed
   (with-vault-path (path)
     (with-agent ((final-reply "done"))

@@ -55,7 +55,9 @@ pathname: record there instead.")
    (step-ref :initform 0 :accessor %step-ref)
    (running-p :initform nil :accessor %running-p)
    (cancel-timer :initform nil :accessor %cancel-timer)
-   (turn-token :initform nil :accessor %turn-token))
+   (turn-token :initform nil :accessor %turn-token)
+   (turn-in-flight :initform nil :accessor %turn-in-flight)
+   (turn-stream :initform nil :accessor %turn-stream))
   (:default-initargs :name nil))
 
 (defmethod m:metadata ((service agent))
@@ -143,14 +145,34 @@ recorded there first and claimed; a :VAULT-ID names an entry already in the
 vault, claimed by TOOL-VAULT's :RESTORE, which redelivers one this way
 rather than double-recording it, with :VAULT-PATH the log it lives in. The
 id and path travel in the queue cell, never in the message plist pushed onto
-%MESSAGES, so they can never reach a provider's request."
+%MESSAGES, so they can never reach a provider's request. :INTERRUPT true
+also abandons a model turn in flight (INTERRUPT-TURN); otherwise the steer
+waits for the next turn as usual."
   (let* ((content (getf args :content))
          (path (or (getf args :vault-path) (%vault-path (agent-vault service))))
          (id (or (getf args :vault-id)
                  (and path
                       (vault-record path (m:service-name service) content :claim t)))))
     (push (list* id path (list :role :user :content content)) (%steer-queue service)))
-  :ok)
+  (if (and (getf args :interrupt) (%turn-in-flight service))
+      ;; An interrupt on the last allowed turn finishes the run, and
+      ;; (VALUES :DONE result) is how HANDLE ends it.
+      (multiple-value-bind (value result) (interrupt-turn service)
+        (if (eq value :done) (values :done result) :ok))
+      :ok))
+
+(defun interrupt-turn (service)
+  "Abandon the model turn in flight for the steer just queued: its late reply
+drops with the step ref, the text it had streamed is kept as an assistant
+message, and the next turn folds the steer in. Re-stepping through
+STEP-AGENT keeps :MAX-TURNS in force, so the abandoned turn counts."
+  (setf (%turn-in-flight service) nil)
+  (incf (%step-ref service))
+  (cancel-turn service)
+  (let ((partial (supersede-turn-stream service)))
+    (when (plusp (length partial))
+      (push-message service (list :role :assistant :content partial))))
+  (step-agent service))
 
 (defun release-steer-claims (service)
   "Release the vault claim of every steer queued at SERVICE."
@@ -201,9 +223,12 @@ another process holds or that is already consumed."
       (vault-consume (cadr cell) id :folded)))
   (incf (%turns service))
   (emit-event (agent-sink service) (turn-event (m:agent-ref service) (%turns service)))
+  (setf (%turn-in-flight service) t
+        (%turn-stream service) (and (agent-sink service) (make-turn-stream)))
   (let ((ref (incf (%step-ref service)))
-        (request (build-request service (setf (%turn-token service)
-                                              (make-cancel-token))))
+        (request (build-request service
+                                (setf (%turn-token service) (make-cancel-token))
+                                (%turn-stream service)))
         (registry (m:service-registry service))
         (parent (m:self)))
     (m:spawn (lambda ()
@@ -212,12 +237,11 @@ another process holds or that is already consumed."
                                       (apply #'complete (agent-model service) request))))))
     nil))
 
-(defun build-request (service token)
+(defun build-request (service token stream)
   (list* :cancel token
          :messages (%messages service)
          :tools (request-tools service)
-         :stream (and (agent-sink service)
-                      (lambda (event) (emit-event (agent-sink service) event)))
+         :stream (and stream (turn-stream-sink stream (agent-sink service)))
          :ref (m:agent-ref service)
          :timeout (agent-turn-timeout service)
          (agent-sampling service)))
@@ -238,6 +262,7 @@ tools, and get back its final answer."
   ;; A late reply from a turn CANCEL or :DEADLINE already superseded: the
   ;; step ref has moved on, so this one is dropped.
   (when (eql ref (%step-ref service))
+    (setf (%turn-in-flight service) nil)
     (if (tool-error-p result)
         (finish-run service result)
         (let ((reply (second result)))
@@ -365,6 +390,39 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
 
+;;; --- a turn's stream ------------------------------------------------------
+
+;;; The events a turn streams pass through one of these on their way to the
+;;; sink. An interrupt supersedes it under the same lock the sink is called
+;;; under, so nothing from the abandoned turn reaches the sink after its
+;;; :TURN-INTERRUPTED, and the text kept is exactly the text the sink saw.
+
+(defstruct (turn-stream (:constructor make-turn-stream ()))
+  (lock (bt:make-lock :name "nyaa-turn-stream"))
+  (text (make-string-output-stream))
+  (superseded nil))
+
+(defun turn-stream-sink (stream sink)
+  (lambda (event)
+    (bt:with-lock-held ((turn-stream-lock stream))
+      (unless (turn-stream-superseded stream)
+        (when (eq (getf event :type) :text-delta)
+          (write-string (getf event :text) (turn-stream-text stream)))
+        (emit-event sink event)))))
+
+(defun supersede-turn-stream (service)
+  "Close the turn's stream to further events, emit :TURN-INTERRUPTED, and
+return the text it streamed. With no sink there is no stream, and nothing to
+tell or keep."
+  (let ((stream (shiftf (%turn-stream service) nil)))
+    (if stream
+        (bt:with-lock-held ((turn-stream-lock stream))
+          (setf (turn-stream-superseded stream) t)
+          (emit-event (agent-sink service)
+                      (turn-interrupted-event (m:agent-ref service) (%turns service)))
+          (get-output-stream-string (turn-stream-text stream)))
+        "")))
+
 ;;; TODO: only the model turn is cancelled; dispatched tool calls run to their
 ;;; own timeouts. Upgrade path: a cancel token per call. Tracked in
 ;;; ~takeiteasy/nyaa#111.
@@ -379,6 +437,7 @@ timeout."
   (cancel-deadline service)
   (cancel-turn service)
   (setf (%running-p service) nil
+        (%turn-in-flight service) nil
         (%pending service) nil
         (%pending-order service) nil)
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
@@ -409,6 +468,8 @@ timeout."
 ;;; loop's own, all echoing :REF as the protocol events do.
 
 (defun turn-event (ref n) (list :type :turn :ref ref :turn n))
+
+(defun turn-interrupted-event (ref n) (list :type :turn-interrupted :ref ref :turn n))
 
 (defun tool-call-event (ref id name arguments)
   (list :type :tool-call :ref ref :id id :name name :arguments arguments))
@@ -462,6 +523,7 @@ here but not assumed of the caller's own services)."
         (%pending service) nil
         (%pending-order service) nil
         (%steer-queue service) nil
+        (%turn-in-flight service) nil
         (%running-p service) nil)
   ;; As FINISH-RUN does: a turn or tool call already in flight has this
   ;; agent's process as its :cast target, not a call RESTORE can cancel, so

@@ -132,10 +132,11 @@ A tool call's `:arguments` arrive as text split across deltas; the consumer
 reassembles them. The `(:ok ...)` reply carries the whole turn regardless, so a
 caller may ignore the sink entirely.
 
-The [agent loop](agent.md) is this vocabulary's main consumer: it hands its
-own `:sink` down into each request unchanged, so these events pass straight
-through to whatever is watching the run, alongside the loop's own `:turn`,
-`:tool-call`, `:tool-result` and `:run-done` events.
+The [agent loop](agent.md) is this vocabulary's main consumer: these events
+pass through to its own `:sink`, alongside the loop's own `:turn`,
+`:tool-call`, `:tool-result` and `:run-done` events. A turn the loop abandons
+for an interrupting steer is the one exception to a single closing `:done`:
+the loop stops passing its events on and emits `:turn-interrupted` instead.
 
 ## Errors
 

@@ -84,6 +84,7 @@ end a plain `complete` turn early inside a working conversation.
 | `(:describe)` | the metadata plist |
 | `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero |
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
+| `(:steer :content text :interrupt t)` | as `:steer`, but a model turn in flight is abandoned and the steer folds in at once |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
 
 `:steer` takes an optional `:vault-id`, naming an entry already in the
@@ -91,6 +92,15 @@ end a plain `complete` turn early inside a working conversation.
 rather than recording a second entry for the same one. A caller queueing a
 fresh steer never needs to pass it; when `:vault` is on, it is recorded and
 consumed automatically.
+
+An interrupting steer cancels the turn in flight and issues the next one
+straight away. Text the turn had already streamed to the `:sink` is kept as
+an assistant message ahead of the steer; a half-streamed tool call is
+dropped, and with no `:sink` nothing is kept. The abandoned turn counts
+against `:max-turns`, so an interrupt on the last allowed turn finishes the
+run as `:max-turns` and leaves the steer queued. Outside a model turn -- tool
+calls outstanding, between turns, or before `:run` -- `:interrupt` does
+nothing extra and the steer waits for the next turn.
 
 The rest — `:step`, `:turn-reply`, `:tool-reply`, `:deadline` — are internal,
 driving the machine between spawned work and the agent's own mailbox.
@@ -127,15 +137,18 @@ ends the run as that same `(:error reason)`, unwrapped.
 
 `:sink` takes an event of one type per message, echoing `:ref` as
 [protocols](protocols.md#streaming) do. The protocol's own `:text-delta`,
-`:tool-call-delta` and `:done` pass straight through, since the sink is
-handed down in the request unchanged; the loop adds:
+`:tool-call-delta` and `:done` pass straight through; the loop adds:
 
 ```lisp
 (:type :turn        :ref r :turn n)
+(:type :turn-interrupted :ref r :turn n)
 (:type :tool-call   :ref r :id "c1" :name :tool-shell :arguments (:cmd "ls"))
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
 ```
+
+An interrupted turn ends with `:turn-interrupted` rather than a `:done`:
+nothing it streams reaches the sink after it, and the next `:turn` follows.
 
 A turn whose `complete` failed emits the protocol's `:done` with
 `:reason (:error r)` before `:run-done`. A turn cut short by `:cancel` or
