@@ -132,8 +132,7 @@ pathname: record there instead.")
               (%allow-list service) (resolve-tools service)
               (%running-p service) t)
         (unless (%emitter service)
-          (setf (%emitter service)
-                (start-emitter (agent-sink service) :name "nyaa-agent-sink")))
+          (setf (%emitter service) (start-emitter (agent-sink service))))
         (arm-deadline service)
         (m:cast (m:self) '(:step))
         :ok)))
@@ -476,15 +475,15 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
 
 ;;; Every event reaches the sink through AGENT-EVENTS: a function sink is
 ;;; called from the agent's emitter, which a sub-agent is handed as its own
-;;; sink, so the whole tree calls it from one thread, in order, and a sink
+;;; sink, so the whole tree calls it one event at a time, in order, and a sink
 ;;; that blocks never holds up HANDLE. :RUN-DONE is the last event it sees.
 
 (defun agent-events (service)
-  "Where SERVICE's events go: its emitter's process, or a process sink. Nil
+  "Where SERVICE's events go: its emitter, or a process or emitter sink. Nil
 when a function sink has no emitter running, so it is never called here."
   (let ((sink (agent-sink service)))
-    (cond ((%emitter service) (emitter-process (%emitter service)))
-          ((typep sink 'm:process) sink))))
+    (cond ((%emitter service))
+          ((typep sink '(or m:process emitter)) sink))))
 
 (defun retire-emitter (service)
   "Stop the emitter once it has delivered what it was sent, and kill it if

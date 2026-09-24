@@ -121,12 +121,16 @@ stream cut short, a lapsed deadline — so a consumer of the sink alone can
 watch for `:done`. A request rejected before the network with
 `(:bad-request ...)` emits nothing.
 
-A function sink is called from a thread of its own, one event at a time and in
+A function sink is called on a pooled thread, one event at a time and in
 order, so a sink that blocks never delays the exchange or its deadline. `complete`
 returns once the sink has seen `:done`, except when the deadline lapsed: then
 the reply does not wait on the sink. A sink that has not taken `:done` five
 seconds past the deadline is stopped, and the events still queued for it are
 dropped. A sink that signals an error loses that event and carries on.
+
+Sinks drain on a pool of their own, capped by `*sink-pool-size*` (64) and
+reported by `(nyaa:pool-stats :sink)`. A sink that blocks holds its thread
+until it is stopped, so enough of them delay the sinks queued behind.
 
 A tool call's `:arguments` arrive as text split across deltas; the consumer
 reassembles them. The `(:ok ...)` reply carries the whole turn regardless, so a
@@ -351,9 +355,6 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- Each function sink's emitter is a process of its own, bounded only by the
-  runs that make them
-  ([#130](https://todo.sr.ht/~takeiteasy/nyaa/130)).
 - An exchange stuck where neither the socket shutdown nor the interrupt
   reaches it holds its pooled thread
   ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).

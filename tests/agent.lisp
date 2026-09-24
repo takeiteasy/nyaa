@@ -143,26 +143,26 @@ the keyed provider, ready for RUN-AGENT."
 ;;; RECORDED-EVENTS once it has exited.
 
 (defstruct (recorder (:constructor make-recorder ()))
-  (lock (bt:make-lock)) events threads)
+  (lock (bt:make-lock)) events (active 0) overlapped)
 
 (defun recorder-sink (recorder)
   (lambda (event)
     (bt:with-lock-held ((recorder-lock recorder))
-      (push event (recorder-events recorder))
-      (pushnew (bt:current-thread) (recorder-threads recorder)))))
+      (when (plusp (recorder-active recorder))
+        (setf (recorder-overlapped recorder) t))
+      (incf (recorder-active recorder))
+      (push event (recorder-events recorder)))
+    (sleep 0.001)
+    (bt:with-lock-held ((recorder-lock recorder))
+      (decf (recorder-active recorder)))))
 
 (defun recorder-has (recorder type)
   (bt:with-lock-held ((recorder-lock recorder))
     (find type (recorder-events recorder) :key (lambda (e) (getf e :type)))))
 
-(defun agent-sink-threads ()
-  (remove-if-not (lambda (thread)
-                   (search "nyaa-agent-sink" (or (bt:thread-name thread) "")))
-                 (bt:all-threads)))
-
 (defun recorded-events (recorder)
-  "RECORDER's events, oldest first, once every agent's emitter has exited."
-  (is-true (eventually (lambda () (null (agent-sink-threads))) 5))
+  "RECORDER's events, oldest first, once every agent's emitter has finished."
+  (is-true (eventually #'sinks-idle-p 5))
   (bt:with-lock-held ((recorder-lock recorder))
     (reverse (recorder-events recorder))))
 
@@ -701,7 +701,8 @@ RUN-ARGS and return the run's result."
       (is (nyaa:tool-error-p (getf (second events) :reason))))))
 
 ;;; A function sink is called from one emitter per agent, a sub-agent's
-;;; events included, so a sink that blocks never holds up the loop.
+;;; events included, one event at a time, so a sink that blocks never holds up
+;;; the loop.
 
 (defun sse-tool-call (id name arguments-json)
   (sse-response
@@ -711,7 +712,7 @@ RUN-ARGS and return the run's result."
    "{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"
    "[DONE]"))
 
-(test every-event-reaches-a-function-sink-from-one-thread
+(test every-event-reaches-a-function-sink-one-at-a-time
   (let ((n 0)
         (recorder (make-recorder)))
     (with-agent ((lambda (&rest request)
@@ -724,13 +725,11 @@ RUN-ARGS and return the run's result."
                                 :sub-agents t
                                 :sink (recorder-sink recorder))))
         (is (eq :stop (getf (second result) :stop-reason)))
-        (let ((events (recorded-events recorder))
-              (threads (recorder-threads recorder)))
+        (let ((events (recorded-events recorder)))
           (is (= 2 (count :run-done events :key (lambda (e) (getf e :type)))))
           (is (eq :run-done (getf (car (last events)) :type)))
           (is (not (consp (getf (car (last events)) :ref))))
-          (is (= 1 (length threads)))
-          (is (search "nyaa-agent-sink" (bt:thread-name (first threads)))))))))
+          (is-false (recorder-overlapped recorder)))))))
 
 (test a-blocking-sink-holds-up-neither-the-run-nor-cancel
   (let ((stuck (bt:make-semaphore))
@@ -752,7 +751,7 @@ RUN-ARGS and return the run's result."
                (multiple-value-bind (message received) (m:receive :timeout 5)
                  (is-true received)
                  (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
-               (is-true (eventually (lambda () (null (agent-sink-threads))) 5)))))
+               (is-true (eventually #'sinks-idle-p 5)))))
       (setf nyaa::*sink-grace* grace)
       (bt:signal-semaphore stuck :count 100))))
 

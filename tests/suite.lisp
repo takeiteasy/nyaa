@@ -28,3 +28,8 @@ from no idle threads."
 
 (defmacro with-pool-sizes ((&rest sizes) &body body)
   `(call-with-pool-sizes (list ,@sizes) (lambda () ,@body)))
+
+(defun sinks-idle-p ()
+  "True when no emitter is draining or waiting to."
+  (let ((stats (nyaa:pool-stats :sink)))
+    (and (zerop (getf stats :running)) (zerop (getf stats :queued)))))

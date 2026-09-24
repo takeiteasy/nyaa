@@ -121,3 +121,34 @@
     (apply #'nyaa:complete :protocol-echo (hello)))
   (nyaa::retire-idle-workers)
   (is-true (eventually (lambda () (null (pool-threads))))))
+
+(test a-stalled-sink-is-thrown-out-of-a-full-sink-pool
+  (with-pool-sizes (:sink 1)
+    (let* ((stuck (bt:make-semaphore))
+           (seen '())
+           (blocked (nyaa::start-emitter (lambda (event)
+                                           (declare (ignore event))
+                                           (bt:wait-on-semaphore stuck :timeout 60))))
+           (waiting (nyaa::start-emitter (lambda (event) (push event seen)))))
+      (unwind-protect
+           (progn
+             (nyaa::emitter-send blocked :a)
+             (is-true (eventually (lambda () (plusp (getf (nyaa:pool-stats :sink) :running)))))
+             (nyaa::emitter-send waiting :b)
+             (nyaa::stop-emitter waiting)
+             (nyaa::stop-emitter blocked)
+             (is-false (nyaa::await-emitter waiting 0.2))
+             (nyaa::reap-emitter blocked 0.2)
+             (is-true (nyaa::await-emitter waiting 3))
+             (is (equal '(:b) seen))
+             (is-true (eventually #'sinks-idle-p 5)))
+        (bt:signal-semaphore stuck :count 2)))))
+
+(test an-emitter-delivers-in-order-and-then-releases-its-thread
+  (let* ((seen '())
+         (emitter (nyaa::start-emitter (lambda (event) (push event seen)))))
+    (dotimes (i 50) (nyaa::emitter-send emitter i))
+    (nyaa::stop-emitter emitter)
+    (is-true (nyaa::await-emitter emitter 3))
+    (is (equal (loop for i below 50 collect i) (reverse seen)))
+    (is-true (eventually #'sinks-idle-p 5))))

@@ -293,11 +293,18 @@ across deltas."
 (defun done (ref &optional reason)
   (list :type :done :ref ref :reason reason))
 
+(defstruct (emitter (:constructor %make-emitter (sink)))
+  sink (queue '()) (lock (bt:make-lock))
+  scheduled stopping dead finished job thread
+  (drained (bt:make-semaphore)))
+
 (defun emit-event (sink event)
-  "Deliver EVENT to SINK, a function or a meow process. A null sink drops it."
+  "Deliver EVENT to SINK, a function, a meow process or an emitter. A null
+sink drops it."
   (etypecase sink
     (null nil)
     (m:process (m:send sink event))
+    (emitter (emitter-send sink event))
     ((or function symbol) (funcall sink event)))
   event)
 
@@ -532,32 +539,56 @@ handshake in the clear."
 
 ;;; --- emitters -----------------------------------------------------------
 
-;;; A function sink called from a process of its own, fed through a mailbox,
-;;; so a sink that blocks never holds up whoever emits, and every event
-;;; reaches it from one thread, in order.
+;;; A function sink is called through a queue drained by a job on the sink
+;;; pool, so a sink that blocks never holds up whoever emits, and every event
+;;; reaches it one at a time, in order. A drain holds a pooled thread only
+;;; while events wait, and an emitter that stalls is thrown out of its job.
 
 (defparameter *sink-grace* 5
   "Seconds an emitter has to deliver what it was sent once stopped.")
 
-(defstruct (emitter (:constructor %make-emitter))
-  process (drained (bt:make-semaphore)))
+(defvar *emitting* nil
+  "The emitter this thread is draining, so an interrupt meant for one that has
+finished does nothing.")
 
-;;; TODO: each emitter is a process with a thread of its own, bounded only by
-;;; the runs that make them. Upgrade path: a per-sink queue drained by a keyed
-;;; pool job. Tracked in ~takeiteasy/nyaa#130.
-(defun start-emitter (sink &key (name "nyaa-sink"))
+(defun start-emitter (sink)
   "An emitter calling SINK, or nil when SINK is not a function."
   (when (and sink (typep sink '(or function symbol)))
-    (let ((emitter (%make-emitter)))
-      (setf (emitter-process emitter)
-            (m:spawn (lambda ()
-                       (unwind-protect
-                            (loop for event = (m:receive)
-                                  until (eq event 'stop-emitter)
-                                  do (ignore-errors (emit-event sink event)))
-                         (bt:signal-semaphore (emitter-drained emitter))))
-                     :name name))
-      emitter)))
+    (%make-emitter sink)))
+
+(defun finish-emitter (emitter)
+  "Called holding EMITTER's lock."
+  (unless (emitter-finished emitter)
+    (setf (emitter-finished emitter) t)
+    (bt:signal-semaphore (emitter-drained emitter))))
+
+(defun drain-emitter (emitter)
+  (catch emitter
+    (let ((*emitting* emitter))
+      (bt:with-lock-held ((emitter-lock emitter))
+        (setf (emitter-thread emitter) (bt:current-thread)))
+      (loop
+        (let ((event (bt:with-lock-held ((emitter-lock emitter))
+                       (if (emitter-queue emitter)
+                           (list (pop (emitter-queue emitter)))
+                           (progn
+                             (setf (emitter-scheduled emitter) nil
+                                   (emitter-job emitter) nil
+                                   (emitter-thread emitter) nil)
+                             (when (emitter-stopping emitter)
+                               (finish-emitter emitter))
+                             nil)))))
+          (unless event (return))
+          (ignore-errors (funcall (emitter-sink emitter) (first event))))))))
+
+(defun emitter-send (emitter event)
+  (bt:with-lock-held ((emitter-lock emitter))
+    (unless (or (emitter-dead emitter) (emitter-stopping emitter))
+      (setf (emitter-queue emitter) (nconc (emitter-queue emitter) (list event)))
+      (unless (emitter-scheduled emitter)
+        (setf (emitter-scheduled emitter) t
+              (emitter-job emitter) (make-pool-job (lambda () (drain-emitter emitter))))
+        (pool-submit (pool-for :sink) (emitter-job emitter))))))
 
 (defun emit-done-detached (sink ref result)
   "End a turn that never ran with its one :DONE, without waiting on SINK."
@@ -567,23 +598,39 @@ handshake in the clear."
            (reap-emitter emitter *sink-grace*))
     (emit-event sink (done ref (done-reason result)))))
 
-(defun emitter-send (emitter event)
-  (m:send (emitter-process emitter) event))
-
 (defun stop-emitter (emitter)
-  "Have EMITTER exit once it has delivered everything sent before this."
-  (m:send (emitter-process emitter) 'stop-emitter))
+  "Have EMITTER finish once it has delivered everything sent before this."
+  (bt:with-lock-held ((emitter-lock emitter))
+    (setf (emitter-stopping emitter) t)
+    (unless (or (emitter-scheduled emitter) (emitter-queue emitter))
+      (finish-emitter emitter))))
 
 (defun await-emitter (emitter seconds)
-  "True once EMITTER has stopped, waiting at most SECONDS."
+  "True once EMITTER has finished, waiting at most SECONDS."
   (bt:wait-on-semaphore (emitter-drained emitter) :timeout (max 0 seconds)))
 
+(defun kill-emitter (emitter)
+  "Drop what EMITTER has queued and throw its drain out of the sink it is
+stuck in, or withdraw it if it has not started."
+  (bt:with-lock-held ((emitter-lock emitter))
+    (setf (emitter-dead emitter) t
+          (emitter-queue emitter) nil)
+    (a:when-let ((job (emitter-job emitter)))
+      (unless (pool-withdraw job)
+        (a:when-let ((thread (emitter-thread emitter)))
+          (ignore-errors
+           (bt:interrupt-thread thread
+                                (lambda ()
+                                  (when (eq *emitting* emitter)
+                                    (throw emitter nil))))))))
+    (finish-emitter emitter)))
+
 (defun reap-emitter (emitter seconds)
-  "Kill EMITTER unless it has stopped within SECONDS."
+  "Kill EMITTER unless it has finished within SECONDS."
   (m:schedule (max 0 seconds)
               (lambda ()
                 (unless (await-emitter emitter 0)
-                  (m:kill (emitter-process emitter))))))
+                  (kill-emitter emitter)))))
 
 ;;; --- streamed turns ---------------------------------------------------
 
