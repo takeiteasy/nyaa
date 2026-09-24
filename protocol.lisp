@@ -240,13 +240,14 @@ is what COERCE-ARGS matches a schema on."
     (if problem
         (bad-request "~a" problem)
         (multiple-value-bind (process props) (%protocol-process name)
-          (m:call process
-                  (list* :complete request)
-                  ;; A provider delegates to its protocol, so the reply
-                  ;; travels two hops and each waiter needs its own margin.
-                  :timeout (%caller-timeout
-                            request
-                            (if (eq (getf props :kind) :provider) 2 1)))))))
+          (multiple-value-call #'%call-result
+            (m:call process
+                    (list* :complete request)
+                    ;; A provider delegates to its protocol, so the reply
+                    ;; travels two hops and each waiter needs its own margin.
+                    :timeout (%caller-timeout
+                              request
+                              (if (eq (getf props :kind) :provider) 2 1))))))))
 
 ;;; --- streaming --------------------------------------------------------
 
@@ -284,9 +285,9 @@ malformed payload, a stream cut short."
 
 ;;; --- cancelling ---------------------------------------------------------
 
-;;; A caller-held handle rather than a message: a protocol answers one message
-;;; at a time, so a cancel sent to it would wait behind the completion it
-;;; means to stop.
+;;; A caller-held handle rather than a message: it reaches a turn through
+;;; every layer without the caller knowing which service holds it, and
+;;; without a service to address it to.
 
 (defstruct (cancel-token (:constructor make-cancel-token ()))
   (lock (bt:make-lock)) cancelled actions)
@@ -311,6 +312,80 @@ time."
                      (shiftf (cancel-token-actions token) nil)))))
     (mapc #'funcall actions)
     (and actions t)))
+
+;;; --- concurrent completions ------------------------------------------------
+
+;;; Each completion runs on a worker process of its own, so a protocol or
+;;; provider answers :DESCRIBE and further completions while one is in flight.
+;;; The service still checks and layers the request on its own process; only
+;;; the blocking work moves. Stopping the service cancels what is in flight.
+;;;
+;;; TODO: one thread per completion in flight, with no cap. Upgrade path: a
+;;; per-service :max-in-flight, or a shared worker pool. Tracked in
+;;; ~takeiteasy/nyaa#112, alongside ~takeiteasy/nyaa#41.
+
+(defclass completion-host ()
+  ((in-flight :initform '() :accessor host-in-flight)
+   (closing :initform nil :accessor host-closing)
+   (drained :initform (bt:make-semaphore) :reader host-drained)
+   (in-flight-lock :initform (bt:make-lock) :reader host-lock))
+  (:documentation "The state a service needs to run completions concurrently:
+the cancel tokens of those in flight, and whether the service is stopping."))
+
+(defun track-completion (host token)
+  (bt:with-lock-held ((host-lock host))
+    (push token (host-in-flight host))))
+
+(defun untrack-completion (host token)
+  (bt:with-lock-held ((host-lock host))
+    (setf (host-in-flight host) (remove token (host-in-flight host)))
+    (when (host-closing host)
+      (bt:signal-semaphore (host-drained host)))))
+
+(defparameter *drain-timeout* 5
+  "Seconds a stopping service waits for its cancelled completions to answer.")
+
+(defmethod m:dispose ((host completion-host) reason)
+  (declare (ignore reason))
+  ;; The service's exit settles every call waiting on it as :down, so the
+  ;; cancelled workers get to answer first.
+  (let ((tokens (bt:with-lock-held ((host-lock host))
+                  (setf (host-closing host) t)
+                  (copy-list (host-in-flight host))))
+        (deadline (+ (get-internal-real-time)
+                     (* *drain-timeout* internal-time-units-per-second))))
+    (mapc #'cancel tokens)
+    (dolist (token tokens)
+      (declare (ignore token))
+      (bt:wait-on-semaphore
+       (host-drained host)
+       :timeout (max 0 (/ (- deadline (get-internal-real-time))
+                          internal-time-units-per-second)))))
+  (call-next-method))
+
+(defun defer-completion (host request function)
+  "Call from HANDLE while answering a :complete call: run FUNCTION on REQUEST
+in a worker process and answer the call from there. FUNCTION's request carries
+a :CANCEL token of the worker's own, which cancelling the caller's token or
+stopping HOST also cancels."
+  (let* ((token (make-cancel-token))
+         (registry (m:service-registry host))
+         (worker (m:spawn (lambda ()
+                            (let ((cell (m:receive))
+                                  (m:*registry* registry))
+                              (unwind-protect
+                                   (m:reply cell (funcall function
+                                                          (list* :cancel token
+                                                                 (a:remove-from-plist request :cancel))))
+                                (untrack-completion host token))))
+                          :name "nyaa-completion-worker")))
+    (track-completion host token)
+    (a:when-let ((caller (getf request :cancel)))
+      (on-cancel caller (lambda () (cancel token))))
+    (a:if-let ((cell (m:defer-reply :until worker)))
+      (m:send worker cell)
+      (m:kill worker))
+    nil))
 
 ;;; --- the exchange -------------------------------------------------------
 
@@ -552,8 +627,9 @@ type names a charset."
 
 (defmacro define-protocol-handler (class (service request) &body body)
   "Define HANDLE for CLASS: (:describe) answers METADATA and
-(:complete . plist) runs BODY with REQUEST bound to the plist, checked against
-the contract. Meow intercepts %update-config, %effects and %timer-fire before
+(:complete . plist) runs BODY on a worker process, DEFER-COMPLETION, with
+REQUEST bound to the plist, checked against the contract. CLASS must inherit
+COMPLETION-HOST. Meow intercepts %update-config, %effects and %timer-fire before
 HANDLE, so a protocol must not use those heads."
   (a:with-gensyms (problem)
     `(defmethod m:handle ((,service ,class) message)
@@ -566,5 +642,8 @@ HANDLE, so a protocol must not use those heads."
                       (declare (ignorable ,request))
                       (if ,problem
                           (bad-request "~a" ,problem)
-                          (progn ,@body))))
+                          (defer-completion ,service ,request
+                            (lambda (,request)
+                              (declare (ignorable ,request))
+                              ,@body)))))
          (t (bad-request "unknown message ~s" (first message)))))))

@@ -20,7 +20,7 @@
 declared parameter is not itself: an entry with one groups under that key in
 the request body rather than at the top level.")
 
-(m:defservice protocol-ollama () ()
+(m:defservice protocol-ollama (completion-host) ()
   (:name :protocol-ollama))
 
 (defmethod m:metadata ((service protocol-ollama))

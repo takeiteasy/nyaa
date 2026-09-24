@@ -394,6 +394,25 @@ needs and a user message."
         (is (equal '(:error :cancelled) (getf (first events) :reason)))
         (is-true (eventually (lambda () (null (stream-threads)))))))))
 
+(test stopping-the-protocol-mid-stream-ends-the-turn-and-frees-its-threads
+  (with-openai ((stalled-stream "text/event-stream" (sse-body "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")))
+    (with-hold
+      (let* ((events '())
+             (lock (bt:make-lock))
+             (thread (in-thread
+                      (lambda ()
+                        (ask :ref :r1 :timeout 30000
+                             :stream (lambda (event)
+                                       (bt:with-lock-held (lock) (push event events)))))))
+             (started (get-internal-real-time)))
+        (sleep 0.3)
+        (m:stop-and-wait (m:lookup :protocol-openai))
+        (is (eq :cancelled (nyaa:tool-error (bt:join-thread thread))))
+        (is (< (elapsed-since started) 5))
+        (is (equal '(:text-delta :done)
+                   (mapcar (lambda (event) (getf event :type)) (reverse events))))
+        (is-true (eventually (lambda () (null (stream-threads)))))))))
+
 (test a-request-cancelled-beforehand-never-reaches-the-backend
   (with-openai ((json-response +hello-reply+))
     (let ((token (nyaa:make-cancel-token))

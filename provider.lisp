@@ -20,7 +20,7 @@
 
 ;;; --- the declaration --------------------------------------------------
 
-(defclass provider ()
+(defclass provider (completion-host)
   ((base-url :initarg :base-url :reader provider-base-url :initform nil)
    (model :initarg :model :reader provider-model :initform nil)
    (api-key :initarg :api-key :reader provider-api-key :initform nil))
@@ -174,17 +174,27 @@ appending the provider's keys after the caller's is what lets the caller win."
     (t (bad-request "unknown message ~s" (first message)))))
 
 (defun provider-complete (service request)
+  "Layer SERVICE's data under REQUEST and hand the call to its protocol from a
+worker, so this service is free to take the next completion meanwhile."
   (a:if-let ((problem (provider-key-problem service)))
     (bad-request "~a" problem)
     (a:if-let ((process (m:lookup (provider-protocol service)
                                   :registry (m:service-registry service))))
-      (apply-quirk
-       service :rewrite-response
-       (m:call process
-               (list* :complete
-                      (apply-quirk service :rewrite-request
-                                   (layered-request service request)))
-               :timeout (%caller-timeout request)))
+      (let ((layered (apply-quirk service :rewrite-request
+                                  (layered-request service request))))
+        (defer-completion
+         service request
+         (lambda (request)
+           (apply-quirk
+            service :rewrite-response
+            (multiple-value-call #'%call-result
+              (m:call process
+                      (list* :complete
+                             ;; The worker's own :cancel goes down, not the
+                             ;; one layered from the caller.
+                             :cancel (getf request :cancel)
+                             (a:remove-from-plist layered :cancel))
+                      :timeout (%caller-timeout request)))))))
       (fail :unavailable))))
 
 (defun apply-quirk (service hook value)

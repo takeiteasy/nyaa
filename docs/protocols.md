@@ -19,7 +19,7 @@ A protocol registers under `:protocol-<name>`, and its `metadata` plist carries
 `:kind :protocol`, a `:summary`, and optionally `:params`:
 
 ```lisp
-(m:defservice protocol-example () ()
+(m:defservice protocol-example (nyaa:completion-host) ()
   (:name :protocol-example))
 
 (defmethod m:metadata ((service protocol-example))
@@ -157,6 +157,16 @@ wedged backend costs a timeout rather than a wedged service. The deadline
 closes the connection, so the reader thread unwinds rather than waiting on the
 backend.
 
+## Concurrency
+
+Each completion runs on a worker process of its own, so a protocol or provider
+answers `(:describe)` and further completions while one is in flight. A
+service inherits `completion-host` and defines its handler with
+`define-protocol-handler`, which runs the body on the worker.
+
+Stopping a service cancels every completion it has in flight: each caller
+receives `(:error :cancelled)`.
+
 ## Cancelling
 
 A caller that no longer wants a completion passes a cancel token in the request
@@ -292,10 +302,8 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- A protocol service handles one completion at a time: meow's service loop runs
-  one message to completion before the next, so concurrent turns queue. This
-  now applies to both protocol services and to a provider layered on either
-  ([#35](https://todo.sr.ht/~takeiteasy/nyaa/35)).
+- Completions in flight per service are not capped
+  ([#112](https://todo.sr.ht/~takeiteasy/nyaa/112)).
 - A tool call naming a tool absent from the request's `:tools` has no schema to
   render its arguments by, and falls back to a heuristic
   ([#36](https://todo.sr.ht/~takeiteasy/nyaa/36)).

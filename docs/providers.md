@@ -133,6 +133,5 @@ OpenAI protocol's own live tests use.)
   rather than refused, since a protocol takes only what it knows.
 - Auth is BYOK. OAuth and other interactive flows are
   [#24](https://todo.sr.ht/~takeiteasy/nyaa/24).
-- A provider service handles one completion at a time, as its protocol does, so
-  concurrent turns queue at both layers
-  ([#35](https://todo.sr.ht/~takeiteasy/nyaa/35)).
+- Completions in flight per provider are not capped
+  ([#112](https://todo.sr.ht/~takeiteasy/nyaa/112)).

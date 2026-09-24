@@ -12,7 +12,7 @@
    #:define-tool
    ;; protocol convention
    #:protocols #:describe-protocol #:complete #:check-request
-   #:define-protocol-handler #:backend-error
+   #:define-protocol-handler #:completion-host #:backend-error
    #:normalize-content #:content-text #:text-block
    #:text-delta #:tool-call-delta #:done #:emit-event
    #:make-cancel-token #:cancel #:cancelled-p

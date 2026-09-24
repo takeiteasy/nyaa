@@ -39,6 +39,10 @@
   :base-url "http://127.0.0.1:1"
   :auth '(:bearer :env "PATH"))
 
+(nyaa:define-provider :test-echo
+  :protocol :protocol-echo
+  :base-url "http://127.0.0.1:1")
+
 (nyaa:define-provider :test-orphan
   :protocol :protocol-nobody-mounted
   :base-url "http://127.0.0.1:1")
@@ -331,3 +335,21 @@ is the one MAKE-INSTANCE takes."
                          (is (plusp (length (nyaa:content-text
                                              (getf (second result) :content)))))))))
             (m:stop context))))))
+
+;;; --- concurrency ------------------------------------------------------
+
+(test a-provider-runs-completions-concurrently
+  (let* ((registry (make-instance 'm:registry))
+         (m:*registry* registry)
+         (context (m:start-service (make-instance 'm:context :name :providers)
+                                   :registry registry)))
+    (unwind-protect
+         (progn
+           (m:mount context 'protocol-echo)
+           (m:mount context 'provider-test-echo)
+           (let* ((start (get-internal-real-time))
+                  (results (concurrently
+                            3 (lambda () (turn :provider-test-echo :delay 0.5)))))
+             (is (every (lambda (result) (eq :ok (first result))) results))
+             (is (< (elapsed-since start) 1.2))))
+      (m:stop context))))

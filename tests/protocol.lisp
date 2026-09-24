@@ -7,7 +7,7 @@
 ;;; COMPLETE and the bare M:CALL paths, content normalisation, and the
 ;;; streaming vocabulary.
 
-(m:defservice protocol-echo () ()
+(m:defservice protocol-echo (nyaa:completion-host) ()
   (:name :protocol-echo))
 
 (defmethod m:metadata ((service protocol-echo))
@@ -16,20 +16,29 @@
         :summary "Echo the last user message"
         :params '((:temperature number :doc "sampling temperature"))))
 
+(defun echo-hold (request)
+  "Park until REQUEST's cancel token fires."
+  (loop until (nyaa:cancelled-p (getf request :cancel)) do (sleep 0.01))
+  (list :error :cancelled))
+
 (nyaa:define-protocol-handler protocol-echo (service request)
-  (let* ((ref (getf request :ref))
-         (text (nyaa:content-text
-                (getf (car (last (getf request :messages))) :content))))
-    (when (getf request :stream)
-      (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref text))
-      (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref "!"))
-      (nyaa:emit-event (getf request :stream) (nyaa:done ref :stop)))
-    (list :ok (list :role :assistant
-                    :content (nyaa:normalize-content
-                              (concatenate 'string text "!"))
-                    :tool-calls nil
-                    :done t
-                    :meta (list :echoed (length (getf request :messages)))))))
+  (when (getf request :delay) (sleep (getf request :delay)))
+  (when (getf request :boom) (error "boom"))
+  (if (getf request :hold)
+      (echo-hold request)
+      (let* ((ref (getf request :ref))
+             (text (nyaa:content-text
+                    (getf (car (last (getf request :messages))) :content))))
+        (when (getf request :stream)
+          (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref text))
+          (nyaa:emit-event (getf request :stream) (nyaa:text-delta ref "!"))
+          (nyaa:emit-event (getf request :stream) (nyaa:done ref :stop)))
+        (list :ok (list :role :assistant
+                        :content (nyaa:normalize-content
+                                  (concatenate 'string text "!"))
+                        :tool-calls nil
+                        :done t
+                        :meta (list :echoed (length (getf request :messages))))))))
 
 (defvar *protocol-context* nil)
 
@@ -165,6 +174,70 @@
 (test a-null-sink-drops-events
   (is (equal '(:type :done :ref nil :reason nil)
              (nyaa:emit-event nil (nyaa:done nil)))))
+
+
+;;; --- concurrency ------------------------------------------------------
+
+(defun elapsed-since (start)
+  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+
+(defun in-thread (function)
+  "FUNCTION on a new thread, against the registry in force here."
+  (let ((registry m:*registry*))
+    (bt:make-thread (lambda ()
+                      (let ((m:*registry* registry))
+                        (funcall function))))))
+
+(defun concurrently (count function)
+  "Call FUNCTION on COUNT threads at once; the list of what each returned."
+  (let ((results (make-list count)))
+    (mapc #'bt:join-thread
+          (loop for cell on results
+                collect (let ((cell cell))
+                          (in-thread (lambda () (setf (car cell) (funcall function)))))))
+    results))
+
+(test completions-run-concurrently
+  (with-protocol
+    (let* ((start (get-internal-real-time))
+           (results (concurrently 3 (lambda ()
+                                      (apply #'nyaa:complete :protocol-echo
+                                             (hello :delay 0.5))))))
+      (is (every (lambda (result) (eq :ok (first result))) results))
+      (is (< (elapsed-since start) 1.2)))))
+
+(test a-service-describes-itself-while-a-completion-is-in-flight
+  (with-protocol
+    (let* ((token (nyaa:make-cancel-token))
+           (thread (in-thread
+                    (lambda ()
+                      (apply #'nyaa:complete :protocol-echo
+                             (hello :hold t :cancel token))))))
+      (sleep 0.1)
+      (let ((start (get-internal-real-time)))
+        (is (eq :protocol (getf (nyaa:describe-protocol :protocol-echo) :kind)))
+        (is (< (elapsed-since start) 0.5)))
+      (nyaa:cancel token)
+      (is (eq :cancelled (nyaa:tool-error (bt:join-thread thread)))))))
+
+(test a-worker-that-signals-answers-its-caller
+  (with-protocol
+    (let ((start (get-internal-real-time))
+          (result (apply #'nyaa:complete :protocol-echo (hello :boom t))))
+      (is (nyaa:tool-error-p result))
+      (is (< (elapsed-since start) 2)))))
+
+(test stopping-a-service-cancels-what-it-has-in-flight
+  (with-protocol
+    (let* ((thread (in-thread
+                    (lambda ()
+                      (apply #'nyaa:complete :protocol-echo
+                             (hello :hold t :timeout 30000)))))
+           (start (get-internal-real-time)))
+      (sleep 0.1)
+      (m:unmount *protocol-context* :protocol-echo)
+      (is (eq :cancelled (nyaa:tool-error (bt:join-thread thread))))
+      (is (< (elapsed-since start) 3)))))
 
 ;;; --- results ----------------------------------------------------------
 
