@@ -882,3 +882,27 @@ result and the seconds the call took."
       (is (< seconds 5)))
     (is (equal "NIL" (result-value (tool :tool-repl :id "c" :form "(boundp '*kept*)")
                                    :value)))))
+
+(test an-interrupt-kills-an-agents-shell-command-and-its-group
+  (let* ((pidfile (format nil "~a/nyaa-agent-interrupt-test.pid"
+                          (uiop:native-namestring (uiop:temporary-directory))))
+         (n 0)
+         (call (format nil "{\"cmd\":\"sleep 30 & echo $! > ~a; wait\"}" pidfile)))
+    (ignore-errors (delete-file pidfile))
+    (unwind-protect
+         (multiple-value-bind (result seconds)
+             (interrupt-tool-phase (lambda (&rest request)
+                                     (declare (ignore request))
+                                     (if (= (incf n) 1)
+                                         (tool-call-reply "c1" "tool-shell" call)
+                                         (final-reply "done")))
+                                   '(nyaa:tool-shell)
+                                   '(:tools (:tool-shell))
+                                   :ready (lambda (snapshot)
+                                            (and (in-tool-phase-p snapshot)
+                                                 (probe-file pidfile))))
+           (is (eq :stop (getf (second result) :stop-reason)))
+           (is (< seconds 2))
+           (let ((grandchild (with-open-file (s pidfile) (parse-integer (read-line s)))))
+             (is (wait-for-exit grandchild))))
+      (ignore-errors (delete-file pidfile)))))
