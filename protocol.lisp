@@ -499,43 +499,69 @@ handshake in the clear."
      ;; Matches drakma's own +LATIN-1+ (specials.lisp), which is internal.
      :external-format (flexi-streams:make-external-format :latin-1 :eol-style :lf))))
 
+;;; --- emitters -----------------------------------------------------------
+
+;;; A function sink called from a process of its own, fed through a mailbox,
+;;; so a sink that blocks never holds up whoever emits, and every event
+;;; reaches it from one thread, in order.
+
+(defparameter *sink-grace* 5
+  "Seconds an emitter has to deliver what it was sent once stopped.")
+
+(defstruct (emitter (:constructor %make-emitter))
+  process (drained (bt:make-semaphore)))
+
+(defun start-emitter (sink &key (name "nyaa-sink"))
+  "An emitter calling SINK, or nil when SINK is not a function."
+  (when (and sink (typep sink '(or function symbol)))
+    (let ((emitter (%make-emitter)))
+      (setf (emitter-process emitter)
+            (m:spawn (lambda ()
+                       (unwind-protect
+                            (loop for event = (m:receive)
+                                  until (eq event 'stop-emitter)
+                                  do (ignore-errors (emit-event sink event)))
+                         (bt:signal-semaphore (emitter-drained emitter))))
+                     :name name))
+      emitter)))
+
+(defun emitter-send (emitter event)
+  (m:send (emitter-process emitter) event))
+
+(defun stop-emitter (emitter)
+  "Have EMITTER exit once it has delivered everything sent before this."
+  (m:send (emitter-process emitter) 'stop-emitter))
+
+(defun await-emitter (emitter seconds)
+  "True once EMITTER has stopped, waiting at most SECONDS."
+  (bt:wait-on-semaphore (emitter-drained emitter) :timeout (max 0 seconds)))
+
+(defun reap-emitter (emitter seconds &key (name "nyaa-sink-reaper"))
+  "Kill EMITTER unless it has stopped within SECONDS, from a thread of its own
+so the caller is not held up."
+  (bt:make-thread (lambda ()
+                    (unless (await-emitter emitter seconds)
+                      (m:kill (emitter-process emitter))))
+                  :name name))
+
 ;;; --- streamed turns ---------------------------------------------------
 
 ;;; The worker's deltas and the caller's :DONE reach the sink through one
 ;;; gate, so the sink sees exactly one :DONE and nothing after it, however
 ;;; the worker and the deadline race. A function sink is called from an
-;;; emitter of its own, fed through a mailbox, so a sink that blocks never
-;;; holds up the worker or the deadline. An emitter that has not delivered
-;;; :DONE by the turn's deadline plus *SINK-GRACE* is killed, and the events
-;;; queued behind it with it.
-
-(defparameter *sink-grace* 5
-  "Seconds past a turn's deadline a function sink has to take its :DONE.")
+;;; emitter, so a sink that blocks never holds up the worker or the deadline.
+;;; An emitter that has not delivered :DONE by the turn's deadline plus
+;;; *SINK-GRACE* is killed, and the events queued behind it with it.
 
 (defstruct (sink-gate (:conc-name gate-))
-  sink (lock (bt:make-lock)) closed relay (drained (bt:make-semaphore)))
-
-(defun start-relay (gate)
-  "Give GATE's function sink an emitter, which stops after delivering :DONE."
-  (let ((sink (gate-sink gate))
-        (drained (gate-drained gate)))
-    (when (and sink (typep sink '(or function symbol)))
-      (setf (gate-relay gate)
-            (m:spawn (lambda ()
-                       (unwind-protect
-                            (loop for event = (m:receive)
-                                  do (ignore-errors (emit-event sink event))
-                                  until (eq :done (getf event :type)))
-                         (bt:signal-semaphore drained)))
-                     :name "nyaa-sink")))
-    gate))
+  sink (lock (bt:make-lock)) closed emitter)
 
 (defun gate-deliver (gate event)
-  (if (gate-relay gate)
-      (m:send (gate-relay gate) event)
+  (if (gate-emitter gate)
+      (emitter-send (gate-emitter gate) event)
       (emit-event (gate-sink gate) event)))
 
-(defun gate-emitter (gate)
+(defun gate-emitter-function (gate)
   (lambda (event)
     (bt:with-lock-held ((gate-lock gate))
       (unless (gate-closed gate)
@@ -548,18 +574,11 @@ when the sink has, or has no emitter to wait for."
   (bt:with-lock-held ((gate-lock gate))
     (unless (gate-closed gate)
       (setf (gate-closed gate) t)
-      (gate-deliver gate (done ref (done-reason result)))))
-  (or (null (gate-relay gate))
-      (and wait (bt:wait-on-semaphore (gate-drained gate) :timeout (max 0 wait)))))
-
-(defun reap-relay (gate seconds)
-  "Kill GATE's emitter unless the sink has taken :DONE within SECONDS, from a
-thread of its own so the reply is not held up."
-  (bt:make-thread (lambda ()
-                    (unless (bt:wait-on-semaphore (gate-drained gate)
-                                                  :timeout (max 0 seconds))
-                      (m:kill (gate-relay gate))))
-                  :name "nyaa-sink-reaper"))
+      (gate-deliver gate (done ref (done-reason result)))
+      (a:when-let ((emitter (gate-emitter gate)))
+        (stop-emitter emitter))))
+  (or (null (gate-emitter gate))
+      (and wait (await-emitter (gate-emitter gate) wait))))
 
 (defun done-reason (result)
   (if (tool-error-p result)
@@ -573,11 +592,11 @@ takes (request connect) and answers (values stream status); READER takes
 (request stream status) and answers the reply. A request with a :STREAM sink
 ends it with exactly one :DONE."
   (let* ((sink (getf request :stream))
-         (gate (start-relay (make-sink-gate :sink sink)))
+         (gate (make-sink-gate :sink sink :emitter (start-emitter sink)))
          (timeout (getf request :timeout +default-tool-timeout+))
          (started (get-internal-real-time))
          (request (if sink
-                      (list* :stream (gate-emitter gate) request)
+                      (list* :stream (gate-emitter-function gate) request)
                       request)))
     (multiple-value-bind (result reason)
         (call-with-deadline
@@ -596,7 +615,7 @@ ends it with exactly one :DONE."
                          internal-time-units-per-second))))
             (unless (close-gate gate (getf request :ref) result
                                 (unless reason (remaining)))
-              (reap-relay gate (+ (remaining) *sink-grace*)))))
+              (reap-emitter (gate-emitter gate) (+ (remaining) *sink-grace*)))))
         result))))
 
 (defun attempt-completion (request opener reader connect)

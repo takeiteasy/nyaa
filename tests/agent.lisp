@@ -107,6 +107,34 @@ the keyed provider, ready for RUN-AGENT."
 
 (defun requests () (fake-http-requests *backend*))
 
+;;; A function sink is called from the agent's emitter, which may still be
+;;; delivering after the run has answered, so events are read back through
+;;; RECORDED-EVENTS once it has exited.
+
+(defstruct (recorder (:constructor make-recorder ()))
+  (lock (bt:make-lock)) events threads)
+
+(defun recorder-sink (recorder)
+  (lambda (event)
+    (bt:with-lock-held ((recorder-lock recorder))
+      (push event (recorder-events recorder))
+      (pushnew (bt:current-thread) (recorder-threads recorder)))))
+
+(defun recorder-has (recorder type)
+  (bt:with-lock-held ((recorder-lock recorder))
+    (find type (recorder-events recorder) :key (lambda (e) (getf e :type)))))
+
+(defun agent-sink-threads ()
+  (remove-if-not (lambda (thread)
+                   (search "nyaa-agent-sink" (or (bt:thread-name thread) "")))
+                 (bt:all-threads)))
+
+(defun recorded-events (recorder)
+  "RECORDER's events, oldest first, once every agent's emitter has exited."
+  (is-true (eventually (lambda () (null (agent-sink-threads))) 5))
+  (bt:with-lock-held ((recorder-lock recorder))
+    (reverse (recorder-events recorder))))
+
 (defun request-tool-names (n)
   "The `name`s in request N's (1-based) `tools` array."
   (let ((body (com.inuoe.jzon:parse (getf (nth (1- n) (requests)) :body))))
@@ -318,28 +346,23 @@ serves one connection at a time, so the next request waits on the release."
   "Run an agent against INTERRUPTIBLE-BACKEND, send an interrupting steer
 once its first turn has streamed, and return the :agent-done result and the
 sink's events, oldest first."
-  (let* ((release (list nil))
-         (lock (bt:make-lock))
-         (events '()))
+  (let ((release (list nil))
+        (recorder (make-recorder)))
     (with-agent ((interruptible-backend release))
       (unwind-protect
            (m:with-process (runner)
              (let ((child (apply #'m:delegate *ctx* 'nyaa:agent
                                  :model :provider-test-keyed
-                                 :sink (lambda (event)
-                                         (bt:with-lock-held (lock) (push event events)))
+                                 :sink (recorder-sink recorder)
                                  delegate-args)))
                (m:cast child (list :run :messages '((:role :user :content "go"))))
-               (is-true (eventually (lambda ()
-                                      (bt:with-lock-held (lock)
-                                        (find :text-delta events
-                                              :key (lambda (e) (getf e :type)))))))
+               (is-true (eventually (lambda () (recorder-has recorder :text-delta))))
                (m:cast child (list :steer :content "change of plan" :interrupt t))
                (setf (car release) t)
                (multiple-value-bind (message received) (m:receive :timeout 5)
                  (is-true received)
                  (values (fourth message)
-                         (bt:with-lock-held (lock) (reverse events))
+                         (recorded-events recorder)
                          (requests)))))
         (setf (car release) t)))))
 
@@ -558,10 +581,10 @@ and the seconds from the steer to it."
                 "[DONE]")
                'tool-hold)
     (m:with-process (runner)
-      (let* ((events '())
+      (let* ((recorder (make-recorder))
              (child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
                                 :tools '(:tool-hold)
-                                :sink (lambda (event) (push event events)))))
+                                :sink (recorder-sink recorder))))
         (m:cast child (list :run :messages '((:role :user :content "go"))))
         (loop repeat 100
               until (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls)
@@ -574,7 +597,8 @@ and the seconds from the steer to it."
             (is (eq :tool (getf last-message :role)))
             (is (equal "c1" (getf last-message :tool-call-id)))
             (is (search "interrupted" (nyaa:content-text (getf last-message :content))))
-            (let ((event (find :tool-result events :key (lambda (e) (getf e :type)))))
+            (let ((event (find :tool-result (recorded-events recorder)
+                               :key (lambda (e) (getf e :type)))))
               (is (equal "c1" (getf event :id)))
               (is (equal '(:error :interrupted) (getf event :result))))))))))
 
@@ -623,28 +647,99 @@ RUN-ARGS and return the run's result."
                 "{\"choices\":[{\"delta\":{\"content\":\"there\"}}]}"
                 "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"
                 "[DONE]"))
-    (let ((events '()))
+    (let ((recorder (make-recorder)))
       (agent-turn :messages '((:role :user :content "hi"))
-                 :sink (lambda (event) (push event events)))
-      (setf events (nreverse events))
+                  :sink (recorder-sink recorder))
       ;; :TEXT-DELTA/:DONE are the protocol's own, passed straight through
       ;; because :STREAM is handed down in the request; :TURN and :RUN-DONE
       ;; are the loop's.
       (is (equal '(:turn :text-delta :text-delta :done :run-done)
-                 (mapcar (lambda (e) (getf e :type)) events))))))
+                 (event-types (recorded-events recorder)))))))
 
 ;;; A failed turn ends the sink's turn with a failed :DONE, ahead of the loop's
 ;;; own :RUN-DONE.
 (test a-failed-streamed-turn-emits-a-failed-done-before-run-done
   (with-agent ('(500 ("Content-Type" "application/json") "{\"error\":\"boom\"}"))
-    (let* ((events '())
+    (let* ((recorder (make-recorder))
            (result (agent-turn :messages '((:role :user :content "hi"))
-                               :sink (lambda (event) (push event events)))))
-      (setf events (nreverse events))
+                               :sink (recorder-sink recorder)))
+           (events (recorded-events recorder)))
       (is (eq :backend-error (first (nyaa:tool-error result))))
       (is (equal '(:turn :done :run-done)
                  (mapcar (lambda (e) (getf e :type)) events)))
       (is (nyaa:tool-error-p (getf (second events) :reason))))))
+
+;;; A function sink is called from one emitter per agent, a sub-agent's
+;;; events included, so a sink that blocks never holds up the loop.
+
+(defun sse-tool-call (id name arguments-json)
+  (sse-response
+   (format nil "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"~a\",~
+     \"function\":{\"name\":\"~a\",\"arguments\":~s}}]}}]}"
+           id name arguments-json)
+   "{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"
+   "[DONE]"))
+
+(test every-event-reaches-a-function-sink-from-one-thread
+  (let ((n 0)
+        (recorder (make-recorder)))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (case (incf n)
+                     (1 (sse-tool-call "c1" "agent-task" "{\"task\":\"help\"}"))
+                     (2 (streamed-reply "sub-answer"))
+                     (t (streamed-reply "done")))))
+      (let ((result (agent-turn :messages '((:role :user :content "go"))
+                                :sub-agents t
+                                :sink (recorder-sink recorder))))
+        (is (eq :stop (getf (second result) :stop-reason)))
+        (let ((events (recorded-events recorder))
+              (threads (recorder-threads recorder)))
+          (is (= 2 (count :run-done events :key (lambda (e) (getf e :type)))))
+          (is (eq :run-done (getf (car (last events)) :type)))
+          (is (not (consp (getf (car (last events)) :ref))))
+          (is (= 1 (length threads)))
+          (is (search "nyaa-agent-sink" (bt:thread-name (first threads)))))))))
+
+(test a-blocking-sink-holds-up-neither-the-run-nor-cancel
+  (let ((stuck (bt:make-semaphore))
+        (grace nyaa::*sink-grace*))
+    (setf nyaa::*sink-grace* 0.3)
+    (unwind-protect
+         (with-agent ((sse-tool-call "c1" "tool-wait" "{}") 'tool-wait)
+           (m:with-process (runner)
+             (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                      :tools '(:tool-wait)
+                                      :sink (lambda (event)
+                                              (declare (ignore event))
+                                              (bt:wait-on-semaphore stuck :timeout 60)))))
+               (m:cast child (list :run :messages '((:role :user :content "go"))))
+               (is-true (eventually
+                         (lambda ()
+                           (getf (getf (m:call child '(:snapshot)) :in-flight) :tool-calls))))
+               (m:cast child '(:cancel))
+               (multiple-value-bind (message received) (m:receive :timeout 5)
+                 (is-true received)
+                 (is (eq :cancelled (getf (second (fourth message)) :stop-reason))))
+               (is-true (eventually (lambda () (null (agent-sink-threads))) 5)))))
+      (setf nyaa::*sink-grace* grace)
+      (bt:signal-semaphore stuck :count 100))))
+
+(test a-cancelled-turn-streams-nothing-after-run-done
+  (let ((release (list nil))
+        (recorder (make-recorder)))
+    (with-agent ((interruptible-backend release))
+      (unwind-protect
+           (m:with-process (runner)
+             (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                      :sink (recorder-sink recorder))))
+               (m:cast child (list :run :messages '((:role :user :content "go"))))
+               (is-true (eventually (lambda () (recorder-has recorder :text-delta))))
+               (m:cast child '(:cancel))
+               (is-true (nth-value 1 (m:receive :timeout 5)))
+               (is (equal '(:turn :text-delta :run-done)
+                          (event-types (recorded-events recorder))))))
+        (setf (car release) t)))))
 
 ;;; --- sub-agents ----------------------------------------------------
 

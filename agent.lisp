@@ -58,7 +58,8 @@ pathname: record there instead.")
    (cancel-timer :initform nil :accessor %cancel-timer)
    (turn-token :initform nil :accessor %turn-token)
    (turn-in-flight :initform nil :accessor %turn-in-flight)
-   (turn-stream :initform nil :accessor %turn-stream))
+   (turn-stream :initform nil :accessor %turn-stream)
+   (emitter :initform nil :accessor %emitter))
   (:default-initargs :name nil))
 
 (defmethod m:metadata ((service agent))
@@ -126,6 +127,9 @@ pathname: record there instead.")
               ;; first turn below, after the seed messages.
               (%allow-list service) (resolve-tools service)
               (%running-p service) t)
+        (unless (%emitter service)
+          (setf (%emitter service)
+                (start-emitter (agent-sink service) :name "nyaa-agent-sink")))
         (arm-deadline service)
         (m:cast (m:self) '(:step))
         :ok)))
@@ -177,7 +181,8 @@ STEP-AGENT keeps :MAX-TURNS in force, so the abandoned turn counts."
   (incf (%step-ref service))
   ;; Superseded before it is cancelled, so the cancelled :DONE the protocol
   ;; then emits meets a closed stream rather than racing :TURN-INTERRUPTED.
-  (let ((partial (supersede-turn-stream service)))
+  (let ((partial (close-turn-stream
+                  service (turn-interrupted-event (m:agent-ref service) (%turns service)))))
     (cancel-turn service)
     (when (plusp (length partial))
       (push-message service (list :role :assistant :content partial))))
@@ -209,7 +214,8 @@ another process holds or that is already consumed."
 
 (defmethod m:dispose ((service agent) reason)
   (declare (ignore reason))
-  (release-steer-claims service))
+  (release-steer-claims service)
+  (retire-emitter service))
 
 (defun cancel-run (service)
   (if (%running-p service)
@@ -239,7 +245,7 @@ another process holds or that is already consumed."
     (a:when-let ((id (car cell)))
       (vault-consume (cadr cell) id :folded)))
   (incf (%turns service))
-  (emit-event (agent-sink service) (turn-event (m:agent-ref service) (%turns service)))
+  (emit-event (agent-events service) (turn-event (m:agent-ref service) (%turns service)))
   (setf (%turn-in-flight service) t
         (%turn-stream service) (and (agent-sink service) (make-turn-stream)))
   (let ((ref (incf (%step-ref service)))
@@ -258,7 +264,7 @@ another process holds or that is already consumed."
   (list* :cancel token
          :messages (%messages service)
          :tools (request-tools service)
-         :stream (and stream (turn-stream-sink stream (agent-sink service)))
+         :stream (and stream (turn-stream-sink stream (agent-events service)))
          :ref (m:agent-ref service)
          :timeout (agent-turn-timeout service)
          (agent-sampling service)))
@@ -303,7 +309,7 @@ tools, and get back its final answer."
         (%call-tokens service) (mapcar (lambda (call) (cons (getf call :id) (make-cancel-token)))
                                        calls))
   (dolist (call calls)
-    (emit-event (agent-sink service)
+    (emit-event (agent-events service)
                 (tool-call-event (m:agent-ref service) (getf call :id)
                                  (getf call :name) (getf call :arguments)))
     (dispatch-call service call))
@@ -362,7 +368,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :max-turns (agent-max-turns service)
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
-                            :sink (agent-sink service)
+                            :sink (agent-events service)
                             :vault (agent-vault service))))
     (on-cancel (call-token service id) (lambda () (m:cast child '(:cancel))))
     (m:cast child (list :run :messages (list (list :role :user :content task))))
@@ -383,7 +389,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
   (let ((cell (assoc id (%pending service) :test #'equal)))
     (when cell
       (setf (cdr cell) result)
-      (emit-event (agent-sink service) (tool-result-event (m:agent-ref service) id result))
+      (emit-event (agent-events service) (tool-result-event (m:agent-ref service) id result))
       (when (every (lambda (c) (not (eq (cdr c) :pending))) (%pending service))
         (close-pending-calls service)
         (m:cast (m:self) '(:step))))
@@ -408,7 +414,7 @@ or an :INTERRUPTED error where none has arrived."
   (dolist (cell (%pending service))
     (when (eq (cdr cell) :pending)
       (setf (cdr cell) (fail :interrupted))
-      (emit-event (agent-sink service)
+      (emit-event (agent-events service)
                   (tool-result-event (m:agent-ref service) (car cell) (cdr cell)))))
   (dolist (message (pending-tool-messages service))
     (push-message service message))
@@ -430,40 +436,57 @@ a model than PRINC-TO-STRING, and jzon is already a dependency."
 (defun push-message (service message)
   (setf (%messages service) (append (%messages service) (list message))))
 
+;;; --- the sink -----------------------------------------------------------
+
+;;; Every event reaches the sink through AGENT-EVENTS: a function sink is
+;;; called from the agent's emitter, which a sub-agent is handed as its own
+;;; sink, so the whole tree calls it from one thread, in order, and a sink
+;;; that blocks never holds up HANDLE. :RUN-DONE is the last event it sees.
+
+(defun agent-events (service)
+  "Where SERVICE's events go: its emitter's process, or a process sink. Nil
+when a function sink has no emitter running, so it is never called here."
+  (let ((sink (agent-sink service)))
+    (cond ((%emitter service) (emitter-process (%emitter service)))
+          ((typep sink 'm:process) sink))))
+
+(defun retire-emitter (service)
+  "Stop the emitter once it has delivered what it was sent, and kill it if
+the sink has not taken that within *SINK-GRACE*."
+  (a:when-let ((emitter (shiftf (%emitter service) nil)))
+    (stop-emitter emitter)
+    (reap-emitter emitter *sink-grace* :name "nyaa-agent-sink-reaper")))
+
 ;;; --- a turn's stream ------------------------------------------------------
 
 ;;; The events a turn streams pass through one of these on their way to the
-;;; sink. An interrupt supersedes it under the same lock the sink is called
-;;; under, so nothing from the abandoned turn reaches the sink after its
-;;; :TURN-INTERRUPTED, and the text kept is exactly the text the sink saw.
+;;; sink. Closing it takes the same lock, so nothing from an abandoned turn
+;;; reaches the sink after its :TURN-INTERRUPTED or :RUN-DONE, and the text
+;;; kept is exactly the text the sink saw.
 
 (defstruct (turn-stream (:constructor make-turn-stream ()))
   (lock (bt:make-lock :name "nyaa-turn-stream"))
   (text (make-string-output-stream))
   (superseded nil))
 
-;;; TODO: the sink is called under the stream's lock, so an interrupt waits
-;;; on a sink call in progress, however slow. Upgrade path: one emitter per
-;;; agent feeding the sink, as protocols have. Tracked in ~takeiteasy/nyaa#122.
-
-(defun turn-stream-sink (stream sink)
+(defun turn-stream-sink (stream events)
   (lambda (event)
     (bt:with-lock-held ((turn-stream-lock stream))
       (unless (turn-stream-superseded stream)
         (when (eq (getf event :type) :text-delta)
           (write-string (getf event :text) (turn-stream-text stream)))
-        (emit-event sink event)))))
+        (emit-event events event)))))
 
-(defun supersede-turn-stream (service)
-  "Close the turn's stream to further events, emit :TURN-INTERRUPTED, and
+(defun close-turn-stream (service &optional last-event)
+  "Close the turn's stream to further events, emit LAST-EVENT, if given, and
 return the text it streamed. With no sink there is no stream, and nothing to
 tell or keep."
   (let ((stream (shiftf (%turn-stream service) nil)))
     (if stream
         (bt:with-lock-held ((turn-stream-lock stream))
           (setf (turn-stream-superseded stream) t)
-          (emit-event (agent-sink service)
-                      (turn-interrupted-event (m:agent-ref service) (%turns service)))
+          (when last-event
+            (emit-event (agent-events service) last-event))
           (get-output-stream-string (turn-stream-text stream)))
         "")))
 
@@ -475,6 +498,7 @@ timeout."
 
 (defun finish-run (service result)
   (cancel-deadline service)
+  (close-turn-stream service)
   (cancel-turn service)
   (setf (%running-p service) nil
         (%turn-in-flight service) nil
@@ -484,11 +508,12 @@ timeout."
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
   (incf (%step-ref service))
-  (emit-event (agent-sink service)
+  (emit-event (agent-events service)
               (run-done-event (m:agent-ref service)
                               (if (tool-error-p result)
                                   (tool-error result)
                                   (getf (second result) :stop-reason))))
+  (retire-emitter service)
   (values :done result))
 
 (defun arm-deadline (service)
@@ -557,6 +582,7 @@ here but not assumed of the caller's own services)."
 
 (defmethod restore ((service agent) state)
   (cancel-deadline service)
+  (close-turn-stream service)
   (cancel-turn service)
   (cancel-pending-calls service)
   (release-steer-claims service)
