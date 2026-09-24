@@ -511,6 +511,16 @@ needs and a user message."
 
 (defparameter +non-ascii-text+ (format nil "h~cllo ~c" (code-char #xe9) (code-char #x2713)))
 
+(test a-non-ascii-request-body-reaches-the-backend
+  (with-openai ((json-response +hello-reply+))
+    (let ((result (nyaa:complete :protocol-openai
+                                 :base-url (fake-http-url *backend*)
+                                 :model "test-model"
+                                 :messages (list (list :role :user :content +non-ascii-text+)))))
+      (is (eq :ok (first result)))
+      (is (equal +non-ascii-text+
+                 (gethash "content" (aref (gethash "messages" (sent-body)) 0)))))))
+
 (test a-non-ascii-delta-survives-the-stream
   (with-openai ((sse-response
                  (format nil "{\"choices\":[{\"delta\":{\"content\":\"~a\"},\"finish_reason\":\"stop\"}]}"

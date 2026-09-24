@@ -465,6 +465,18 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
                                                :body "x")
                                :body))))))
 
+(test http-sends-a-non-ascii-body-as-utf-8
+  (with-tools
+    (let ((server (start-fake-http #'echo-handler)))
+      (unwind-protect
+           (progn
+             (tool :tool-http :url (format nil "~a/echo" (fake-http-url server))
+                              :method "POST"
+                              :body +non-ascii-text+)
+             (is (equal +non-ascii-text+
+                        (getf (first (fake-http-requests server)) :body))))
+        (stop-fake-http server)))))
+
 (test http-honours-a-caller-supplied-content-type
   (with-tools
     (let ((server (start-fake-http #'echo-handler)))

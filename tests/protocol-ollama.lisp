@@ -245,6 +245,16 @@
       (is (= 429 (second (nyaa:tool-error result))))
       (expect-one-failed-done events))))
 
+(test ollama-a-non-ascii-request-body-reaches-the-backend
+  (with-ollama ((json-response +hello-chat-reply+))
+    (let ((result (nyaa:complete :protocol-ollama
+                                 :base-url (fake-http-url *backend*)
+                                 :model "test-model"
+                                 :messages (list (list :role :user :content +non-ascii-text+)))))
+      (is (eq :ok (first result)))
+      (is (equal +non-ascii-text+
+                 (gethash "content" (aref (gethash "messages" (sent-body)) 0)))))))
+
 (test ollama-a-non-ascii-delta-survives-the-stream
   (with-ollama ((ndjson-response
                  (format nil "{\"message\":{\"role\":\"assistant\",\"content\":\"~a\"},\"done\":true,\"done_reason\":\"stop\"}"

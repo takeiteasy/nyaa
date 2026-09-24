@@ -293,6 +293,8 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
+- `tool-http` decodes a `text/*` response with no `charset` as Latin-1, so a
+  UTF-8 body arrives garbled ([#137](https://todo.sr.ht/~takeiteasy/nyaa/137)).
 - `tool-plan`'s `:timeout` is checked only between steps, so one long step
   can run past it ([#43](https://todo.sr.ht/~takeiteasy/nyaa/43)).
 - `tool-image` has no source location for an interpreted definition

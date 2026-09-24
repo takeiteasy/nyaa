@@ -41,6 +41,7 @@
                  :stream (funcall connect url)
                  :close t
                  :redirect nil
+                 :external-format-out :utf-8
                  ;; Content-Type is drakma's own argument. Leaving it in
                  ;; ADDITIONAL-HEADERS too would send it twice; dropping it
                  ;; without folding it in would silently override what the
@@ -60,6 +61,8 @@
     (usocket:socket-error () (fail :unavailable))
     (error (e) (fail (list :error (princ-to-string e))))))
 
+;; FIXME: drakma decodes a text/* body with no charset as Latin-1
+;; (~takeiteasy/nyaa#137).
 (defun response-string (payload)
   "Drakma decodes textual content types to a string and leaves everything
 else as octets."

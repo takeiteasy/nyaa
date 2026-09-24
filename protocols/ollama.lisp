@@ -107,9 +107,7 @@ Ollama correlates a tool result by position, not by id."
          :close t
          :additional-headers (header-alist (getf request :headers))
          :content-type "application/json"
-         ;; FIXME: no :external-format-out, so drakma writes Latin-1 and a
-         ;; non-ASCII character fails the turn as :unavailable
-         ;; (~takeiteasy/nyaa#136).
+         :external-format-out :utf-8
          :content (json:stringify (chat-body request streaming)))
       (values (character-stream body) status))))
 
