@@ -13,8 +13,7 @@
                            :input-id input-id)))
 
 (defun keyed-run-named (name input-id &optional (content "go"))
-  "As KEYED-RUN against the agent mounted as NAME, which restarts after each
-run, so a call that lands on the old instance is tried again."
+  "As KEYED-RUN against the agent mounted as NAME, tried again until it answers."
   (loop repeat 60
         for reply = (ignore-errors
                      (m:call (m:lookup name)

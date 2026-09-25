@@ -33,9 +33,9 @@ event. A snapshot is safe to draw from any thread.
 | `(steer client text &key interrupt)` | `(:steer :content text)` |
 | `(cancel client)` | `(:cancel)` |
 
-Each answers what the agent answers. The agent restarts after every run, so a
-command waits up to `*command-timeout*` seconds (5) for it and then signals
-`agent-unavailable`.
+Each answers what the agent answers. A command waits up to `*command-timeout*`
+seconds (5) for an agent that is being restarted or not yet mounted, then
+signals `agent-unavailable`.
 
 ## State
 
@@ -80,9 +80,6 @@ node whose call started it.[^tree]
 
 ## Limitations
 
-- `continue-run` carries on from the agent's conversation, which a named agent
-  does not keep across its restart after a run
-  ([#198](https://todo.sr.ht/~takeiteasy/nyaa/198)).
 - A client that attaches mid-run has the status and turn but not the run so
   far ([#196](https://todo.sr.ht/~takeiteasy/nyaa/196)).
 - Sub-agent nodes are found by call id, and cannot be steered or cancelled

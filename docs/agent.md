@@ -35,16 +35,12 @@ by messages instead:
 (m:cast (m:lookup :assistant) '(:run :messages ((:role :user :content "hi"))))
 ```
 
-Finishing a run exits the agent with reason `:done` (M:AGENT's own
-convention), and mount's default restart is `:transient`, which restarts on
-anything but `:normal` or `:shutdown` — so `:assistant` comes back as a
-fresh instance under the same name, ready for another `:run`, but with no
-memory of the last one. A caller wanting the conversation to continue passes
-the previous result's `:messages` back in as the next `:run`'s (a `:system`
-prompt already opening them is not added again), or, on an
-agent that already holds a conversation (a [restored](checkpoints.md) one),
-sends `:run` with `:continue t` to carry on from it. Mount with
-`:restart :temporary` for a one-shot agent that stays gone after it finishes.
+A run ends with `:run-done` and the mounted agent stays up, holding its
+conversation. `(:run :continue t :messages ms)` carries on from it, appending
+`ms`; a `:run` without `:continue` starts a fresh conversation. A steer sent
+between runs waits and folds into the next one. A delegated agent, such as a
+sub-agent or the one [`run-agent`](#running-one) starts, has a parent and exits
+when its run ends, so use `run-agent` for a one-shot run.[^conversation]
 
 ## Mount options
 
@@ -398,3 +394,8 @@ leaving the original alone -- see [forking](forking.md).
     `:max-context` like any other and is not cut again in a request's view.
     A result that lands while a turn is in flight waits for the next turn, and
     one that lands after the last allowed turn is dropped with the run.
+
+[^conversation]: The conversation lives in the agent instance. If the agent
+    crashes, mount restarts it as a fresh instance with none, and its
+    [subscribers](ui.md#subscribing) are kept. A [checkpoint](checkpoints.md)
+    restores one.

@@ -178,11 +178,9 @@
         finally (return (agent-snapshot name))))
 
 (test agent-checkpoint-restores-mid-run-state-and-lands-not-running
-  ;; A snapshot is only interesting taken mid-run: finishing a run exits the
-  ;; agent (M:AGENT's own convention), and the mount's default :restart
-  ;; brings it back as a fresh, empty instance. The backend is slowed down
-  ;; to hold that window open, and the whole context is checkpointed, then
-  ;; rolled back, while :running-p is still t on the very same process.
+  ;; A snapshot is only interesting taken mid-run. The backend is slowed
+  ;; down to hold that window open, and the whole context is checkpointed,
+  ;; then rolled back, while :running-p is still t on the very same process.
   ;; protocol-openai is blocked for the run's own 0.3s, so this also shows
   ;; CHECKPOINT does not queue behind it.
   (let* ((registry (make-instance 'm:registry))
@@ -214,8 +212,7 @@
                ;; is accepted at once rather than refused as already
                ;; running. START-RUN answers synchronously, before the
                ;; backend is even asked, so this does not wait out the
-               ;; 0.3s delay or the exit-and-restart that finishing it
-               ;; would trigger.
+               ;; 0.3s delay.
                (is (eq :ok (m:call (m:lookup :assistant)
                                    (list :run :messages '((:role :user :content "second")))))))))
       (m:stop context)

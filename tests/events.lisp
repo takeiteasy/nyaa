@@ -162,18 +162,60 @@ restarting it after its last run. Returns the answer."
         (recorded-events fresh)
         (is (eql 1 (run-dones recorder)))))))
 
-(test a-subscription-goes-with-a-temporary-agent-that-will-not-restart
+(test a-subscription-goes-with-an-agent-that-is-killed-and-not-restarted
   (with-agent ((streamed-reply "ok"))
     (let ((recorder (make-recorder)))
       (mount-assistant :restart :temporary)
       (send-to-assistant (list :subscribe (recorder-sink recorder)))
       (run-assistant recorder 1)
+      (m:kill (m:lookup :assistant))
       (is-true (eventually (lambda () (null (m:lookup :assistant)))))
       (let ((fresh (make-recorder)))
         (mount-assistant :sink (recorder-sink fresh))
         (run-assistant fresh 1)
         (recorded-events fresh)
         (is (eql 1 (run-dones recorder)))))))
+
+(test a-mounted-agent-stays-up-and-keeps-its-conversation-after-a-run
+  (with-agent ((streamed-reply "ok"))
+    (let ((recorder (make-recorder)))
+      (mount-assistant :sink (recorder-sink recorder))
+      (let ((process (m:lookup :assistant)))
+        (run-assistant recorder 1 "first")
+        (send-to-assistant '(:run :continue t :messages ((:role :user :content "second"))))
+        (await-run-dones recorder 2)
+        (is (eq process (m:lookup :assistant)))
+        (let ((body (getf (car (last (requests))) :body)))
+          (is (search "first" body))
+          (is (search "second" body)))
+        (let ((messages (getf (m:call process '(:snapshot)) :messages)))
+          (is (equal '(:user :assistant :user :assistant)
+                     (mapcar (lambda (m) (getf m :role)) messages))))))))
+
+(test a-run-without-continue-starts-a-fresh-conversation-on-a-mounted-agent
+  (with-agent ((streamed-reply "ok"))
+    (let ((recorder (make-recorder)))
+      (mount-assistant :sink (recorder-sink recorder))
+      (run-assistant recorder 1 "first")
+      (run-assistant recorder 2 "second")
+      (is (not (search "first" (getf (car (last (requests))) :body)))))))
+
+(test a-stale-step-or-deadline-does-not-touch-an-idle-or-later-run
+  (with-agent ((streamed-reply "ok"))
+    (let ((recorder (make-recorder)))
+      (mount-assistant :sink (recorder-sink recorder))
+      (run-assistant recorder 1)
+      (let ((before (length (requests)))
+            (process (m:lookup :assistant)))
+        (m:cast process '(:step 1))
+        (m:cast process '(:deadline 1))
+        (m:call process '(:describe))
+        (sleep 0.2)
+        (is (= before (length (requests))) "a stale :step asks the model for nothing")
+        (run-assistant recorder 2)
+        (m:cast process '(:deadline 1))
+        (m:call process '(:describe))
+        (is (eq :stop (getf (car (last (recorded-events recorder))) :reason)))))))
 
 (test a-sub-agents-events-carry-parent-and-do-not-end-the-parents
   (let ((n 0))

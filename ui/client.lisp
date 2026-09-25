@@ -4,7 +4,7 @@
 ;;; state and sends the operator's commands back. No rendering.
 
 (defvar *command-timeout* 5
-  "Seconds a command waits for its agent while mount restarts it after a run.")
+  "Seconds a command waits for its agent while it is not mounted or is being restarted.")
 
 (define-condition agent-unavailable (error)
   ((agent :initarg :agent :reader unavailable-agent)
@@ -48,8 +48,8 @@ have arrived first and say more."
                   (client-current client) next)))))))
 
 (defun send (client message)
-  "MESSAGE to the client's agent, waiting out the restart mount gives it after
-each run. Signals AGENT-UNAVAILABLE if it stays unreachable."
+  "MESSAGE to the client's agent, waiting out a restart. Signals
+AGENT-UNAVAILABLE if it stays unreachable."
   (let ((deadline (+ (get-internal-real-time)
                      (* *command-timeout* internal-time-units-per-second)))
         (status nil))

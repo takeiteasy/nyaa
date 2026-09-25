@@ -13,10 +13,10 @@
 ;;; with M:CALL-ASYNC and answer as a (:REPLY tag value status) message,
 ;;; holding no thread meanwhile; a sub-agent is a delegated agent of its own.
 ;;;
-;;; Finishing a run returns (values :done result) from HANDLE, which is
-;;; M:AGENT's own convention: the parent gets :agent-done and the agent
-;;; exits, so the run is the agent's whole life rather than a state it
-;;; outlives.
+;;; Finishing a run returns (values :done result) from HANDLE for a delegated
+;;; agent, which is M:AGENT's own convention: the parent gets :agent-done and
+;;; the agent exits, so the run is its whole life. A mounted agent has no parent
+;;; and stays up, holding its conversation for the next :run.
 
 (defconstant +sub-agent-tool-name+ :agent-task
   "The reserved tool name a model calls to delegate a task, when :SUB-AGENTS
@@ -105,6 +105,9 @@ string or pathname: record there instead.")
    (input-log-id :initform nil :accessor %input-log-id)
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
+   ;; Bumped by BEGIN-RUN. A :STEP or :DEADLINE cast by an earlier run may
+   ;; reach the agent after it, and is dropped for carrying an old id.
+   (run-id :initform 0 :accessor %run-id)
    (running-p :initform nil :accessor %running-p)
    (cancel-timer :initform nil :accessor %cancel-timer)
    (turn-token :initform nil :accessor %turn-token)
@@ -164,8 +167,10 @@ string or pathname: record there instead.")
     (:cancel (cancel-run service))
     (:subscribe (subscribe service (second message)))
     (:unsubscribe (unsubscribe service (second message)))
-    (:step (step-agent service))
-    (:deadline (deadline-run service))
+    (:step (when (and (%running-p service) (eql (second message) (%run-id service)))
+             (step-agent service)))
+    (:deadline (when (eql (second message) (%run-id service))
+                 (deadline-run service)))
     (:detach (destructuring-bind (ref id name) (rest message)
                (detach-call service ref id name)
                nil))
@@ -235,6 +240,7 @@ log or the id was used for other messages."
                             (not (eq :system (getf (first (getf args :messages)) :role)))
                             (list (list :role :system :content (agent-system service))))))
         (%turns service) 0
+        (%run-id service) (1+ (%run-id service))
         (%pending service) nil
         (%pending-order service) nil
         (%queued service) nil
@@ -266,7 +272,7 @@ log or the id was used for other messages."
              (dispatch-resumed-calls service resumed)
              (arm-deadline service)
              (if (or (getf args :messages) (null ids))
-                 (m:cast (m:self) '(:step))
+                 (cast-step service)
                  (setf (%awaiting-detached service) t))
              (or answer :ok)))))
 
@@ -740,7 +746,7 @@ outstanding close the turn's calls and go on to the next turn."
   (pump-calls service)
   (when (notany (lambda (c) (outstanding-p (cdr c))) (%pending service))
     (close-pending-calls service)
-    (m:cast (m:self) '(:step))))
+    (cast-step service)))
 
 ;;; --- detached calls -------------------------------------------------------
 
@@ -804,7 +810,10 @@ deferred by :MAX-DETACHED."
 is owed. Cast rather than stepped in place, so a turn already cast for is not
 issued twice."
   (when (shiftf (%awaiting-detached service) nil)
-    (m:cast (m:self) '(:step))))
+    (cast-step service)))
+
+(defun cast-step (service)
+  (m:cast (m:self) (list :step (%run-id service))))
 
 (defun close-detached (service outcome)
   "Cancel every detached call and log it finished as OUTCOME."
@@ -1168,7 +1177,7 @@ which is nil while no run is under way."
 (defvar *subscribers-lock* (bt:make-lock))
 (defvar *subscribers* (make-hash-table :test 'eq :weakness :key)
   "Registry -> name -> subscribed sinks, so a named agent's subscribers outlive
-the fresh instance mount restarts it as after each run.")
+the fresh instance mount restarts it as after a crash.")
 
 (defun subscribers (service)
   (a:if-let ((name (m:service-name service)))
@@ -1305,13 +1314,16 @@ timeout."
                                   (tool-error result)
                                   (getf (second result) :stop-reason))))
   (retire-emitters service)
-  (values :done result))
+  (if (m:agent-parent service)
+      (values :done result)
+      result))
 
 (defun arm-deadline (service)
-  (let ((self (m:self)))
+  (let ((self (m:self))
+        (id (%run-id service)))
     (setf (%cancel-timer service)
           (m:after service (/ (agent-deadline service) 1000.0d0)
-                   (lambda () (m:cast self '(:deadline)))))))
+                   (lambda () (m:cast self (list :deadline id)))))))
 
 (defun cancel-deadline (service)
   (a:when-let ((cancel (%cancel-timer service)))

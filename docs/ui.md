@@ -32,8 +32,8 @@ hears back as events. Nothing else crosses the line.
 with `:input-id`, `:resume` and the rest. A `:subscribe` or `:unsubscribe`
 that [breaks a rule](#subscribing) answers a `:bad-request` [tool error](tools.md).
 
-A run ends with `:run-done`, then the agent exits and mount restarts it under
-the same name, so the next `:run` goes to the same name.[^restart]
+A run ends with `:run-done` and the agent stays up, so the next `:run` goes to
+the same agent, and `:continue t` carries on from its conversation.[^restart]
 
 ## Subscribing
 
@@ -48,9 +48,8 @@ A `sink` is a function, a symbol naming one, or a meow process.
 | Unsubscribing | events already queued for the sink are still delivered; nothing after |
 | Snapshots | subscribers are not part of a [checkpoint](checkpoints.md) |
 
-Subscriptions belong to the agent's name, so they outlive the restart after
-each run and end when the agent is unmounted or exits and is not
-restarted.[^subscribers] A sub-agent has no
+Subscriptions belong to the agent's name, so they outlive a crash restart and
+end when the agent is unmounted or exits and is not restarted.[^subscribers] A sub-agent has no
 subscribers of its own: its events reach its parent's.
 
 ## Events
@@ -121,12 +120,11 @@ says a run is under way and its turn.
   contract yet. Until #121, a sub-agent reports `:agent nil` and cannot be
   steered or cancelled.
 
-[^restart]: Mount's default `:transient` restart brings the agent back as a
-    fresh instance with no conversation. Send `:continue t` to an agent that
-    holds one, as a [restored](checkpoints.md) agent does.
+[^restart]: A crash brings the agent back as a fresh instance under mount's
+    default `:transient` restart, with no conversation.
 
 [^subscribers]: The subscribers of a named agent are kept beside the mount,
-    keyed by its registry and name, so a fresh instance finds them. An agent
+    keyed by its registry and name, so a restarted instance finds them. An agent
     with no name, such as one [`run-agent`](agent.md#running-one) starts,
     keeps them in the instance for that one run.
 
