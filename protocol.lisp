@@ -251,9 +251,14 @@ is what COERCE-ARGS matches a schema on."
 (defvar *completion-depth* nil
   "The depth of the completion job this thread is running, or nil outside one.")
 
-;;; TODO: the depth is a thread-local, so a COMPLETE from a thread a body
-;;; spawns starts at depth 0. Upgrade path: pass :DEPTH explicitly. Tracked in
-;;; ~takeiteasy/nyaa#132.
+(defun carry-completion-depth (function)
+  "FUNCTION as a closure that runs at the completion depth of the thread that
+called this, for a thread a protocol body spawns to make its own completions."
+  (let ((depth *completion-depth*))
+    (lambda ()
+      (let ((*completion-depth* depth))
+        (funcall function)))))
+
 (defun nested-request (request)
   "REQUEST as a completion made from this thread: one deeper than the job
 running it, or unchanged in depth when made outside a job."

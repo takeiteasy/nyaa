@@ -17,7 +17,7 @@
    #:text-delta #:tool-call-delta #:done #:emit-event
    #:make-cancel-token #:cancel #:cancelled-p
    ;; worker pools
-   #:*pool-size* #:*sink-pool-size* #:*max-completion-depth*
+   #:*pool-size* #:*sink-pool-size* #:*max-completion-depth* #:carry-completion-depth
    #:*pool-idle-seconds* #:pool-stats
    ;; provider convention
    #:define-provider #:providers #:describe-provider #:provider

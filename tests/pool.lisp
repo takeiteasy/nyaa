@@ -177,3 +177,31 @@
                  (is (<= 0 (getf stats :running) 1))
                  (is (= 1 (- (getf stats :abandoned) abandoned)))))
           (setf nyaa::*pool-abandon-grace* grace))))))
+
+;;; A thread a body spawns makes its completions at the body's depth once it is
+;;; wrapped, and at depth 0 when it is not.
+
+(defvar *spawned-depths* nil)
+
+(m:defservice protocol-spawner (nyaa:completion-host) ()
+  (:name :protocol-spawner))
+
+(defmethod m:metadata ((service protocol-spawner))
+  (list :kind :protocol :name :protocol-spawner :summary "Record a spawned thread's depth"))
+
+(nyaa:define-protocol-handler protocol-spawner (service request)
+  (flet ((depth-in-thread (wrap)
+           (let ((depth nil))
+             (bt:join-thread
+              (bt:make-thread (funcall wrap (lambda () (setf depth nyaa::*completion-depth*)))))
+             depth)))
+    (setf *spawned-depths*
+          (list (depth-in-thread #'nyaa:carry-completion-depth)
+                (depth-in-thread #'identity)))
+    (list :ok (list :role :assistant :content "" :tool-calls nil :done t))))
+
+(test a-spawned-thread-keeps-the-completion-depth-only-when-wrapped
+  (with-protocol
+    (m:mount *protocol-context* 'protocol-spawner)
+    (nyaa:complete :protocol-spawner :messages '((:role :user :content "hi")))
+    (is (equal '(0 nil) *spawned-depths*))))

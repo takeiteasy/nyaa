@@ -231,8 +231,14 @@ is a protocol whose body calls `complete`:
 | 1 | what a depth 0 job completes on | the backend, or depth 2 |
 
 Completions nested past `*max-completion-depth*` (8) answer `(:bad-request ...)`
-rather than running, which stops a protocol that completes on itself. A
-`complete` made from a thread a body spawns itself starts at depth 0 again.
+rather than running, which stops a protocol that completes on itself. A thread
+a body spawns itself starts outside the job, so wrap its function to make its
+`complete` calls one deeper than the body:
+
+```lisp
+(bt:make-thread (nyaa:carry-completion-depth
+                 (lambda () (nyaa:complete :protocol-openai ...))))
+```
 
 A job still running `*pool-abandon-grace*` (5) seconds past its `:timeout`, stuck
 where neither the socket shutdown nor an interrupt reaches it, is abandoned: its
@@ -389,5 +395,3 @@ the same way, since a provider answers the same messages.
 
 - An abandoned thread is never reclaimed, so threads stuck for good leak
   ([#152](https://todo.sr.ht/~takeiteasy/nyaa/152)).
-- A `complete` made from a thread a protocol body spawns itself starts at
-  depth 0 ([#132](https://todo.sr.ht/~takeiteasy/nyaa/132)).
