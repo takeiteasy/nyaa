@@ -304,6 +304,24 @@ last resort with no dedicated OS mechanism behind it."
                (nyaa:tool-error (tool :tool-fs :op :delete :path "alias.txt"))))
     (is (equal "hello" (result-value (tool :tool-fs :op :read :path "real.txt") :data)))))
 
+;;; --- define-tool: readable defaults (~takeiteasy/nyaa#134) ---------------
+
+(defun define-tool-with-defaults (&rest default-forms)
+  (eval `(nyaa:define-tool :tool-default-probe
+             (:summary "probe"
+              :params ,(loop for form in default-forms
+                             for i from 0
+                             collect `(,(alexandria:make-keyword (format nil "P~d" i))
+                                       string :default ,form)))
+           (:invoke () (nyaa::ok)))))
+
+(test define-tool-refuses-a-default-that-does-not-read-back
+  (signals error (define-tool-with-defaults 1 '#'identity))
+  (signals error (define-tool-with-defaults '(make-hash-table))))
+
+(test define-tool-accepts-a-default-that-reads-back
+  (finishes (define-tool-with-defaults 3 :a "s" t 'nyaa::+default-tool-timeout+)))
+
 ;;; --- fs: fd-relative walk (~takeiteasy/nyaa#59) -------------------------
 
 (test fs-walk-never-changes-the-process-cwd

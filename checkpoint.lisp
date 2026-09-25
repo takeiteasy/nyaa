@@ -73,6 +73,16 @@ a function readably as a #. form, which the guarded read then refuses."
                   t)
     (error () nil)))
 
+(defun %check-readable-defaults (name params)
+  "Signal unless every :DEFAULT in PARAMS, a schema with its defaults
+evaluated, prints and reads back: a call carries its tool's schema into a
+generation file."
+  (dolist (param params)
+    (let ((default (getf (param-options param) :default *absent*)))
+      (unless (or (eq default *absent*) (%readable-p default))
+        (error "~s's :default for ~s does not print and read back: ~s"
+               name (param-name param) default)))))
+
 (defun %persistable-initargs (class initargs)
   "INITARGS of a CLASS mount as a generation may record them, then the ones
 left out: those CLASS's SECRET-INITARGS name, any value that does not print

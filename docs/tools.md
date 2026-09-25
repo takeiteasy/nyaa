@@ -31,7 +31,10 @@ specifier is a compile-time error. It drives coercion and validation, so a
 tool's `:invoke` clause reads its arguments already coerced — `(:invoke (cmd
 timeout) ...)` binds `cmd` and `timeout` from the plist, in their declared
 types — and it renders to the JSON Schema a model needs for tool calling.
-`tool-schema` reads it out of the metadata. `:slots` passes extra slots
+`tool-schema` reads it out of the metadata. A `:default` must print and read
+back, since a call carries the schema into a [checkpoint](checkpoints.md)
+generation: `define-tool` signals at load for a function or hash table.
+`:slots` passes extra slots
 through to the generated class, as `tool-fs`'s sandbox root does. Inside
 `:invoke`, the anaphoric `service` is the tool itself and `cancel-token` is
 the call's [cancel token](#cancelling-a-call), or nil.

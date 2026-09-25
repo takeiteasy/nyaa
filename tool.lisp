@@ -189,7 +189,9 @@ registration and the metadata, and cannot drift between them.
 
 PARAMS is a literal schema, checked by VALIDATE-SCHEMA at macroexpansion --
 a bad specifier is a compile-time error. SLOTS is passed through to
-DEFSERVICE, as for TOOL-FS's sandbox root.
+DEFSERVICE, as for TOOL-FS's sandbox root. A :DEFAULT must print and read
+back, since a call carries the schema into a generation file; the definition
+signals at load otherwise.
 
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
@@ -204,6 +206,7 @@ DEFSERVICE and DEFINE-TOOL-HANDLER directly."
              head))
     (let ((class (%tool-class-name name)))
       `(progn
+         (%check-readable-defaults ,name (list ,@(mapcar #'%param-form params)))
          (m:defservice ,class () ,slots
            (:name ,name))
          (defmethod m:metadata ((service ,class))
