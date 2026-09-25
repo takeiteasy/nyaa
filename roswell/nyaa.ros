@@ -40,7 +40,7 @@ exec ros -Q -- $0 "$@"
            "--eval" (if source
                         (format nil "(asdf:load-asd ~s)" (namestring (merge-pathnames "nyaa.asd" source)))
                         "nil")
-           "--eval" "(ql:quickload :nyaa :silent t)"
+           "--eval" "(ql:quickload (quote (:nyaa :nyaa/cli)) :silent t)"
            "--eval" (format nil "(nyaa:save-recovery-image ~s)"
                             (namestring (nyaa/launcher:recovery-core)))))))
 
@@ -48,8 +48,7 @@ exec ros -Q -- $0 "$@"
   "(progn
      (unless (find-package \"NYAA/CLI\") (require :asdf) (asdf:load-system \"nyaa/cli\"))
      (let ((code (funcall (intern \"MAIN\" \"NYAA/CLI\")
-                          (rest (member \"--end-toplevel-options\" sb-ext:*posix-argv*
-                                        :test #'string=)))))
+                          (rest sb-ext:*posix-argv*))))
        (finish-output) (finish-output *error-output*)
        (sb-ext:exit :code code :abort t)))")
 

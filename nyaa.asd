@@ -88,8 +88,18 @@
                (:file "image-generation"))
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
+(defsystem "nyaa/cli"
+  :description "The nyaa command line: run."
+  :author "George Watson"
+  :license "GPLv3"
+  :depends-on ("nyaa" "alexandria" "uiop")
+  :pathname "cli/"
+  :serial t
+  :components ((:file "package")
+               (:file "run")))
+
 (defsystem "nyaa/tests"
-  :depends-on ("nyaa" "fiveam" "uiop" "usocket")
+  :depends-on ("nyaa" "nyaa/cli" "fiveam" "uiop" "usocket")
   :pathname "tests/"
   :serial t
   :components ((:file "package")
@@ -105,6 +115,7 @@
                (:file "provider")
                ;; After provider: it runs completions through the echo provider.
                (:file "pool")
+               (:file "cli")
                (:file "agent")
                (:file "worker")
                (:file "gate")

@@ -94,3 +94,23 @@
             (is (search "did not load cleanly" err))
             (is (search "nyaa install" err)))))
       (skip "ros is not installed")))
+
+(test the-script-installs-a-recovery-image-and-runs-the-cli-from-it
+  (if (and (zerop (nth-value 2 (uiop:run-program '("sh" "-c" "command -v ros") :ignore-error-status t)))
+           (probe-file (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+      (with-nyaa-home (home)
+        (flet ((nyaa (&rest args)
+                 (uiop:run-program
+                  (list* "ros" (namestring (merge-pathnames "roswell/nyaa.ros" (asdf:system-source-directory :nyaa)))
+                         args)
+                  :environment (list* (format nil "NYAA_HOME=~a" (namestring home)) (sb-ext:posix-environ))
+                  :output :string :error-output :string :ignore-error-status t)))
+          (multiple-value-bind (out err code) (nyaa "install")
+            (declare (ignore out))
+            (is (= 0 code) "install: ~a" err))
+          (is-true (probe-file (nyaa/launcher:recovery-core home)))
+          (multiple-value-bind (out err code) (nyaa "run" "hi" "--model" "nobody:x")
+            (declare (ignore out))
+            (is (= 2 code) "run: ~a" err)
+            (is (search "no provider" err)))))
+      (skip "needs ros and Quicklisp")))

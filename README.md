@@ -24,6 +24,7 @@ Runs on SBCL.
 - [Forking a conversation](docs/forking.md)
 - [Image generations](docs/images.md)
 - [The launcher](docs/launcher.md)
+- [The command line](docs/cli.md)
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)
 - [The call log](docs/calls.md)

@@ -21,12 +21,12 @@
 
 (defun ensure-mounted (context name &rest initargs)
   "Mount NAME under CONTEXT, its dependencies first, unless a service is
-already registered under it. INITARGS apply to NAME only. Signals for a name
-nothing defines."
-  (let ((entry (gethash name *definitions*)))
-    (unless entry (error "No definition for ~s." name))
-    (unless (m:lookup name)
+already registered under it, defined or not. INITARGS apply to NAME only.
+Signals for an unregistered name nothing defines."
+  (unless (m:lookup name)
+    (let ((entry (gethash name *definitions*)))
+      (unless entry (error "No definition for ~s." name))
       (dolist (dependency (getf entry :depends-on))
         (ensure-mounted context dependency))
-      (apply #'m:mount context (getf entry :class) initargs))
-    name))
+      (apply #'m:mount context (getf entry :class) initargs)))
+  name)
