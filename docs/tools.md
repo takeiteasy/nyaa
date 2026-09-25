@@ -53,6 +53,11 @@ others to a model is explicit at the mount site.
 detaches as soon as it dispatches them, so the turn never waits on one. It is
 an option of `define-tool` and a key of the metadata; `tool-metadata` reads it.
 
+`:resumable t` marks a tool whose calls are safe to run twice, so the
+[call log](calls.md#resuming-a-call) may resume one a crash cut short. It is an option of `define-tool` and a key of the metadata. Only
+`tool-image` and `tool-services` declare it; every op of a tool must be safe to
+repeat.
+
 A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
 back to `defservice` and the lower-level `define-tool-handler` directly. It
 answers two messages either way:
@@ -159,6 +164,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 | `:tool-checkpoint` | `:op`, `:label`, `:keep`, `:path` | Save, list and roll back generations of the harness's declared state. See [checkpoints](checkpoints.md). |
 | `:tool-self` | `:op`, `:form`, `:package`, `:name`, `:label`, `:limit`, `:timeout` | Evaluate, redefine and reload in the host image, each write gated by `:enable`, checkpointed and logged. See [self-modification](self.md). |
 | `:tool-vault` | `:op`, `:id`, `:agent`, `:status`, `:limit`, `:max-age` | List, restore, discard and compact entries in the steering message vault. See [the vault](vault.md). |
+| `:tool-calls` | `:op`, `:ids`, `:agent`, `:force`, `:status`, `:limit`, `:max-age` | List and compact the tool call log, and resume calls it holds as lost. `:operator` trust. See [the call log](calls.md#tool-calls). |
 
 `:timeout` is in milliseconds and defaults to 30000. `tool-fs`, `tool-image`
 and `tool-services` bound no work of their own, so they declare no `:timeout`
@@ -177,6 +183,7 @@ and refuse one. Each tool's exact types are in its `:params`; see
 (m:mount context 'nyaa:tool-checkpoint)
 (m:mount context 'nyaa:tool-self :enable '(:eval :define :reload))
 (m:mount context 'nyaa:tool-vault)
+(m:mount context 'nyaa:tool-calls)
 ```
 
 `tool-fs` `delete` refuses directories, and there is no recursive delete: a tool

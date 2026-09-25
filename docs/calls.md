@@ -13,6 +13,9 @@ status outlives the agent that dispatched it. Off by default.
 ;;      :status :ok :content "{\"stdout\":\"...\"}" ...))
 ```
 
+A call that ended `:lost`, `:abandoned` or `:interrupted` can be
+[resumed](#resuming-a-call): run again, as a new call.
+
 ## `:call-log`, the agent mount option
 
 | Value | Records to |
@@ -42,7 +45,8 @@ A call keeps the first outcome written for it.
 
 ```lisp
 (:kind :call    :id "..." :at "iso" :agent :assistant :call-id "c1"
- :name :tool-shell :arguments "<json>" :turn 1 :by (:pid 4242 ...))
+ :name :tool-shell :arguments "<json>" :turn 1 :by (:pid 4242 ...)
+ :cut t :resumes "<id>")
 (:kind :running :id "..." :at "iso")
 (:kind :done    :id "..." :at "iso" :outcome :ok :content "<json>")
 (:kind :input   :id "..." :at "iso" :agent :assistant :input-id "k"
@@ -52,6 +56,9 @@ A call keeps the first outcome written for it.
 An `:input` is a `:run` keyed with an `:input-id`, [recorded to spot a
 redelivery](inputs.md). A `:done` entry finishes it as it does a call.
 `call-entries` leaves it out.
+
+`:cut t` is on a `:call` whose `:arguments` were cut to the size below, and
+`:resumes` on one that [runs another again](#resuming-a-call).
 
 `:id` is the log's own, one per dispatch. `:call-id` is the provider's, which
 a provider may reuse on a later turn. `:arguments` and `:content` are JSON
@@ -63,7 +70,7 @@ appended under the same lock as the [vault](vault.md#the-log).
 
 | Function | Answers |
 |---|---|
-| `(call-entries path)` | each call, oldest first, with its `:status`, `:done-at` and `:content` |
+| `(call-entries path)` | each call, oldest first, with its `:status`, `:done-at`, `:content`, `:cut`, `:resumes` and `:resumed-by` |
 | `(input-entries path)` | each keyed `:run`, oldest first, with its `:status` and `:done-at` |
 | `(call-log-compact path :max-age s)` | the calls dropped and kept |
 
@@ -73,14 +80,76 @@ Calls not finished are kept. A log with a malformed entry is left as it is and
 `call-log-compact` answers nil. An append also compacts once the file passes
 `*call-log-compact-size*` (1 MiB) and has doubled since the last attempt.
 
+## Resuming a call
+
+A call the log holds as `:lost`, `:abandoned` or `:interrupted` is run again on
+request. The process that ran it is gone, so nothing reattaches: the logged
+tool and arguments are sent again as a new call.
+
+```lisp
+(m:call (m:lookup :assistant) '(:resume :ids ("20260925-101500-123456-0")))
+;; => (:ok (:resumed (("20260925-101500-123456-0" . "20260925-103000-654321-0"))
+;;          :refused nil))
+
+(m:call (m:lookup :assistant)
+        '(:run :continue t :resume ("...") :messages ((:role :user :content "go on"))))
+```
+
+The agent [runs it detached](agent.md#detached-tool-calls): `:tool-resumed` is
+emitted, and the result lands as a `:user` message,
+`[tool call c1 (tool-x) finished: {...}]`, ahead of a later turn. With no
+`:messages`, the run waits on the resumed calls for its first turn. The new call
+records `:resumes` with the old id, and the old one reads `:resumed-by` with the
+new.
+
+| A call is refused when | Reason given |
+|---|---|
+| its id is not in the log | `no such call` |
+| it is `:accepted`, `:running`, `:ok` or `:error` | `the call is ok, not lost, abandoned or interrupted` |
+| a call already resumes it | `already resumed as <id>` (resume that one) |
+| it was logged `:cut` | `its arguments were cut when it was logged`[^cut] |
+| it is a [sub-agent](agent.md) call | `a sub-agent call cannot be resumed`[^sub] |
+| its tool is not in the agent's allow-list | `<tool> is not in this agent's tool allow-list` |
+| its tool is not [`:resumable`](tools.md) | `<tool> is not resumable`, unless `:force t` |
+
+A call is resumed once, checked and logged under one lock hold, so two
+resumes cannot both succeed. Calls that a cancel, a deadline or an
+interrupting `:steer` closed are `:interrupted` too, and resume like the
+others: the caller chooses. An agent needs a `:call-log` to resume, and a
+[checkpoint](checkpoints.md) taken mid-run lists the ids of its calls with no
+result under `:in-flight :call-log-ids`, ready to pass on after a restore.
+
+## `tool-calls`
+
+`:trust :operator`: resuming runs a tool again.
+
+| `:op` | Params | Answers |
+|---|---|---|
+| `:list` | `:status` (default `:all`), `:limit` | `:entries`, `:total` |
+| `:resume` | `:ids` (required), `:agent`, `:force` | the agent's `:resumed` and `:refused` |
+| `:compact` | `:max-age` (seconds, default `*call-log-max-age*`) | `:dropped`, `:kept` |
+
+```lisp
+(m:mount *ctx* 'nyaa:tool-calls)
+(nyaa:invoke-tool :tool-calls :op :list :status :lost)
+(nyaa:invoke-tool :tool-calls :op :resume :ids '("20260925-101500-123456-0"))
+```
+
+`:resume` sends `(:resume ...)` to the agent that logged the calls, or to the
+mounted `:agent` named, which is required when the calls name none or several.
+`:path` is a mount option (default nil, the default an agent's `:call-log t`
+uses), read once at mount time.
+
 ## Limitations
 
 - A call that finishes after its agent exited is `:abandoned` with no result
   ([#180](https://todo.sr.ht/~takeiteasy/nyaa/180)).
-- A call is recorded, not resumed: nothing reattaches to or re-runs a `:lost`
-  or `:abandoned` one ([#77](https://todo.sr.ht/~takeiteasy/nyaa/77)).
-- There is no tool to list the log
-  ([#179](https://todo.sr.ht/~takeiteasy/nyaa/179)).
+- A resumed call runs again from the start; nothing reattaches to one still
+  running ([#185](https://todo.sr.ht/~takeiteasy/nyaa/185)).
+- A sub-agent call cannot be resumed
+  ([#186](https://todo.sr.ht/~takeiteasy/nyaa/186)).
+- A call with large arguments cannot be resumed
+  ([#187](https://todo.sr.ht/~takeiteasy/nyaa/187)).
 - Writes are synchronous on the agent's process
   ([#181](https://todo.sr.ht/~takeiteasy/nyaa/181)).
 
@@ -89,3 +158,8 @@ Calls not finished are kept. A log with a malformed entry is left as it is and
     pid started at the recorded time. A call whose agent exited inside a
     running image is `:abandoned`, not `:lost`, because the agent records it
     as it exits.
+
+[^cut]: The arguments are cut to `:max-tool-result` characters or, with none
+    set, `*call-log-max-content*`, and a cut argument cannot be run again.
+
+[^sub]: A sub-agent is not a tool: the log holds its task, not its conversation.

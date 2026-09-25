@@ -91,7 +91,8 @@ end a plain `complete` turn early inside a working conversation.
 | Message | Effect |
 |---|---|
 | `(:describe)` | the metadata plist |
-| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero. `:input-id` makes a redelivery [a duplicate](inputs.md) |
+| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero. `:input-id` makes a redelivery [a duplicate](inputs.md). `:resume ids` runs those [logged calls](calls.md#resuming-a-call) again, with `:force t` for a tool that is not `:resumable`; the answer is `(:ok (:resumed ((old . new) ...) :refused ((id reason) ...)))` |
+| `(:resume :ids ids)` | run those [logged calls](calls.md#resuming-a-call) again in the run under way, or in a run that continues the conversation and waits on them. `:force t` as for `:run` |
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
 | `(:steer :content text :interrupt t)` | as `:steer`, but a model turn or tool calls in flight are abandoned and the steer folds in at once |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
@@ -262,7 +263,9 @@ streamed is dropped. A `:cancel`, `:deadline` or `:restore` during the wait
 ends it. A `:steer` folds into the retry; with `:interrupt t` the retry
 goes out at once.
 
-A tool call is never retried; its side effects may not be safe to repeat.
+A tool call is not retried on its own: its side effects may not be safe to
+repeat. A caller can [resume](calls.md#resuming-a-call) one the call log holds
+as lost.
 
 ## Events
 
@@ -276,6 +279,7 @@ A tool call is never retried; its side effects may not be safe to repeat.
 (:type :turn-retry  :ref r :turn n :attempt 1 :reason (:backend-error 503 "..."))
 (:type :tool-call   :ref r :id "c1" :name :tool-shell :arguments (:cmd "ls"))
 (:type :tool-detached :ref r :id "c1" :name :tool-shell)
+(:type :tool-resumed :ref r :id "c1" :name :tool-shell)
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
 (:type :context-trimmed :ref r :turn n :omitted (1 2 3) :truncated ((4 :from 900 :to 50))
@@ -331,10 +335,11 @@ An agent's `snapshot` keeps `:messages` and `:turns`, not the turn or tool
 calls in flight — see [checkpoints](checkpoints.md). A checkpoint taken
 mid-run keeps the conversation, closes each unanswered tool call as
 `interrupted` and drops the abandoned turn. A detached call keeps its stub and
-is listed under `:in-flight :detached`; its result is never delivered to a
-restored agent; `restore` always lands a
-not-running agent, ready for `(:run :continue t)`, and nothing more from the
-abandoned turn reaches the sink.
+is listed under `:in-flight :detached`, and the log ids of the calls with no result
+under `:in-flight :call-log-ids`. A restore ends them, and its result is never
+delivered to the restored agent, but a caller can [resume](calls.md#resuming-a-call)
+them from those ids. `restore` always lands a not-running agent, ready for
+`(:run :continue t)`, and nothing more from the abandoned turn reaches the sink.
 
 ## Forking
 
@@ -353,8 +358,8 @@ leaving the original alone -- see [forking](forking.md).
   ([#183](https://todo.sr.ht/~takeiteasy/nyaa/183)).
 - Nothing caps how many calls are detached at once
   ([#184](https://todo.sr.ht/~takeiteasy/nyaa/184)).
-- A restored agent never gets the result of a call detached when it was
-  checkpointed ([#77](https://todo.sr.ht/~takeiteasy/nyaa/77)).
+- A restored agent runs a call detached when it was checkpointed again rather
+  than reattaching to it ([#185](https://todo.sr.ht/~takeiteasy/nyaa/185)).
 - The first turn is measured at the default ratio; an exact count before it
   needs a tokenizer ([#143](https://todo.sr.ht/~takeiteasy/nyaa/143)).
 

@@ -10,6 +10,9 @@
 ;;;   (:kind :running :id "..." :at "iso")
 ;;;   (:kind :done    :id "..." :at "iso" :outcome :ok :content "<json>")
 ;;;
+;;; A :CALL also carries :CUT T when its :ARGUMENTS were cut to the cap, and
+;;; :RESUMES, the id of the call it runs again (CALL-LOG-RESUME).
+;;;
 ;;;   (:kind :input   :id "..." :at "iso" :agent name-or-nil :input-id "k"
 ;;;    :digest "md5hex" :by owner)
 ;;;
@@ -49,13 +52,13 @@ under one lock hold, and return their log ids in order."
       (prog1 (loop for call in calls
                    for index from 0
                    for id = (format nil "~a-~d" base index)
-                   do (%append-log-locked
-                       path (list :kind :call :id id :at (%now-iso8601) :agent agent
-                                  :call-id (getf call :id) :name (getf call :name)
-                                  :arguments (%cut-text (json:stringify
-                                                         (untyped->json (getf call :arguments)))
-                                                        cap)
-                                  :turn turn :by owner))
+                   do (let ((text (json:stringify (untyped->json (getf call :arguments)))))
+                        (%append-log-locked
+                         path (list* :kind :call :id id :at (%now-iso8601) :agent agent
+                                     :call-id (getf call :id) :name (getf call :name)
+                                     :arguments (%cut-text text cap)
+                                     :turn turn :by owner
+                                     (and cap (> (length text) cap) '(:cut t)))))
                    collect id)))))
 
 (defun call-log-running (path ids)
@@ -132,17 +135,16 @@ RECORD false a new input is not appended and the answer is nil."
                             :status (if (eq status :accepted) :running status)
                             :done-at (getf (gethash id done) :at))))))
 
-(defun call-entries (path)
-  "Every call logged at PATH, oldest first: (:id :at :agent :call-id :name
-:arguments :turn :status :done-at :content). :STATUS is :ACCEPTED, :RUNNING,
-the :OUTCOME of its :DONE entry, or :LOST when the process that accepted it is
-gone and nothing finished it."
-  (let* ((log (%read-log path))
-         (done (%done-by-id log))
-         (running (make-hash-table :test 'equal)))
+(defun %fold-calls (log)
+  "Every :CALL in LOG, oldest first, as CALL-ENTRIES answers it."
+  (let ((done (%done-by-id log))
+        (running (make-hash-table :test 'equal))
+        (resumed-by (make-hash-table :test 'equal)))
     (dolist (entry log)
-      (when (eq (getf entry :kind) :running)
-        (setf (gethash (getf entry :id) running) t)))
+      (case (getf entry :kind)
+        (:running (setf (gethash (getf entry :id) running) t))
+        (:call (a:when-let ((old (getf entry :resumes)))
+                 (setf (gethash old resumed-by) (getf entry :id))))))
     (loop for entry in log
           when (eq (getf entry :kind) :call)
             collect (let* ((id (getf entry :id))
@@ -152,7 +154,60 @@ gone and nothing finished it."
                             :arguments (getf entry :arguments) :turn (getf entry :turn)
                             :status (%live-status entry id done running)
                             :done-at (getf end :at)
-                            :content (getf end :content))))))
+                            :content (getf end :content)
+                            :cut (getf entry :cut)
+                            :resumes (getf entry :resumes)
+                            :resumed-by (gethash id resumed-by))))))
+
+(defun call-entries (path)
+  "Every call logged at PATH, oldest first: (:id :at :agent :call-id :name
+:arguments :turn :status :done-at :content :cut :resumes :resumed-by). :STATUS
+is :ACCEPTED, :RUNNING, the :OUTCOME of its :DONE entry, or :LOST when the
+process that accepted it is gone and nothing finished it. :CUT is true when
+:ARGUMENTS were cut to fit the log. :RESUMES is the id of the call this one runs
+again, :RESUMED-BY the id of the call that runs this one again."
+  (%fold-calls (%read-log path)))
+
+(defun %resume-refusal (entry check)
+  "Why ENTRY, a call from %FOLD-CALLS or nil, cannot be resumed, or nil and
+what CHECK, the caller's own test, answered with when it can."
+  (cond ((null entry) "no such call")
+        ((getf entry :resumed-by)
+         (format nil "already resumed as ~a" (getf entry :resumed-by)))
+        ((not (member (getf entry :status) '(:lost :abandoned :interrupted)))
+         (format nil "the call is ~(~a~), not lost, abandoned or interrupted"
+                 (getf entry :status)))
+        ((getf entry :cut) "its arguments were cut when it was logged")
+        (t (funcall check entry))))
+
+(defun call-log-resume (path ids agent turn check)
+  "Log a new :CALL, resuming it, for each call in IDS that can be run again:
+one that ended :LOST, :ABANDONED or :INTERRUPTED, whose arguments were not cut,
+that no call resumes already, and that CHECK accepts. CHECK is given the call's
+entry, see CALL-ENTRIES, and answers a reason to refuse it, or nil and a value
+to pass on. The checks and the appends share one lock hold, so two resumes of
+one call cannot both succeed. Answers the resumed, (old id, new id, entry, CHECK's
+value), and the refused, (id reason), each in the order of IDS."
+  (with-log-lock (path)
+    (let ((calls (%fold-calls (%read-log path)))
+          (base (%vault-id))
+          (owner (%vault-owner))
+          (index 0)
+          (resumed '())
+          (refused '()))
+      (dolist (id (remove-duplicates ids :test #'equal :from-end t))
+        (let ((entry (find id calls :key (lambda (call) (getf call :id)) :test #'equal)))
+          (multiple-value-bind (reason value) (%resume-refusal entry check)
+            (if reason
+                (push (list id reason) refused)
+                (let ((new (format nil "~a-~d" base (prog1 index (incf index)))))
+                  (%append-log-locked
+                   path (list :kind :call :id new :at (%now-iso8601) :agent agent
+                              :call-id (getf entry :call-id) :name (getf entry :name)
+                              :arguments (getf entry :arguments) :turn turn :by owner
+                              :resumes id))
+                  (push (list id new entry value) resumed))))))
+      (values (nreverse resumed) (nreverse refused)))))
 
 (defun call-log-compact (path &key (max-age *call-log-max-age*))
   "Rewrite PATH without the calls finished more than MAX-AGE seconds ago (0

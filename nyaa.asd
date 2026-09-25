@@ -51,7 +51,8 @@
                              (:file "services")
                              (:file "checkpoint")
                              (:file "self")
-                             (:file "vault")))
+                             (:file "vault")
+                             (:file "calls")))
                (:module "protocols"
                 :components ((:file "openai")
                              (:file "ollama")))
@@ -99,6 +100,7 @@
                (:file "vault")
                (:file "calls")
                (:file "detach")
+               (:file "resume")
                (:file "inputs")
                (:file "image-generation")
                (:file "self"))

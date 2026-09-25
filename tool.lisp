@@ -190,7 +190,7 @@ NYAA. A tool defined outside this package must still name a symbol reachable
 from here, since DEFINE-TOOL always expands in the current package."
   (intern (symbol-name name)))
 
-(defmacro define-tool (name (&key trust summary params slots background) &body invoke)
+(defmacro define-tool (name (&key trust summary params slots background resumable) &body invoke)
   "Define the tool NAME, a keyword: a service class, its METADATA and its
 :INVOKE handler, in one form. NAME is used once, for the class, the
 registration and the metadata, and cannot drift between them.
@@ -201,7 +201,9 @@ DEFSERVICE, as for TOOL-FS's sandbox root. A :DEFAULT must print and read
 back, since a call carries the schema into a generation file; the definition
 signals at load otherwise, and a mount of the tool does too. BACKGROUND true
 puts :BACKGROUND T in the metadata, so an agent detaches each call to it as
-soon as it is dispatched.
+soon as it is dispatched. RESUMABLE true puts :RESUMABLE T there: a call to it
+that a crash or restore cut short may be run again, so every op must be safe to
+run twice.
 
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
@@ -225,6 +227,7 @@ DEFSERVICE and DEFINE-TOOL-HANDLER directly."
                  :trust ,trust
                  :summary ,summary
                  ,@(and background '(:background t))
+                 ,@(and resumable '(:resumable t))
                  :params (list ,@(mapcar #'%param-form params))))
          (define-tool-handler ,class (service args cancel-token)
            (let (,@(mapcar (lambda (arg-name)

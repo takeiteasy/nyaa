@@ -13,6 +13,7 @@
 
 (define-tool :tool-services
     (:trust :agent
+     :resumable t
      :summary "Read-only introspection over the meow supervision tree: registry, mount tree, service state"
      :params ((:op (member :registry :children :describe) :required t
                :doc "operation to perform")

@@ -53,4 +53,4 @@
    #:provider-ollama
    ;; tools
    #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-gated-eval #:tool-repl #:tool-plan
-   #:tool-image #:tool-services #:tool-checkpoint #:tool-self #:tool-vault))
+   #:tool-image #:tool-services #:tool-checkpoint #:tool-self #:tool-vault #:tool-calls))

@@ -146,6 +146,7 @@ string or pathname: record there instead.")
     (:describe (m:metadata service))
     (:run (start-run service (rest message)))
     (:steer (queue-steer service (rest message)))
+    (:resume (resume-request service (rest message)))
     (:cancel (cancel-run service))
     (:step (step-agent service))
     (:deadline (deadline-run service))
@@ -165,12 +166,13 @@ string or pathname: record there instead.")
     (t (bad-request "unknown message ~s" (first message)))))
 
 (defun start-run (service args)
-  (let ((keyed (and (getf args :input-id)
-                    (accept-input service args :record (not (%running-p service))))))
-    (cond ((tool-error-p keyed) keyed)
-          ((consp keyed) keyed)
-          ((%running-p service) (bad-request "agent is already running"))
-          (t (begin-run service args keyed)))))
+  (or (resume-problem service args)
+      (let ((keyed (and (getf args :input-id)
+                        (accept-input service args :record (not (%running-p service))))))
+        (cond ((tool-error-p keyed) keyed)
+              ((consp keyed) keyed)
+              ((%running-p service) (bad-request "agent is already running"))
+              (t (begin-run service args keyed))))))
 
 (defun messages-digest (messages)
   (format nil "~(~{~2,'0x~}~)"
@@ -225,9 +227,18 @@ log or the id was used for other messages."
         (%running-p service) t)
   (unless (%emitter service)
     (setf (%emitter service) (start-emitter (agent-sink service))))
-  (arm-deadline service)
-  (m:cast (m:self) '(:step))
-  :ok)
+  (let* ((ids (getf args :resume))
+         (answer (and ids (resume-calls service ids (getf args :force)))))
+    (cond ((and ids (not (getf args :messages)) (null (getf (second answer) :resumed)))
+           (setf (%running-p service) nil)
+           (record-input-done service :error)
+           (retire-emitter service)
+           answer)
+          (t (arm-deadline service)
+             (if (or (getf args :messages) (null ids))
+                 (m:cast (m:self) '(:step))
+                 (setf (%awaiting-detached service) t))
+             (or answer :ok)))))
 
 (defun resolve-tools (service)
   "The allow-list for this run: an explicit list, or every discovered tool
@@ -697,14 +708,14 @@ call that has answered, or belongs to an earlier step, is left alone."
   (let ((entry (assoc key (%detached service) :test #'equal)))
     (when entry
       (setf (%detached service) (remove entry (%detached service)))
-      (destructuring-bind (&key name log-id &allow-other-keys) (cdr entry)
+      (destructuring-bind (&key name log-id (call-id (cdr key)) &allow-other-keys) (cdr entry)
         (record-log-done service (list (list log-id result)))
         (emit-event (agent-events service)
-                    (tool-result-event (m:agent-ref service) (cdr key) result))
+                    (tool-result-event (m:agent-ref service) call-id result))
         (push (list* nil nil
                      (list :role :user
                            :content (format nil "[tool call ~a (~(~a~)) finished: ~a]"
-                                            (cdr key) name
+                                            call-id name
                                             (%cut-text (render-tool-result result)
                                                        (agent-max-tool-result service)))))
               (%steer-queue service))
@@ -732,6 +743,73 @@ issued twice."
           (emit-event (agent-events service)
                       (tool-result-event (m:agent-ref service) (cdr (car entry))
                                          (fail :interrupted))))))))
+
+;;; --- resuming calls (~takeiteasy/nyaa#77) ---------------------------------
+
+;;; A call the call log holds as :LOST, :ABANDONED or :INTERRUPTED is run again
+;;; as a new call, which joins %DETACHED, so its result lands as a detached
+;;; call's does. The process that ran the first is gone, so nothing reattaches.
+
+(defun resume-problem (service args)
+  "The bad-request ARGS' :RESUME earns, if any."
+  (let ((ids (getf args :resume)))
+    (cond ((null ids) nil)
+          ((not (and (listp ids) (every #'stringp ids)))
+           (bad-request ":resume must be a list of call log ids"))
+          ((not (call-log-of service)) (bad-request ":resume needs a :call-log"))
+          ((not (or (getf args :messages) (getf args :continue)))
+           (bad-request ":resume needs :messages or :continue")))))
+
+(defun resume-request (service args)
+  "Resume the calls of :IDS in the run under way, or start a run that waits
+on them, continuing the conversation."
+  (let ((ids (getf args :ids))
+        (force (getf args :force)))
+    (cond ((null ids) (bad-request ":ids is required"))
+          ((resume-problem service (list :resume ids :continue t)))
+          ((%running-p service) (resume-calls service ids force))
+          (t (start-run service (list :continue t :resume ids :force force))))))
+
+(defun resume-refusal (service entry force)
+  "Why the logged call ENTRY may not be run again by SERVICE, or nil and its
+arguments."
+  (let* ((name (getf entry :name))
+         (metadata (and (member name (%allow-list service))
+                        (ignore-errors (tool-metadata name :registry (m:service-registry service))))))
+    (cond ((eq name +sub-agent-tool-name+) "a sub-agent call cannot be resumed")
+          ((null metadata) (format nil "~(~a~) is not in this agent's tool allow-list" name))
+          ((not (or force (getf metadata :resumable)))
+           (format nil "~(~a~) is not resumable" name))
+          (t (handler-case
+                 (let ((parsed (json:parse (getf entry :arguments))))
+                   (values nil (and (hash-table-p parsed)
+                                    (json->arguments parsed (tool-schema metadata)))))
+               (error () "its arguments do not parse"))))))
+
+(defun resume-calls (service ids force)
+  "Run the logged calls IDS again in the run under way, each as a detached
+call, and answer (:OK :RESUMED ((old-id . new-id) ...) :REFUSED ((id reason) ...)).
+FORCE resumes a call to a tool that is not :RESUMABLE."
+  (multiple-value-bind (resumed refused)
+      (call-log-resume (call-log-of service) ids (m:service-name service) (%turns service)
+                       (lambda (entry) (resume-refusal service entry force)))
+    (dolist (item resumed)
+      (destructuring-bind (old new entry arguments) item
+        (declare (ignore old))
+        (dispatch-resumed service new entry arguments)))
+    (ok :resumed (mapcar (lambda (item) (cons (first item) (second item))) resumed)
+        :refused refused)))
+
+(defun dispatch-resumed (service log-id entry arguments)
+  (let ((name (getf entry :name))
+        (call-id (getf entry :call-id))
+        (token (make-cancel-token))
+        (ref (%step-ref service)))
+    (push (list (cons ref log-id) :name name :call-id call-id :token token :log-id log-id)
+          (%detached service))
+    (call-log-running (call-log-of service) (list log-id))
+    (emit-event (agent-events service) (tool-resumed-event (m:agent-ref service) call-id name))
+    (send-call service (list :tool ref log-id) #'%tool-call name (list* :cancel token arguments))))
 
 (defun pending-tool-messages (service)
   "A :TOOL message for each call dispatched this turn, in order: its result,
@@ -1090,6 +1168,9 @@ timeout."
 (defun tool-detached-event (ref id name)
   (list :type :tool-detached :ref ref :id id :name name))
 
+(defun tool-resumed-event (ref id name)
+  (list :type :tool-resumed :ref ref :id id :name name))
+
 (defun tool-result-event (ref id result)
   (list :type :tool-result :ref ref :id id :result result))
 
@@ -1130,12 +1211,24 @@ than running again."
 ;;; not-running agent and ignores it. A call with no result yet is recorded
 ;;; closed as :INTERRUPTED, so the restored conversation is well-formed.
 
+(defun outstanding-log-ids (service)
+  "The call log ids of the calls this run has not had an answer to, detached
+ones included, for a caller to resume."
+  (append (loop for cell in (%pending service)
+                for id = (and (outstanding-p (cdr cell)) (call-log-id service (car cell)))
+                when id collect id)
+          (loop for entry in (%detached service)
+                for id = (getf (cdr entry) :log-id)
+                when id collect id)))
+
 (defmethod snapshot ((service agent))
   (append (list :messages (append (conversation service) (pending-tool-messages service))
                 :turns (%turns service))
           (when (%running-p service)
             (list :in-flight (append (list :turn (%turns service)
                                            :tool-calls (copy-list (%pending-order service)))
+                                     (a:when-let ((ids (outstanding-log-ids service)))
+                                       (list :call-log-ids ids))
                                      (when (%detached service)
                                        (list :detached (mapcar (lambda (entry) (cdr (car entry)))
                                                                (%detached service)))))))))

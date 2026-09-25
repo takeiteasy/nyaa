@@ -21,6 +21,7 @@
 
 (define-tool :tool-image
     (:trust :agent
+     :resumable t
      :summary "Read-only introspection over the live Lisp image: describe, apropos, documentation, source"
      :params ((:op (member :describe :apropos :documentation :source :packages)
                :required t :doc "operation to perform")
