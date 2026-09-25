@@ -61,7 +61,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:max-context` | nil | most tokens (estimated) a request carries, conversation and tool schemas; the oldest turns past it are left out of the request. nil is unbounded |
 | `:chars-per-token` | 3 | characters per token the estimate starts from; recalibrated from each reply |
 | `:turn-retries` | 0 | times a turn that failed transiently is sent again |
-| `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, plus up to 25% jitter |
+| `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, or as long as `Retry-After` asks if longer, plus up to 25% jitter |
 | `:sink` | nil | a stream sink, as `complete` takes |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
 | `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
@@ -229,8 +229,9 @@ again first:
 | `:backend-error` with a 2xx status (a stream or payload cut short) | yes |
 | other `:backend-error` statuses, `:timeout`, `:cancelled` | no |
 
-A retry waits `:retry-backoff`, doubled each time, plus up to 25% jitter, and
-emits `:turn-retry`. It is not a new turn: `:turns` and `:max-turns` do not
+A retry waits `:retry-backoff`, doubled each time, or the backend's
+[`Retry-After`](protocols.md#retry-after) when that is longer, plus up to 25%
+jitter, and emits `:turn-retry`. It is not a new turn: `:turns` and `:max-turns` do not
 count it, and `:deadline` still bounds the run. What the failed attempt
 streamed is dropped. A `:cancel`, `:deadline` or `:restore` during the wait
 ends it. A `:steer` folds into the retry; with `:interrupt t` the retry
@@ -316,8 +317,6 @@ abandoned turn reaches the sink.
   ([#142](https://todo.sr.ht/~takeiteasy/nyaa/142)).
 - The first turn is measured at the default ratio; an exact count before it
   needs a tokenizer ([#143](https://todo.sr.ht/~takeiteasy/nyaa/143)).
-- A retry ignores a backend's `Retry-After` header
-  ([#135](https://todo.sr.ht/~takeiteasy/nyaa/135)).
 
 [^ratio]: The ratio is per agent, not per content type: code and JSON
     tokenise worse than prose, which the 10% margin absorbs. A reading under 1

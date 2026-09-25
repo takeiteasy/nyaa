@@ -324,10 +324,57 @@ sink drops it."
 
 ;;; The docs/tools.md error vocabulary, plus one shape protocols add.
 
-(defun backend-error (status detail)
+(defun backend-error (status detail &key retry-after)
   "The backend was reached and the exchange broke down: a non-OK STATUS, a
-malformed payload, a stream cut short."
-  (fail (list :backend-error status detail)))
+malformed payload, a stream cut short. RETRY-AFTER, in milliseconds, is how
+long the backend asked a caller to wait before trying again."
+  (fail (list* :backend-error status detail
+               (when retry-after (list :retry-after retry-after)))))
+
+;;; --- Retry-After ------------------------------------------------------
+
+(defparameter +months+
+  '("Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
+
+(defun http-date-universal-time (text)
+  "TEXT, an IMF-fixdate such as \"Wed, 21 Oct 2026 07:28:00 GMT\", as a
+universal time, or nil when it is anything else."
+  (ignore-errors
+   (destructuring-bind (day-name day month-name year clock zone)
+       (uiop:split-string text :separator " ")
+     (declare (ignore day-name))
+     (let ((month (position month-name +months+ :test #'string-equal)))
+       (when (and month (string= zone "GMT"))
+         (destructuring-bind (hour minute second)
+             (mapcar #'parse-integer (uiop:split-string clock :separator ":"))
+           (encode-universal-time second minute hour (parse-integer day) (1+ month)
+                                  (parse-integer year) 0)))))))
+
+(defun parse-decimal (text)
+  "TEXT as a non-negative decimal, or nil."
+  (ignore-errors
+   (destructuring-bind (whole &optional (fraction "")) (uiop:split-string text :separator ".")
+     (and (every #'digit-char-p whole) (every #'digit-char-p fraction)
+          (plusp (+ (length whole) (length fraction)))
+          (+ (if (plusp (length whole)) (parse-integer whole) 0)
+             (if (plusp (length fraction))
+                 (/ (parse-integer fraction) (expt 10 (length fraction)))
+                 0))))))
+
+(defun retry-after-ms (headers)
+  "The wait, in milliseconds, HEADERS ask for, or nil. HEADERS is drakma's
+alist. The non-standard retry-after-ms wins over Retry-After, which is
+delta-seconds or an HTTP date; a date already past is 0."
+  (flet ((header (name) (a:when-let ((value (cdr (assoc name headers))))
+                          (string-trim " " value))))
+    (or (a:when-let* ((text (header :retry-after-ms))
+                      (ms (parse-decimal text)))
+          (round ms))
+        (a:when-let ((text (header :retry-after)))
+          (a:if-let ((seconds (parse-decimal text)))
+            (round (* 1000 seconds))
+            (a:when-let ((time (http-date-universal-time text)))
+              (max 0 (* 1000 (- time (get-universal-time))))))))))
 
 ;;; --- concurrent completions ------------------------------------------------
 
@@ -688,7 +735,8 @@ when the sink has, or has no emitter to wait for."
 (defun perform-completion (request opener reader)
   "Run the exchange under the caller's deadline, as TOOL-HTTP does: a wedged
 backend costs a timeout, not a wedged service. OPENER
-takes (request connect) and answers (values stream status); READER takes
+takes (request connect) and answers (values stream status headers), HEADERS
+being drakma's response alist and optional; READER takes
 (request stream status) and answers the reply. A request with a :STREAM sink
 ends it with exactly one :DONE."
   (let* ((sink (getf request :stream))
@@ -720,9 +768,9 @@ ends it with exactly one :DONE."
 (defun attempt-completion (request opener reader connect)
   ;; The two failure regions are kept apart: nothing read yet is a transport
   ;; failure, and everything after the status is the backend misbehaving.
-  (let (stream status)
+  (let (stream status headers)
     (handler-case
-        (multiple-value-setq (stream status) (funcall opener request connect))
+        (multiple-value-setq (stream status headers) (funcall opener request connect))
       ;; Nothing was read, so there is no backend answer to report on: a
       ;; refused connection and a peer that hangs up before the status line
       ;; are the same failure to the caller.
@@ -731,7 +779,8 @@ ends it with exactly one :DONE."
          (handler-case
              (if (<= 200 status 299)
                  (funcall reader request stream status)
-                 (backend-error status (read-detail stream)))
+                 (backend-error status (read-detail stream)
+                                :retry-after (retry-after-ms headers)))
            (error (e) (backend-error status (princ-to-string e))))
       (ignore-errors (close stream)))))
 

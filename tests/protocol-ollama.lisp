@@ -274,6 +274,11 @@
       (is (eq :backend-error (first reason)))
       (is (= 429 (second reason))))))
 
+(test ollama-a-retry-after-header-reaches-the-error
+  (with-ollama ('(429 ("Content-Type" "application/json" "Retry-After" "2")
+                  "{\"error\":\"rate limited\"}"))
+    (is (equal '(:retry-after 2000) (cdddr (nyaa:tool-error (ask-ollama)))))))
+
 (test a-connection-closed-before-a-response-is-unavailable
   (with-ollama (:close)
     (is (eq :unavailable (nyaa:tool-error (ask-ollama))))))

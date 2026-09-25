@@ -92,7 +92,7 @@ problem string. The shared CHECK-REQUEST stays neutral, so this runs on top."
   "POST the request body, answering the response stream and its status."
   (let ((streaming (and (getf request :stream) t))
         (url (completion-url (getf request :base-url))))
-    (multiple-value-bind (body status)
+    (multiple-value-bind (body status headers)
         (drakma:http-request
          url
          :method :post
@@ -104,7 +104,7 @@ problem string. The shared CHECK-REQUEST stays neutral, so this runs on top."
          :content-type "application/json"
          :external-format-out :utf-8
          :content (json:stringify (completion-body request streaming)))
-      (values (character-stream body) status))))
+      (values (character-stream body) status headers))))
 
 (defun read-completion (request stream status)
   (if (getf request :stream)

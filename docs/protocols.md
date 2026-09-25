@@ -153,8 +153,27 @@ add:
 
 | Reason | Meaning |
 |---|---|
-| `(:backend-error status detail)` | The backend was reached and the exchange broke down: a non-OK status, a malformed payload, a stream cut short. |
+| `(:backend-error status detail)` | The backend was reached and the exchange broke down: a non-OK status, a malformed payload, a stream cut short. A non-OK answer that asks for a wait ends in `:retry-after ms`. |
 | `:cancelled` | The request's `:cancel` token was cancelled. |
+
+### Retry-After
+
+A non-OK answer's `Retry-After` becomes a `:retry-after` tail on the reason, in
+milliseconds; the [agent](agent.md#failed-turns) waits at least that long before
+retrying.
+
+```lisp
+(:backend-error 429 "rate limited" :retry-after 2000)
+```
+
+| Header | Read as |
+|---|---|
+| `retry-after-ms: 1500` | 1500 ms; wins over `Retry-After` when both are sent |
+| `Retry-After: 2` | seconds |
+| `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` | the time until then; 0 once past |
+
+A value it cannot read leaves the tail off. A protocol's opener hands its
+response headers back as an optional third value for this.
 
 `(:bad-request msg)` is pre-flight, so a malformed request never reaches the
 network and "your ask was wrong" stays distinguishable from "the backend

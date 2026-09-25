@@ -402,17 +402,25 @@ attempt could double a wait the caller bounded."
   (and (retryable-p result)
        (< (%attempt service) (agent-turn-retries service))))
 
+(defun retry-after (reason)
+  "The milliseconds a failed turn's REASON says to wait, or nil."
+  (and (consp reason) (eq (first reason) :backend-error)
+       (getf (cdddr reason) :retry-after)))
+
+(defun retry-delay (backoff attempt retry-after)
+  "Milliseconds before retry ATTEMPT: the doubled BACKOFF, or RETRY-AFTER when
+the backend asked for longer, plus up to 25% jitter."
+  (* (max (* backoff (expt 2 (1- attempt))) (or retry-after 0))
+     (+ 1 (random 0.25d0))))
+
 (defun schedule-retry (service result)
   "Send the turn that just failed again after a backoff. The retry is not a
 new turn: :TURNS and the :TURN event stay as they were. Anything that moves
 the step ref before the timer fires -- a cancel, the deadline, a restore, an
 interrupt -- leaves the timer's :RETRY unmatchable."
   (let* ((attempt (incf (%attempt service)))
-         ;; TODO: a Retry-After header is ignored -- BACKEND-ERROR carries
-         ;; only the body. Carry the headers through and wait as told
-         ;; (~takeiteasy/nyaa#135).
-         (delay (* (agent-retry-backoff service) (expt 2 (1- attempt))
-                   (+ 1 (random 0.25d0))))
+         (delay (retry-delay (agent-retry-backoff service) attempt
+                             (retry-after (tool-error result))))
          (ref (%step-ref service))
          (self (m:self)))
     (close-turn-stream service)

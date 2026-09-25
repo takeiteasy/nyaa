@@ -540,6 +540,11 @@ needs and a user message."
       (is (= 429 (second reason)))
       (is (search "rate limited" (third reason))))))
 
+(test openai-a-retry-after-header-reaches-the-error
+  (with-openai ('(429 ("Content-Type" "application/json" "Retry-After" "2")
+                  "{\"error\":\"rate limited\"}"))
+    (is (equal '(:retry-after 2000) (cdddr (nyaa:tool-error (ask)))))))
+
 (test a-malformed-payload-is-a-backend-error
   (with-openai ((json-response "{\"choices\":"))
     (is (eq :backend-error (first (nyaa:tool-error (ask)))))))

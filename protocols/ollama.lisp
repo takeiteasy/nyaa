@@ -97,7 +97,7 @@ Ollama correlates a tool result by position, not by id."
 (defun open-chat (request connect)
   (let ((streaming (and (getf request :stream) t))
         (url (chat-url (getf request :base-url))))
-    (multiple-value-bind (body status)
+    (multiple-value-bind (body status headers)
         (drakma:http-request
          url
          :method :post
@@ -109,7 +109,7 @@ Ollama correlates a tool result by position, not by id."
          :content-type "application/json"
          :external-format-out :utf-8
          :content (json:stringify (chat-body request streaming)))
-      (values (character-stream body) status))))
+      (values (character-stream body) status headers))))
 
 (defun read-chat (request stream status)
   (if (getf request :stream)

@@ -1107,6 +1107,20 @@ test's."
     (is-false (retryable '(:bad-request "no")))
     (is-false (retryable '(:error "No model registered")))))
 
+(test retry-delay-waits-for-the-longer-of-backoff-and-retry-after
+  (flet ((delay (backoff attempt retry-after)
+           (nyaa::retry-delay backoff attempt retry-after)))
+    (dotimes (i 20)
+      (is (<= 1000 (delay 1000 1 nil) 1250))
+      (is (<= 4000 (delay 1000 3 nil) 5000))
+      (is (<= 5000 (delay 1000 1 5000) 6250))
+      (is (<= 4000 (delay 1000 3 1000) 5000)))))
+
+(test retry-after-reads-a-backend-error-reason
+  (is (= 2000 (nyaa::retry-after '(:backend-error 429 "" :retry-after 2000))))
+  (is (null (nyaa::retry-after '(:backend-error 429 ""))))
+  (is (null (nyaa::retry-after :unavailable))))
+
 (test a-retry-is-announced-and-is-not-a-new-turn
   (let ((recorder (make-recorder)))
     (with-agent ((fails-then 1 500 (streamed-reply "ok")))

@@ -24,6 +24,8 @@
 (defun cancel (token)
   "Cancel whatever TOKEN was passed to as :CANCEL. Idempotent; true the first
 time."
+  ;; FIXME: answers nil the first time when no action was registered,
+  ;; against the docstring (~takeiteasy/nyaa#150).
   (let ((actions (bt:with-lock-held ((cancel-token-lock token))
                    (unless (cancel-token-cancelled token)
                      (setf (cancel-token-cancelled token) t)

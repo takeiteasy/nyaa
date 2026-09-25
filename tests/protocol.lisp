@@ -381,6 +381,29 @@
     (is (nyaa:tool-error-p result))
     (is (equal '(:backend-error 429 "rate limited") (nyaa:tool-error result)))))
 
+(test backend-error-carries-a-retry-after-only-when-given
+  (is (equal '(:backend-error 429 "slow" :retry-after 2000)
+             (nyaa:tool-error (nyaa:backend-error 429 "slow" :retry-after 2000)))))
+
+(test retry-after-ms-reads-the-headers
+  (flet ((wait (&rest headers) (nyaa::retry-after-ms headers)))
+    (is (= 2000 (wait '(:retry-after . "2"))))
+    (is (= 1500 (wait '(:retry-after . "1.5"))))
+    (is (= 1500 (wait '(:retry-after-ms . "1500"))))
+    (is (= 250 (wait '(:retry-after-ms . "250") '(:retry-after . "9"))))
+    (is (null (wait)))
+    (is (null (wait '(:retry-after . "soon"))))
+    (is (null (wait '(:retry-after . "-3"))))
+    (is (null (wait '(:retry-after . ""))))
+    (is (= 0 (wait '(:retry-after . "Wed, 21 Oct 2015 07:28:00 GMT"))))))
+
+(test retry-after-ms-reads-an-http-date
+  (let ((date (nyaa::http-date-universal-time "Wed, 21 Oct 2026 07:28:00 GMT")))
+    (is (= (encode-universal-time 0 28 7 21 10 2026 0) date))
+    (is (null (nyaa::http-date-universal-time "21 Oct 2026")))
+    (is (null (nyaa::http-date-universal-time "Wed, 21 Foo 2026 07:28:00 GMT")))
+    (is (null (nyaa::http-date-universal-time "Wed, 21 Oct 2026 07:28:00 PST")))))
+
 (test tool-call-deltas-carry-argument-fragments
   (let ((event (nyaa:tool-call-delta :r :id "c1" :name :tool-shell
                                         :arguments "{\"cmd\"")))
