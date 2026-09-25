@@ -9,7 +9,7 @@ nyaa install                        # build ~/.nyaa/images/recovery.core
 nyaa                                # newest generation, else recovery
 nyaa --core path/to/some.core       # a specific core
 nyaa -- --eval '(+ 1 2)'            # arguments after -- reach sbcl
-nyaa run "list the files" -v        # one-shot agent run, see cli.md
+nyaa run "list the files" -v        # one-shot agent run, see [cli.md](cli.md)
 ```
 
 ## Installing
