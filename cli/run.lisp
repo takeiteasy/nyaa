@@ -4,7 +4,9 @@
 
 (defparameter *usage*
   "usage: nyaa run PROMPT [--model PROVIDER:MODEL] [--tools NAME,...]
-                 [--system-file FILE] [--system-replace] [--max-turns N] [-v]")
+                 [--system-file FILE] [--system-replace] [--max-turns N] [-v]
+       nyaa chat [--model PROVIDER:MODEL] [--tools NAME,...]
+                 [--system-file FILE] [--system-replace] [--max-turns N]")
 
 (defparameter *default-system*
   "You are nyaa, an agent run from the command line. Do the task, then answer briefly.")
@@ -20,9 +22,9 @@
 
 ;;; --- arguments ------------------------------------------------------------
 
-(defun parse-args (args)
-  "ARGS after `run`, as a plist: :prompt :model :tools :system-file
-:system-replace :max-turns :verbose."
+(defun parse-args (args &key (takes-prompt t))
+  "ARGS after `run` or `chat`, as a plist: :prompt :model :tools :system-file
+:system-replace :max-turns :verbose. Without TAKES-PROMPT a prompt is an error."
   (let (prompt (model *default-model*) tools system-file system-replace max-turns verbose)
     (flet ((value (flag)
              (or (pop args) (usage-error "~a needs a value" flag))))
@@ -40,9 +42,10 @@
                        ((string= arg "--") (when args (setf prompt (pop args))))
                        ((and (> (length arg) 1) (char= (char arg 0) #\-))
                         (usage-error "unknown option ~a" arg))
+                       ((not takes-prompt) (usage-error "unexpected argument ~s" arg))
                        (prompt (usage-error "more than one prompt: ~s and ~s" prompt arg))
                        (t (setf prompt arg))))))
-    (unless prompt (usage-error "no prompt"))
+    (when (and takes-prompt (not prompt)) (usage-error "no prompt"))
     (when (and system-replace (not system-file))
       (usage-error "--system-replace needs --system-file"))
     (list :prompt prompt :model model :tools tools :system-file system-file
@@ -101,11 +104,12 @@ for one cut short by :max-turns or :timeout, 1 for anything else."
           (format err "nyaa: run ended: ~(~a~)~%" reason)))
       (format err "nyaa: ~a~%" (second result))))
 
-(defun run (options context out err)
+(defun prepare (options context)
+  "Mount the provider and tools OPTIONS name on CONTEXT. Answers the
+provider's service name, the tool names and the system prompt."
   (multiple-value-bind (provider model) (split-model (getf options :model))
     (let ((provider-name (named "provider-" provider))
-          (tools (mapcar (lambda (name) (named "" name)) (getf options :tools)))
-          (system (system-prompt (getf options :system-file) (getf options :system-replace))))
+          (tools (mapcar (lambda (name) (named "" name)) (getf options :tools))))
       (unless (member provider-name (nyaa:definitions :kind :provider))
         (usage-error "no provider ~s; defined: ~{~(~a~)~^, ~}" provider
                      (mapcar (lambda (name) (subseq (string name) (length "provider-")))
@@ -118,39 +122,21 @@ for one cut short by :max-turns or :timeout, 1 for anything else."
         (if (eq tool :tool-fs)
             (nyaa:ensure-mounted context tool :root (namestring (uiop:getcwd)))
             (nyaa:ensure-mounted context tool)))
-      (let ((result (apply #'nyaa:run-agent context
-                           :model provider-name :system system
-                           :messages (list (list :role :user :content (getf options :prompt)))
-                           (append (and tools (list :tools tools))
-                                   (and (getf options :max-turns)
-                                        (list :max-turns (getf options :max-turns)))
-                                   (and (getf options :verbose)
-                                        (list :sink (verbose-sink err)))))))
-        (report result out err)
-        (exit-code result)))))
+      (values provider-name tools
+              (system-prompt (getf options :system-file) (getf options :system-replace))))))
 
-(defun main (args &key context (home (nyaa/launcher:nyaa-home))
-                    (out *standard-output*) (err *error-output*))
-  "Run the command ARGS names and return its exit code. CONTEXT is the
-context to mount into; by default one is started and stopped here. HOME is
-where init.lisp is read from."
-  (handler-case
-      (cond
-        ((null args) (usage-error "no command"))
-        ((member (first args) '("-h" "--help") :test #'string=)
-         (format out "~a~%" *usage*) 0)
-        ((string= (first args) "run")
-         (let ((options (parse-args (rest args))))
-           (load-init home)
-           (if context
-               (run options context out err)
-               (let ((own (m:start-service (make-instance 'm:context :name :cli))))
-                 (unwind-protect (run options own out err)
-                   (m:stop own))))))
-        (t (usage-error "unknown command ~a" (first args))))
-    (usage-error (e)
-      (format err "nyaa: ~a~%~a~%" e *usage*)
-      2)
-    (error (e)
-      (format err "nyaa: ~a~%" e)
-      1)))
+(defun agent-options (options tools)
+  "The agent initargs OPTIONS and TOOLS add to a model and a system prompt."
+  (append (and tools (list :tools tools))
+          (and (getf options :max-turns) (list :max-turns (getf options :max-turns)))))
+
+(defun run (options context out err)
+  (multiple-value-bind (provider-name tools system) (prepare options context)
+    (let ((result (apply #'nyaa:run-agent context
+                         :model provider-name :system system
+                         :messages (list (list :role :user :content (getf options :prompt)))
+                         (append (agent-options options tools)
+                                 (and (getf options :verbose)
+                                      (list :sink (verbose-sink err)))))))
+      (report result out err)
+      (exit-code result))))

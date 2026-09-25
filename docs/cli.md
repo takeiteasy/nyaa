@@ -1,8 +1,8 @@
 # The command line
 
 `nyaa run` runs one [agent](agent.md) to completion, prints the answer and
-exits. It is the secondary system `nyaa/cli`, started through
-[the launcher](launcher.md).
+exits. [`nyaa chat`](chat.md) talks to one agent turn by turn. Both are in the
+secondary system `nyaa/cli`, started through [the launcher](launcher.md).
 
 ```sh
 nyaa run "how many .lisp files are here?" --model ollama:llama3.2 \
@@ -13,15 +13,15 @@ nyaa run "how many .lisp files are here?" --model ollama:llama3.2 \
 
 | Option | Meaning |
 |---|---|
-| `PROMPT` | the task, one argument |
+| `PROMPT` | the task, one argument; `chat` takes none |
 | `--model PROVIDER:MODEL` | a [provider](providers.md) and its model, split on the first colon; default `ollama:llama3.2` |
 | `--tools NAME,...` | [tools](tools.md) the model may call, by full service name; none by default |
 | `--system-file FILE` | text added to the default system prompt |
 | `--system-replace` | with `--system-file`, the file is the whole system prompt |
 | `--max-turns N` | most model turns before the run stops itself; default 16, see [the agent](agent.md#mount-options) |
-| `-v`, `--verbose` | one line per event on stderr, and streamed text |
+| `-v`, `--verbose` | `run` only: one line per event on stderr, and streamed text |
 
-A provider or tool is mounted by name from the [definitions](tools.md#definitions)
+`chat` takes the same options except `PROMPT` and `-v`. A provider or tool is mounted by name from the [definitions](tools.md#definitions)
 table, so anything `define-provider` or `define-tool` has defined in the
 launched core is available. `tool-fs` is rooted at the current directory.
 `$NYAA_HOME/init.lisp`, when it exists, is loaded first, so it can define

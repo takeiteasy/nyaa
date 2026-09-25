@@ -82,6 +82,8 @@ node whose call started it.[^tree]
 
 ## Limitations
 
+- A client that attaches to an idle agent starts with an empty transcript, not
+  the conversation the agent holds ([#203](https://todo.sr.ht/~takeiteasy/nyaa/203)).
 - Sub-agent nodes are found by call id, and cannot be steered or cancelled
   ([#200](https://todo.sr.ht/~takeiteasy/nyaa/200)).
 - There is no state for operator approvals

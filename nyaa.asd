@@ -89,14 +89,16 @@
   :in-order-to ((test-op (test-op "nyaa/tests"))))
 
 (defsystem "nyaa/cli"
-  :description "The nyaa command line: run."
+  :description "The nyaa command line: run and chat."
   :author "George Watson"
   :license "GPLv3"
-  :depends-on ("nyaa" "alexandria" "uiop")
+  :depends-on ("nyaa" "nyaa/ui" "alexandria" "bordeaux-threads" "uiop")
   :pathname "cli/"
   :serial t
   :components ((:file "package")
-               (:file "run")))
+               (:file "run")
+               (:file "chat")
+               (:file "main")))
 
 (defsystem "nyaa/ui"
   :description "Headless client state for nyaa front ends."
@@ -139,6 +141,7 @@
                (:file "detach")
                (:file "events")
                (:file "ui")
+               (:file "chat")
                (:file "resume")
                (:file "inputs")
                (:file "image-generation")

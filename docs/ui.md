@@ -115,6 +115,8 @@ events, each once and in order. The replay covers the current run only.[^replay]
 
 - A run's events are all held until it ends, for a mid-run subscriber's replay
   ([#202](https://todo.sr.ht/~takeiteasy/nyaa/202)).
+- A subscriber that attaches to an idle agent is not sent the conversation it
+  holds ([#203](https://todo.sr.ht/~takeiteasy/nyaa/203)).
 - Operator approvals ([#118](https://todo.sr.ht/~takeiteasy/nyaa/118)) and the
   live list of agents and sub-agents
   ([#121](https://todo.sr.ht/~takeiteasy/nyaa/121)) are not part of the
