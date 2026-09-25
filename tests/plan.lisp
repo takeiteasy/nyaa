@@ -244,7 +244,8 @@ being restarted."
              (result (plan (list (list :tool "tool-stubborn" :args (list :ms 30000)))
                            200)))
         (is (timed-out-at-step-p result 1))
-        (is (not (m:process-alive-p before)))
+        ;; M:KILL interrupts the thread and returns, so the exit lands a moment later.
+        (is-true (eventually (lambda () (not (m:process-alive-p before)))))
         (let ((again (plan-ok-eventually
                       (list (list :as "s" :tool "tool-stubborn" :args (list :ms 10))))))
           (is (not (null again)))
