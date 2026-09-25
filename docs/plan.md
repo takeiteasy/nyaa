@@ -98,7 +98,8 @@ A step also stops when the plan's own `:cancel` token is cancelled.
 
 A tool that is still running one second after its token is cancelled is
 killed, and its supervisor restarts it.[^kill] A tool that polls its cancel
-token is never killed.
+token is never killed, nor is one mounted `:temporary` or outside the plan's
+context, since it would not come back.
 
 [^kill]: The kill drops any calls other callers had queued on that tool, and
     its in-memory state and any half-finished work go with it. A call made
@@ -106,5 +107,6 @@ token is never killed.
 
 ## Limitations
 
-- A killed tool that was mounted `:temporary`, or outside a supervisor, is
-  not restarted ([#147](https://todo.sr.ht/~takeiteasy/nyaa/147)).
+- A `:temporary` or unsupervised tool that ignores its cancel token keeps
+  running after the plan returns
+  ([#147](https://todo.sr.ht/~takeiteasy/nyaa/147)).

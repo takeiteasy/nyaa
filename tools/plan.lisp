@@ -31,7 +31,9 @@
 ;;; :timeout bounds the whole plan, each step included: a step's own :timeout
 ;;; is clamped to the time left, the wait on it ends when that lapses, and
 ;;; its cancel token is then cancelled. A tool that honours neither is killed
-;;; a grace period later, and its supervisor restarts it (~takeiteasy/nyaa#145).
+;;; a grace period later, and its supervisor restarts it (~takeiteasy/nyaa#145)
+;;; -- unless it would not be restarted, in which case it is left running
+;;; (~takeiteasy/nyaa#147).
 
 (define-tool :tool-plan
     (:trust :agent
@@ -62,7 +64,7 @@ substitutes an earlier step's result, (:quote x) passes x as it is")))
 (defun run-plan (service steps timeout-ms &optional cancel)
   (a:if-let (problem (validate-plan service steps))
     (bad-request "~a" problem)
-    (execute-plan steps timeout-ms cancel)))
+    (execute-plan service steps timeout-ms cancel)))
 
 (defun validate-plan (service steps)
   "NIL when STEPS may run as given, or a message naming the problem."
@@ -138,7 +140,7 @@ a plist tail is never taken for a marker."
 
 ;;; --- execution ---------------------------------------------------------
 
-(defun execute-plan (steps timeout-ms cancel)
+(defun execute-plan (service steps timeout-ms cancel)
   "Run STEPS in order, handing each a token cancelled with CANCEL, so a
 cancelled plan stops the step in flight and refuses the rest."
   (let ((deadline (+ (get-internal-real-time)
@@ -158,7 +160,7 @@ cancelled plan stops the step in flight and refuses the rest."
             (return-from execute-plan (fail-step tool-name :timeout)))
           (let ((result (invoke-step (lisp-tool-name tool-name)
                                      (resolve-refs (getf step :args) results)
-                                     cancel left)))
+                                     cancel left service)))
             (when (tool-error-p result)
               (return-from execute-plan (fail-step tool-name (tool-error result))))
             (when as
@@ -169,11 +171,12 @@ cancelled plan stops the step in flight and refuses the rest."
   "Seconds a timed-out step's tool gets to notice its cancel token before it
 is killed.")
 
-(defun invoke-step (name args cancel left-ms)
+(defun invoke-step (name args cancel left-ms service)
   "INVOKE-TOOL for one step, held to LEFT-MS: a :TIMEOUT the tool declares is
 clamped to it, and the wait on the tool ends with it, cancelling the tool's
 own token. A tool still running +PLAN-KILL-GRACE+ seconds after that is
-killed, and its supervisor restarts it. That token is cancelled with CANCEL."
+killed if SERVICE's context would restart it. That token is cancelled with
+CANCEL."
   (let ((token (make-cancel-token)))
     (when cancel
       (on-cancel cancel (lambda () (cancel token))))
@@ -185,9 +188,24 @@ killed, and its supervisor restarts it. That token is cancelled with CANCEL."
               (m:call process message :timeout (min timeout (/ left-ms 1000.0)))
             (when (eq status :timeout)
               (cancel token)
-              (when (stuck-p token +plan-kill-grace+)
+              (when (and (stuck-p token +plan-kill-grace+)
+                         (restartable-p service process))
                 (m:kill process)))
             (%call-result reply status))))))
+
+(defun restartable-p (service process)
+  "True when PROCESS is a child, at any depth, of SERVICE's context that its
+supervisor restarts after a kill. A tool mounted :TEMPORARY, or not mounted
+under that context, would be gone for good."
+  (labels ((search-children (context-process)
+             (dolist (child (m:children context-process))
+               (cond ((eq (getf child :process) process)
+                      (return (and (member (getf child :restart) '(:transient :permanent)) t)))
+                     ((and (getf child :process) (subtypep (getf child :class) 'm:context))
+                      (a:when-let ((found (search-children (getf child :process))))
+                        (return found)))))))
+    (a:when-let ((context (m:service-context service)))
+      (search-children (m:service-process context)))))
 
 (defun clamp-timeout (name args left-ms)
   "ARGS with :TIMEOUT held to LEFT-MS, when NAME declares one and ARGS' is

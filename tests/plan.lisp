@@ -77,7 +77,7 @@
            (m:mount context 'nyaa:tool-fs :root root)
            (m:mount context 'nyaa:tool-shell)
            (when sleep-tool (m:mount context 'tool-sleep))
-           (dolist (tool extra) (m:mount context tool))
+           (dolist (tool extra) (apply #'m:mount context (alexandria:ensure-list tool)))
            (m:mount context 'nyaa:tool-plan :allow allow :max-steps max-steps)
            (funcall body))
       (m:stop context)
@@ -250,6 +250,15 @@ being restarted."
           (is (not (null again)))
           (is (eq :ok (first again))))))
     :extra '(tool-stubborn)))
+
+(test a-step-whose-tool-would-not-be-restarted-is-left-running
+  (call-with-plan '(:tool-fs :tool-stubborn) 16
+    (lambda ()
+      (let* ((before (m:lookup :tool-stubborn))
+             (result (plan (list (list :tool "tool-stubborn" :args (list :ms 3000))) 200)))
+        (is (timed-out-at-step-p result 1))
+        (is (m:process-alive-p before))))
+    :extra '((tool-stubborn :restart :temporary))))
 
 (test a-step-that-honours-cancel-is-not-killed
   (call-with-plan '(:tool-fs :tool-patient) 16
