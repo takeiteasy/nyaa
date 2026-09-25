@@ -4,7 +4,7 @@
 
 (defparameter *usage*
   "usage: nyaa run PROMPT [--model PROVIDER:MODEL] [--tools NAME,...]
-                 [--system-file FILE] [--system-replace] [-v]")
+                 [--system-file FILE] [--system-replace] [--max-turns N] [-v]")
 
 (defparameter *default-system*
   "You are nyaa, an agent run from the command line. Do the task, then answer briefly.")
@@ -22,8 +22,8 @@
 
 (defun parse-args (args)
   "ARGS after `run`, as a plist: :prompt :model :tools :system-file
-:system-replace :verbose."
-  (let (prompt (model *default-model*) tools system-file system-replace verbose)
+:system-replace :max-turns :verbose."
+  (let (prompt (model *default-model*) tools system-file system-replace max-turns verbose)
     (flet ((value (flag)
              (or (pop args) (usage-error "~a needs a value" flag))))
       (loop while args
@@ -32,6 +32,10 @@
                        ((string= arg "--tools") (setf tools (uiop:split-string (value arg) :separator ",")))
                        ((string= arg "--system-file") (setf system-file (value arg)))
                        ((string= arg "--system-replace") (setf system-replace t))
+                       ((string= arg "--max-turns")
+                        (let ((n (parse-integer (value arg) :junk-allowed t)))
+                          (unless (and n (plusp n)) (usage-error "--max-turns wants a positive integer"))
+                          (setf max-turns n)))
                        ((member arg '("-v" "--verbose") :test #'string=) (setf verbose t))
                        ((string= arg "--") (when args (setf prompt (pop args))))
                        ((and (> (length arg) 1) (char= (char arg 0) #\-))
@@ -42,7 +46,7 @@
     (when (and system-replace (not system-file))
       (usage-error "--system-replace needs --system-file"))
     (list :prompt prompt :model model :tools tools :system-file system-file
-          :system-replace system-replace :verbose verbose)))
+          :system-replace system-replace :max-turns max-turns :verbose verbose)))
 
 (defun split-model (spec)
   "SPEC, PROVIDER:MODEL, split on the first colon."
@@ -118,6 +122,8 @@ for one cut short by :max-turns or :timeout, 1 for anything else."
                            :model provider-name :system system
                            :messages (list (list :role :user :content (getf options :prompt)))
                            (append (and tools (list :tools tools))
+                                   (and (getf options :max-turns)
+                                        (list :max-turns (getf options :max-turns)))
                                    (and (getf options :verbose)
                                         (list :sink (verbose-sink err)))))))
         (report result out err)

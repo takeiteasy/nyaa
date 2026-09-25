@@ -18,6 +18,7 @@ nyaa run "how many .lisp files are here?" --model ollama:llama3.2 \
 | `--tools NAME,...` | [tools](tools.md) the model may call, by full service name; none by default |
 | `--system-file FILE` | text added to the default system prompt |
 | `--system-replace` | with `--system-file`, the file is the whole system prompt |
+| `--max-turns N` | most model turns before the run stops itself; default 16, see [the agent](agent.md#mount-options) |
 | `-v`, `--verbose` | one line per event on stderr, and streamed text |
 
 A provider or tool is mounted by name from the [definitions](tools.md#definitions)

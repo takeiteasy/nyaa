@@ -21,6 +21,12 @@
   (with-protocol
     (is (= 0 (cli "run" "hi" "--model" "test-echo:name:with:colons")))))
 
+(test max-turns-reaches-the-agent
+  (is (= 3 (getf (nyaa/cli::parse-args '("a" "--max-turns" "3")) :max-turns)))
+  (is (null (getf (nyaa/cli::parse-args '("a")) :max-turns)))
+  (with-protocol
+    (is (= 0 (cli "run" "hi" "--model" "test-echo:x" "--max-turns" "1")))))
+
 (test verbose-streams-events-to-stderr
   (with-protocol
     (multiple-value-bind (code out err) (cli "run" "hi" "--model" "test-echo:x" "-v")
@@ -43,7 +49,8 @@
                     ("run" "a" "--model") ("run" "a" "--model" "nocolon")
                     ("run" "a" "--model" "nobody:x") ("run" "a" "--system-replace")
                     ("run" "a" "--model" "test-echo:x" "--tools" "tool-nobody")
-                    ("run" "a" "--system-file" "/no/such/file")))
+                    ("run" "a" "--system-file" "/no/such/file")
+                    ("run" "a" "--max-turns" "0") ("run" "a" "--max-turns" "many")))
       (multiple-value-bind (code out err) (apply #'cli args)
         (is (= 2 code) "~s exited ~a" args code)
         (is (equal "" out))
