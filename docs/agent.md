@@ -65,7 +65,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:chars-per-token` | 3 | characters per token the estimate starts from; recalibrated from each reply |
 | `:turn-retries` | 0 | times a turn that failed transiently is sent again |
 | `:retry-backoff` | 1000 | milliseconds before the first retry; each later one waits twice as long, or as long as `Retry-After` asks if longer, plus up to 25% jitter |
-| `:sink` | nil | a stream sink, as `complete` takes |
+| `:sink` | nil | a stream sink, as `complete` takes; the first [subscriber](ui.md#subscribing) |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
 | `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
 | `:call-log` | nil | record each dispatched tool call to the [call log](calls.md): nil is off, `t` the default log, a path to record there instead |
@@ -97,6 +97,8 @@ end a plain `complete` turn early inside a working conversation.
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
 | `(:steer :content text :interrupt t)` | as `:steer`, but a model turn or tool calls in flight are abandoned and the steer folds in at once |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
+| `(:subscribe sink)` | hear this agent's events as well, answering `(:ok (:running t :turn n))` or `(:ok (:running nil))`; see [the front-end contract](ui.md) |
+| `(:unsubscribe sink)` | stop hearing them; the mount `:sink` cannot be |
 
 `:steer` takes an optional `:input-id`, which makes a redelivery [a duplicate](inputs.md), and an optional `:vault-id`, naming an entry already in the
 [vault](vault.md) -- `tool-vault`'s `:restore` redelivers a steer this way
@@ -281,6 +283,8 @@ as lost.
 `:tool-call-delta` and `:done` pass straight through; the loop adds:
 
 ```lisp
+(:type :run-start   :ref r :messages ms :continue nil)
+(:type :steer       :ref r :content "..." :interrupt nil :input-id nil)
 (:type :turn        :ref r :turn n)
 (:type :turn-interrupted :ref r :turn n)
 (:type :turn-retry  :ref r :turn n :attempt 1 :reason (:backend-error 503 "..."))
@@ -293,6 +297,12 @@ as lost.
        :size 240 :budget 250 :ratio 3.9 :over-budget nil)
 ```
 
+Every event also carries `:agent`, the agent's registered name (nil when it
+has none), and a sub-agent's carries `:parent` as well. `:run-start` opens a
+run. `:steer` is emitted as a steer folds in, just ahead of the `:turn` it
+joins; a detached call's folded result is not one. The keys, ordering and
+delivery of every event are in [the front-end contract](ui.md#events).
+
 `:context-trimmed` precedes a request that left out or cut anything, before
 that turn's model call. `:omitted` and `:truncated` index into the whole
 conversation, so a listener can tell which messages were affected; `:truncated`
@@ -301,14 +311,16 @@ tokens, `:size` estimated at `:ratio` characters per token. A retried turn is bu
 and reports again.
 
 An interrupted turn ends with `:turn-interrupted` rather than a `:done`:
-nothing it streams reaches the sink after it, and the next `:turn` follows.
+nothing it streams reaches the sink after it, and the steer's `:steer` and
+the next `:turn` follow.
 
 A turn whose `complete` failed emits the protocol's `:done` with
 `:reason (:error r)`, then `:turn-retry` if it is retried, or `:run-done` if not. A turn cut short by `:cancel` or
 `:deadline` ends at `:run-done`, with no `:done` of its own.
 
 A function sink is called on a pooled thread, one event at a time and in
-order, and a sub-agent's events pass through the same queue. A
+order, and a sub-agent's events pass through the same queue. Each function
+[subscriber](ui.md#subscribing) has a queue of its own. A
 sink that blocks never holds up the agent: `:steer` and `:cancel` still land.
 `:run-done` is the last event a function sink sees, though the parent can get
 `:agent-done`, and `run-agent` return, before the sink has taken it. A sink that has not taken `:run-done` five seconds after
@@ -324,7 +336,8 @@ supervisor, via `m:delegate` — with this agent's model, allow-list,
 result. The child's `:ref`, echoed on its events, is a cons of an internal
 step counter and the call id. A child does not itself get `:sub-agents`, so
 delegation does not nest by default, and it is never registered under a name, so a steer
-recorded against it carries no `:agent` (see [the vault](vault.md)).
+recorded against it carries no `:agent` (see [the vault](vault.md)). Its
+events go to its parent's sinks, with `:agent nil` and `:parent` set.
 
 Reaching the parent's `handle` from a delegated child needs
 [`~takeiteasy/meow#59`](https://todo.sr.ht/~takeiteasy/meow/59): meow's
