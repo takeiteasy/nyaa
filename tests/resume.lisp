@@ -237,6 +237,22 @@ outcome, if given."
                         (let ((new (getf (call-with-id path (first ids)) :resumed-by)))
                           (and new (eq :ok (getf (call-with-id path new) :status)))))))))))))
 
+(test a-resume-past-max-detached-is-refused
+  (with-vault-path (path)
+    (seed-call path "x-0" :call-id "c9")
+    (seed-call path "x-1" :call-id "c8")
+    (seed-call path "x-2" :call-id "c7" :done :ok)
+    (with-agent ((scripted (final-reply "waiting")) 'tool-again)
+      (m:with-process (runner)
+        (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                 :tools '(:tool-again) :call-log path :max-detached 1)))
+          (let ((answer (second (call-child child '(:run :continue t :resume ("x-0" "x-1" "x-2")
+                                                    :messages ((:role :user :content "go")))))))
+            (is (= 1 (length (getf answer :resumed))))
+            (is (equal "x-0" (car (first (getf answer :resumed)))))
+            (is (equal '(("x-1" "max-detached reached")) (subseq (getf answer :refused) 0 1)))
+            (is (search "not lost" (second (second (getf answer :refused)))))))))))
+
 ;;; --- tool-calls ----------------------------------------------------------
 
 (defun calls-tool (op &rest args)

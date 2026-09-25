@@ -59,6 +59,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
 | `:tool-grace` | nil | milliseconds a tool call may run before the turn [goes on without it](#detached-tool-calls); nil waits for every call |
+| `:max-detached` | nil | most calls [detached](#detached-tool-calls) at once; a call past it stays attached until a slot frees. nil is uncapped |
 | `:max-tool-result` | nil | most characters of a tool result's text that reach the conversation; nil is uncapped |
 | `:max-context` | nil | most tokens (estimated) a request carries, conversation and tool schemas; the oldest turns past it are left out of the request. nil is unbounded |
 | `:chars-per-token` | 3 | characters per token the estimate starts from; recalibrated from each reply |
@@ -174,6 +175,7 @@ past `:tool-grace`, or at once when its tool's [metadata](tools.md) says
 | Detach | the call's `:tool` message is the stub `{"status":"running","note":"..."}`, `:tool-detached` is emitted, and the turn goes on. The call keeps running |
 | Result lands | it is emitted as `:tool-result` and queued as a `:user` message, `[tool call c1 (tool-x) finished: {...}]`, folded in before the next turn as a [steer](#messages) is |
 | The model stops first | with a call still detached, the run stays open and each result that lands gets a turn. `:max-turns`, `:deadline` and `:cancel` still end it |
+| At `:max-detached` | a call due to detach stays attached, so the turn waits on it, and detaches when a detached call's result lands[^deferred] |
 | The run ends | a call still detached is [cancelled](#cancelling-tool-calls), emitted as `(:error :interrupted)` and logged `:interrupted` |
 
 ```lisp
@@ -363,8 +365,6 @@ leaving the original alone -- see [forking](forking.md).
   polls ([#189](https://todo.sr.ht/~takeiteasy/nyaa/189)).
 - A tool that ignores a cancel and never answers keeps its call pending for
   good ([#188](https://todo.sr.ht/~takeiteasy/nyaa/188)).
-- Nothing caps how many calls are detached at once
-  ([#184](https://todo.sr.ht/~takeiteasy/nyaa/184)).
 - A restored agent runs a call detached when it was checkpointed again rather
   than reattaching to it ([#185](https://todo.sr.ht/~takeiteasy/nyaa/185)).
 - The first turn is measured at the default ratio; an exact count before it
@@ -375,6 +375,11 @@ leaving the original alone -- see [forking](forking.md).
     or over 8 characters per token is ignored. `:max-tool-result` stays in
     characters, as do `:from` and `:to` in `:context-trimmed`. `:max-context`
     is the prompt's share of the window; leave room below it for the reply.
+
+[^deferred]: A deferred call is still attached, so its call timeout applies:
+    it answers `(:error :timeout)` if no slot frees before then. Deferred calls
+    detach in the order they were due. A [resumed](calls.md#resuming-a-call)
+    call is detached from the start and counts toward the cap.
 
 [^detached]: The folded result is a plain `:user` message, so it counts toward
     `:max-context` like any other and is not cut again in a request's view.

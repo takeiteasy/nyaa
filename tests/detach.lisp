@@ -238,3 +238,34 @@ repeating."
              (result (run-detached child 15)))
         (is (= 2 (getf (second result) :turns)))
         (is (search "{\\\"error\\\":\\\"timeout\\\"}" (request-body 2)))))))
+
+;;; :MAX-DETACHED (~takeiteasy/nyaa#184): a call past the cap stays attached
+;;; and detaches when a slot frees.
+
+(test a-call-past-max-detached-detaches-when-a-slot-frees
+  (let ((n 0))
+    (with-agent ((lambda (&rest request)
+                   (declare (ignore request))
+                   (if (= (incf n) 1)
+                       (sse-response
+                        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"tool-slow\",\"arguments\":\"{}\"}}]}}]}"
+                        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"tool-wait\",\"arguments\":\"{}\"}}]}}]}"
+                        "{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"
+                        "[DONE]")
+                       (sse-response
+                        "{\"choices\":[{\"delta\":{\"content\":\"waiting\"},\"finish_reason\":\"stop\"}]}"
+                        "[DONE]")))
+                 'tool-slow 'tool-wait)
+    (m:with-process (runner)
+      (let* ((recorder (make-recorder))
+             (child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                :tools '(:tool-slow :tool-wait) :tool-grace 100
+                                :max-detached 1 :sink (recorder-sink recorder))))
+        (m:cast child (list :run :messages '((:role :user :content "go"))))
+        (is-true (eventually (lambda () (= 2 (length (requests)))) 8))
+        (is (search "tool call c1 (tool-slow) finished" (request-body 2)))
+        (is (equal '((:tool-detached "c1") (:tool-result "c1") (:tool-detached "c2"))
+                   (loop for event in (recorded-events recorder)
+                         when (member (getf event :type) '(:tool-detached :tool-result))
+                           collect (list (getf event :type) (getf event :id)))))
+        (m:cast child '(:cancel)))))))

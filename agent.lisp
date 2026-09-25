@@ -48,6 +48,11 @@ running at once. The rest wait their turn.")
 goes on without it: the call is detached, answered with a stub for now, and its
 result folded in as a :USER message when it lands. A tool whose metadata says
 :BACKGROUND detaches at once. NIL waits for every call.")
+   (max-detached :initarg :max-detached :initform nil
+                 :type (or null (integer 1)) :reader agent-max-detached
+                 :documentation "The most calls detached at once. A call that
+would detach past it stays attached, and detaches when a slot frees. NIL is
+uncapped.")
    (max-tool-result :initarg :max-tool-result :initform nil
                     :type (or null (integer 1)) :reader agent-max-tool-result
                     :documentation "The most characters of a tool result's
@@ -93,6 +98,8 @@ string or pathname: record there instead.")
    ;; ((ref . call-id) :name n :token cancel-token :log-id id), newest first.
    (detached :initform nil :accessor %detached)
    (awaiting-detached :initform nil :accessor %awaiting-detached)
+   ;; (ref id name) of calls due to detach once a slot frees, oldest first.
+   (detach-deferred :initform nil :accessor %detach-deferred)
    (call-tokens :initform nil :accessor %call-tokens)
    (call-log-ids :initform nil :accessor %call-log-ids)
    (input-log-id :initform nil :accessor %input-log-id)
@@ -118,6 +125,7 @@ string or pathname: record there instead.")
         :sub-agents (agent-sub-agents service)
         :max-turns (agent-max-turns service)
         :tool-grace (agent-tool-grace service)
+        :max-detached (agent-max-detached service)
         :max-tool-result (agent-max-tool-result service)
         :max-context (agent-max-context service)
         :chars-per-token (%chars-per-token service)
@@ -151,7 +159,8 @@ string or pathname: record there instead.")
     (:step (step-agent service))
     (:deadline (deadline-run service))
     (:detach (destructuring-bind (ref id name) (rest message)
-               (detach-call service ref id name)))
+               (detach-call service ref id name)
+               nil))
     ;; Not routed through CALL-RESULT: a detached call has no timeout to hit,
     ;; and its cell holds a stub that TOOL-REPLY leaves alone.
     (:call-timeout (destructuring-bind (ref id) (rest message)
@@ -223,6 +232,7 @@ log or the id was used for other messages."
         (%queued service) nil
         (%detached service) nil
         (%awaiting-detached service) nil
+        (%detach-deferred service) nil
         (%call-tokens service) nil
         (%call-log-ids service) nil
         ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
@@ -663,6 +673,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :max-turns (agent-max-turns service)
                             :max-parallel-tools (agent-max-parallel-tools service)
                             :tool-grace (agent-tool-grace service)
+                            :max-detached (agent-max-detached service)
                             :max-tool-result (agent-max-tool-result service)
                             :max-context (agent-max-context service)
                             :chars-per-token (%chars-per-token service)
@@ -715,20 +726,36 @@ outstanding close the turn's calls and go on to the next turn."
 
 (defun detach-call (service ref id name)
   "Settle call ID, dispatched under step REF, with a stub while it runs on. A
-call that has answered, or belongs to an earlier step, is left alone."
+call that has answered, or belongs to an earlier step, is left alone. Past
+:MAX-DETACHED it waits for a slot instead. True when it detached."
   (let ((cell (assoc id (%pending service) :test #'equal)))
     (when (and cell (eql ref (%step-ref service)) (eq (cdr cell) :pending))
-      (push (list (cons ref id) :name name :token (call-token service id)
-                  :log-id (call-log-id service id))
-            (%detached service))
-      (setf (cdr cell) (ok :status "running" :note "the result follows in a later message"))
-      (emit-event (agent-events service) (tool-detached-event (m:agent-ref service) id name))
-      (settle-calls service)))
-  nil)
+      (if (detached-slot-free-p service)
+          (progn
+            (push (list (cons ref id) :name name :token (call-token service id)
+                        :log-id (call-log-id service id))
+                  (%detached service))
+            (setf (cdr cell) (ok :status "running" :note "the result follows in a later message"))
+            (emit-event (agent-events service) (tool-detached-event (m:agent-ref service) id name))
+            (settle-calls service)
+            t)
+          (setf (%detach-deferred service)
+                (append (%detach-deferred service) (list (list ref id name))))))))
+
+(defun detached-slot-free-p (service)
+  (let ((cap (agent-max-detached service)))
+    (or (null cap) (< (length (%detached service)) cap))))
+
+(defun detach-deferred (service)
+  "Detach the oldest deferred call that still can, now a slot is free."
+  (loop while (and (%detach-deferred service) (detached-slot-free-p service))
+        do (when (apply #'detach-call service (pop (%detach-deferred service)))
+             (return))))
 
 (defun detached-reply (service key result)
   "Log and announce the result of the detached call KEY, and queue it as a
-:USER message for the next turn, as a steer is."
+:USER message for the next turn, as a steer is. Its slot goes to a call
+deferred by :MAX-DETACHED."
   (let ((entry (assoc key (%detached service) :test #'equal)))
     (when entry
       (setf (%detached service) (remove entry (%detached service)))
@@ -743,6 +770,7 @@ call that has answered, or belongs to an earlier step, is left alone."
                                             (%cut-text (render-tool-result result)
                                                        (agent-max-tool-result service)))))
               (%steer-queue service))
+        (detach-deferred service)
         (wake-if-waiting service))))
   nil)
 
@@ -813,10 +841,19 @@ arguments."
 (defun resume-calls (service ids force)
   "Run the logged calls IDS again in the run under way, each as a detached
 call, and answer (:OK :RESUMED ((old-id . new-id) ...) :REFUSED ((id reason) ...)).
-FORCE resumes a call to a tool that is not :RESUMABLE."
+FORCE resumes a call to a tool that is not :RESUMABLE. A resumed call is
+detached, so it counts toward :MAX-DETACHED, and one past it is refused."
   (multiple-value-bind (resumed refused)
       (call-log-resume (call-log-of service) ids (m:service-name service) (%turns service)
-                       (lambda (entry) (resume-refusal service entry force)))
+                       (let ((room (a:when-let ((cap (agent-max-detached service)))
+                                     (- cap (length (%detached service))))))
+                         (lambda (entry)
+                           (multiple-value-bind (reason arguments)
+                               (resume-refusal service entry force)
+                             (cond (reason reason)
+                                   ((and room (<= room 0)) "max-detached reached")
+                                   (t (when room (decf room))
+                                      (values nil arguments)))))))
     (dolist (item resumed)
       (destructuring-bind (old new entry arguments) item
         (declare (ignore old))
@@ -847,7 +884,8 @@ or an :INTERRUPTED error where none has arrived."
 
 (defun cancel-pending-calls (service)
   "Cancel each call dispatched this turn that has no result yet."
-  (setf (%queued service) nil)
+  (setf (%queued service) nil
+        (%detach-deferred service) nil)
   (dolist (cell (%pending service))
     (when (eq (cdr cell) :pending)
       (cancel (call-token service (car cell))))))

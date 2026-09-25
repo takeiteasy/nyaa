@@ -111,6 +111,7 @@ new.
 | it is a [sub-agent](agent.md) call | `a sub-agent call cannot be resumed`[^sub] |
 | its tool is not in the agent's allow-list | `<tool> is not in this agent's tool allow-list` |
 | its tool is not [`:resumable`](tools.md) | `<tool> is not resumable`, unless `:force t` |
+| the agent is at its `:max-detached` cap | `max-detached reached` |
 
 A call is resumed once, checked and logged under one lock hold, so two
 resumes cannot both succeed. Calls that a cancel, a deadline or an
