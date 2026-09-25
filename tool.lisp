@@ -190,7 +190,7 @@ NYAA. A tool defined outside this package must still name a symbol reachable
 from here, since DEFINE-TOOL always expands in the current package."
   (intern (symbol-name name)))
 
-(defmacro define-tool (name (&key trust summary params slots) &body invoke)
+(defmacro define-tool (name (&key trust summary params slots background) &body invoke)
   "Define the tool NAME, a keyword: a service class, its METADATA and its
 :INVOKE handler, in one form. NAME is used once, for the class, the
 registration and the metadata, and cannot drift between them.
@@ -199,7 +199,9 @@ PARAMS is a literal schema, checked by VALIDATE-SCHEMA at macroexpansion --
 a bad specifier is a compile-time error. SLOTS is passed through to
 DEFSERVICE, as for TOOL-FS's sandbox root. A :DEFAULT must print and read
 back, since a call carries the schema into a generation file; the definition
-signals at load otherwise, and a mount of the tool does too.
+signals at load otherwise, and a mount of the tool does too. BACKGROUND true
+puts :BACKGROUND T in the metadata, so an agent detaches each call to it as
+soon as it is dispatched.
 
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
@@ -222,6 +224,7 @@ DEFSERVICE and DEFINE-TOOL-HANDLER directly."
                  :name ,name
                  :trust ,trust
                  :summary ,summary
+                 ,@(and background '(:background t))
                  :params (list ,@(mapcar #'%param-form params))))
          (define-tool-handler ,class (service args cancel-token)
            (let (,@(mapcar (lambda (arg-name)

@@ -58,6 +58,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:deadline` | 300000 | milliseconds for the whole run |
 | `:sub-agents` | nil | whether the model may delegate a task |
 | `:max-parallel-tools` | nil | tool calls running at once, sub-agents included; nil is uncapped |
+| `:tool-grace` | nil | milliseconds a tool call may run before the turn [goes on without it](#detached-tool-calls); nil waits for every call |
 | `:max-tool-result` | nil | most characters of a tool result's text that reach the conversation; nil is uncapped |
 | `:max-context` | nil | most tokens (estimated) a request carries, conversation and tool schemas; the oldest turns past it are left out of the request. nil is unbounded |
 | `:chars-per-token` | 3 | characters per token the estimate starts from; recalibrated from each reply |
@@ -115,7 +116,7 @@ and issues the next turn with the steer folded in, without waiting on the
 slowest call. Between turns or before `:run`, `:interrupt` does nothing extra
 and the steer waits for the next turn.
 
-The rest — `:step`, `:turn-reply`, `:tool-reply`, `:deadline` — are internal,
+The rest — `:step`, `:detach`, `:deadline` — are internal,
 driving the machine between spawned work and the agent's own mailbox.
 
 ## The result
@@ -160,6 +161,28 @@ as a running one answers. A sub-agent holds its slot for its whole run; a call
 refused by the allow-list answers at once and holds none. A call still waiting
 when the calls are closed never runs, and closes as `interrupted` like any
 other.
+
+### Detached tool calls
+
+One slow call need not hold up the turn. A call is **detached** when it runs
+past `:tool-grace`, or at once when its tool's [metadata](tools.md) says
+`:background t`:
+
+| Step | What happens |
+|---|---|
+| Detach | the call's `:tool` message is the stub `{"status":"running","note":"..."}`, `:tool-detached` is emitted, and the turn goes on. The call keeps running |
+| Result lands | it is emitted as `:tool-result` and queued as a `:user` message, `[tool call c1 (tool-x) finished: {...}]`, folded in before the next turn as a [steer](#messages) is |
+| The model stops first | with a call still detached, the run stays open and each result that lands gets a turn. `:max-turns`, `:deadline` and `:cancel` still end it |
+| The run ends | a call still detached is [cancelled](#cancelling-tool-calls), emitted as `(:error :interrupted)` and logged `:interrupted` |
+
+```lisp
+(m:mount *ctx* 'nyaa:agent :model :provider-ollama :tools '(:tool-shell)
+                           :tool-grace 5000)
+```
+
+A detached call frees its `:max-parallel-tools` slot. A sub-agent detaches like
+any other call. The result is cut to `:max-tool-result` once, when it is
+folded in. An interrupting `:steer` leaves detached calls running.[^detached]
 
 ### Capping a tool result
 
@@ -252,6 +275,7 @@ A tool call is never retried; its side effects may not be safe to repeat.
 (:type :turn-interrupted :ref r :turn n)
 (:type :turn-retry  :ref r :turn n :attempt 1 :reason (:backend-error 503 "..."))
 (:type :tool-call   :ref r :id "c1" :name :tool-shell :arguments (:cmd "ls"))
+(:type :tool-detached :ref r :id "c1" :name :tool-shell)
 (:type :tool-result :ref r :id "c1" :result (:ok (:out "...")))
 (:type :run-done    :ref r :reason :stop)
 (:type :context-trimmed :ref r :turn n :omitted (1 2 3) :truncated ((4 :from 900 :to 50))
@@ -306,7 +330,9 @@ policy (the orchestrator DSL), not this loop's.
 An agent's `snapshot` keeps `:messages` and `:turns`, not the turn or tool
 calls in flight — see [checkpoints](checkpoints.md). A checkpoint taken
 mid-run keeps the conversation, closes each unanswered tool call as
-`interrupted` and drops the abandoned turn; `restore` always lands a
+`interrupted` and drops the abandoned turn. A detached call keeps its stub and
+is listed under `:in-flight :detached`; its result is never delivered to a
+restored agent; `restore` always lands a
 not-running agent, ready for `(:run :continue t)`, and nothing more from the
 abandoned turn reaches the sink.
 
@@ -322,6 +348,13 @@ leaving the original alone -- see [forking](forking.md).
 - A streamed turn on an OpenAI-style backend reports no prompt-token count,
   so it does not recalibrate the ratio
   ([#142](https://todo.sr.ht/~takeiteasy/nyaa/142)).
+- A detached tool call is still bounded by its call timeout, the tool's
+  `:timeout` plus 5 seconds; a sub-agent is not
+  ([#183](https://todo.sr.ht/~takeiteasy/nyaa/183)).
+- Nothing caps how many calls are detached at once
+  ([#184](https://todo.sr.ht/~takeiteasy/nyaa/184)).
+- A restored agent never gets the result of a call detached when it was
+  checkpointed ([#77](https://todo.sr.ht/~takeiteasy/nyaa/77)).
 - The first turn is measured at the default ratio; an exact count before it
   needs a tokenizer ([#143](https://todo.sr.ht/~takeiteasy/nyaa/143)).
 
@@ -330,3 +363,8 @@ leaving the original alone -- see [forking](forking.md).
     or over 8 characters per token is ignored. `:max-tool-result` stays in
     characters, as do `:from` and `:to` in `:context-trimmed`. `:max-context`
     is the prompt's share of the window; leave room below it for the reply.
+
+[^detached]: The folded result is a plain `:user` message, so it counts toward
+    `:max-context` like any other and is not cut again in a request's view.
+    A result that lands while a turn is in flight waits for the next turn, and
+    one that lands after the last allowed turn is dropped with the run.

@@ -98,6 +98,7 @@
                (:file "checkpoint")
                (:file "vault")
                (:file "calls")
+               (:file "detach")
                (:file "inputs")
                (:file "image-generation")
                (:file "self"))

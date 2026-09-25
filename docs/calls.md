@@ -29,7 +29,7 @@ calls land in the same file. A [fork](forking.md) is mounted as its source was.
 | `:status` | Meaning |
 |---|---|
 | `:accepted` | dispatched, waiting for a slot under `:max-parallel-tools` |
-| `:running` | handed to its tool |
+| `:running` | handed to its tool, or [detached](agent.md#detached-tool-calls) and still running, until its result lands |
 | `:ok` | answered |
 | `:error` | the tool failed, or the call was outside the allow-list |
 | `:interrupted` | closed unanswered by `:cancel`, `:deadline`, an interrupting `:steer`, or a [restore](checkpoints.md) |

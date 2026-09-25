@@ -49,6 +49,10 @@ is exactly the `:agent`-trusted tools — `tool-fs`, `tool-plan`,
 that level, so granting the
 others to a model is explicit at the mount site.
 
+`:background t` marks a tool whose calls an [agent](agent.md#detached-tool-calls)
+detaches as soon as it dispatches them, so the turn never waits on one. It is
+an option of `define-tool` and a key of the metadata; `tool-metadata` reads it.
+
 A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
 back to `defservice` and the lower-level `define-tool-handler` directly. It
 answers two messages either way:
