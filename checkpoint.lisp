@@ -165,10 +165,17 @@ cannot bring back."
 
 ;;; --- the generation file --------------------------------------------------
 
+(defun %generation-id ()
+  "A name that sorts by the time it was made, to the microsecond, then a random
+tail so two processes in the same microsecond do not collide."
+  (multiple-value-bind (seconds microseconds) (sb-ext:get-time-of-day)
+    (multiple-value-bind (sec min hour day month year)
+        (decode-universal-time (+ seconds (encode-universal-time 0 0 0 1 1 1970 0)))
+      (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~6,'0d-~3,'0d"
+              year month day hour min sec microseconds (random 1000)))))
+
 (defun %generation-filename ()
-  (multiple-value-bind (sec min hour day month year) (get-decoded-time)
-    (format nil "~4,'0d~2,'0d~2,'0d-~2,'0d~2,'0d~2,'0d-~6,'0d.generation"
-            year month day hour min sec (random 1000000))))
+  (format nil "~a.generation" (%generation-id)))
 
 (defun %now-iso8601 (&optional (universal-time (get-universal-time)))
   (multiple-value-bind (sec min hour day month year) (decode-universal-time universal-time 0)
@@ -364,11 +371,10 @@ taken (SAVE-IMAGE, ~takeiteasy/nyaa#48)."
                               :interrupted (%entry-names (getf generation :services) :interrupted)
                               :unavailable (%entry-names (getf generation :services) :unavailable)
                               :image (%generation-image path)))
-        ;; The filename is timestamp-then-random, so sorting by it (rather
-        ;; than :CREATED, which two generations in the same second share)
-        ;; is both newest-first and a total order -- PRUNE-GENERATIONS
-        ;; must never be able to tie-break away the one CHECKPOINT just
-        ;; wrote.
+        ;; The filename sorts by the microsecond it was made, so sorting by it
+        ;; (rather than :CREATED, which two generations in the same second
+        ;; share) is newest-first and keeps the one CHECKPOINT just wrote
+        ;; out of PRUNE-GENERATIONS' reach.
         #'string> :key (lambda (g) (getf g :path))))
 
 (defun %prune-generations (dir keep)

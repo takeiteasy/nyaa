@@ -158,12 +158,17 @@
 
 (test checkpoint-keep-prunes-the-oldest-generations
   (with-checkpoints (dir)
-    (nyaa:checkpoint *ckpt-context* :dir dir)
-    (sleep 1.1)
-    (nyaa:checkpoint *ckpt-context* :dir dir)
-    (sleep 1.1)
-    (nyaa:checkpoint *ckpt-context* :dir dir :keep 2)
-    (is (eql 2 (length (nyaa:generations :dir dir))))))
+    (dotimes (n 3)
+      (nyaa:checkpoint *ckpt-context* :dir dir :label (princ-to-string n)))
+    (nyaa:checkpoint *ckpt-context* :dir dir :keep 2 :label "3")
+    (is (equal '("3" "2") (mapcar (lambda (g) (getf g :label)) (nyaa:generations :dir dir))))))
+
+(test checkpoint-keep-keeps-the-generation-just-written
+  (with-checkpoints (dir)
+    (dotimes (n 20)
+      (let ((path (nyaa:checkpoint *ckpt-context* :dir dir :keep 1)))
+        (is (equal (list (namestring path))
+                   (mapcar (lambda (g) (getf g :path)) (nyaa:generations :dir dir))))))))
 
 ;;; --- the agent's own snapshot ---------------------------------------------
 

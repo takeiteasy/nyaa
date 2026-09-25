@@ -6,13 +6,13 @@ one; `rollback` puts it back, mounting again a service that has gone.
 
 ```lisp
 (nyaa:checkpoint *ctx* :label "before edit")
-;; => #P"~/.nyaa/generations/20260922-171610-129774.generation"
+;; => #P"~/.nyaa/generations/20260922-171610-129774-482.generation"
 
 (nyaa:generations)
 ;; => ((:path #P"..." :created "2026-09-22T17:16:10Z" :label "before edit"
 ;;      :services (:tool-fs :assistant)) ...)
 
-(nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774.generation"
+(nyaa:rollback *ctx* "~/.nyaa/generations/20260922-171610-129774-482.generation"
                :timeout 30)
 ;; => (:ok (:restored (:tool-fs :assistant) :failed nil :failures nil :interrupted nil
 ;;          :unavailable nil :remounted nil :unremounted nil :missing nil
