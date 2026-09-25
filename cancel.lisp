@@ -5,7 +5,10 @@
 ;;; without a service to address it to.
 
 (defstruct (cancel-token (:constructor make-cancel-token ()))
-  (lock (bt:make-lock)) cancelled actions)
+  (lock (bt:make-lock)) cancelled actions
+  ;; :QUEUED until a tool's handler starts the call, :RUNNING while it runs,
+  ;; then :SETTLED, which SETTLED signals.
+  (phase :queued) (settled (bt:make-semaphore)))
 
 (defun cancelled-p (token)
   (bt:with-lock-held ((cancel-token-lock token))
@@ -27,3 +30,10 @@ time."
                      (shiftf (cancel-token-actions token) nil)))))
     (mapc #'funcall actions)
     (and actions t)))
+
+(defun stuck-p (token grace)
+  "True when the call TOKEN was passed to is running and, GRACE seconds on,
+has still not returned. A call that has not started is not stuck: it sees
+TOKEN cancelled and answers without running."
+  (and (eq (cancel-token-phase token) :running)
+       (not (bt:wait-on-semaphore (cancel-token-settled token) :timeout grace))))

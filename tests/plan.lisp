@@ -34,6 +34,16 @@
              (sleep 0.01))
     (nyaa::ok)))
 
+;;; Ignores its cancel token and any timeout: sleeps the whole time asked.
+
+(nyaa:define-tool :tool-stubborn
+    (:trust :agent
+     :summary "Sleep for :ms milliseconds, whatever happens"
+     :params ((:ms (integer 0) :required t :doc "milliseconds to sleep")))
+  (:invoke (ms)
+    (sleep (/ ms 1000.0))
+    (nyaa::ok :slept ms)))
+
 ;;; Declares its own :TIMEOUT and reports what it was given.
 
 (nyaa:define-tool :tool-timeout-echo
@@ -217,6 +227,39 @@
         (is (not (sandbox-file-exists-p "never.txt")))
         (sleep 0.2)
         (is-true *saw-cancel*)))
+    :extra '(tool-patient)))
+
+(defun plan-ok-eventually (steps)
+  "PLAN STEPS, retried for a few seconds while the tool it names is still
+being restarted."
+  (loop repeat 50
+        for result = (plan steps)
+        unless (nyaa:tool-error-p result) do (return result)
+        do (sleep 0.1)))
+
+(test a-step-that-ignores-cancel-is-killed-and-restarted
+  (call-with-plan '(:tool-fs :tool-stubborn) 16
+    (lambda ()
+      (let* ((before (m:lookup :tool-stubborn))
+             (result (plan (list (list :tool "tool-stubborn" :args (list :ms 30000)))
+                           200)))
+        (is (timed-out-at-step-p result 1))
+        (is (not (m:process-alive-p before)))
+        (let ((again (plan-ok-eventually
+                      (list (list :as "s" :tool "tool-stubborn" :args (list :ms 10))))))
+          (is (not (null again)))
+          (is (eq :ok (first again))))))
+    :extra '(tool-stubborn)))
+
+(test a-step-that-honours-cancel-is-not-killed
+  (call-with-plan '(:tool-fs :tool-patient) 16
+    (lambda ()
+      (let* ((before (m:lookup :tool-patient))
+             (result (plan (list (list :tool "tool-patient" :args (list :ms 5000))) 200)))
+        (is (timed-out-at-step-p result 1))
+        (sleep 0.2)
+        (is (m:process-alive-p before))
+        (is (eq before (m:lookup :tool-patient)))))
     :extra '(tool-patient)))
 
 (test a-step-timeout-is-clamped-to-the-plan-deadline

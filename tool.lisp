@@ -155,7 +155,13 @@ HANDLE, so a tool must not use those heads."
                           (declare (ignorable ,args))
                           (if ,problem
                               (bad-request "~a" ,problem)
-                              (progn ,@body))))))
+                              (unwind-protect
+                                   (progn (when ,cancel
+                                            (setf (cancel-token-phase ,cancel) :running))
+                                          ,@body)
+                                (when ,cancel
+                                  (setf (cancel-token-phase ,cancel) :settled)
+                                  (bt:signal-semaphore (cancel-token-settled ,cancel)))))))))
          ;; Checkpoints (~takeiteasy/nyaa#11): every tool answers these
          ;; through SNAPSHOT/RESTORE, which default to NIL, so a tool that
          ;; holds no state worth carrying needs no method of its own.

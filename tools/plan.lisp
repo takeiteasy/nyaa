@@ -30,8 +30,8 @@
 ;;;
 ;;; :timeout bounds the whole plan, each step included: a step's own :timeout
 ;;; is clamped to the time left, the wait on it ends when that lapses, and
-;;; its cancel token is then cancelled. A tool that honours neither keeps
-;;; running on after the plan returns (~takeiteasy/nyaa#145).
+;;; its cancel token is then cancelled. A tool that honours neither is killed
+;;; a grace period later, and its supervisor restarts it (~takeiteasy/nyaa#145).
 
 (define-tool :tool-plan
     (:trust :agent
@@ -165,10 +165,15 @@ cancelled plan stops the step in flight and refuses the rest."
               (setf (gethash as results) (second result))))))
       (ok :results (plan-results-plist results) :steps n))))
 
+(defconstant +plan-kill-grace+ 1
+  "Seconds a timed-out step's tool gets to notice its cancel token before it
+is killed.")
+
 (defun invoke-step (name args cancel left-ms)
   "INVOKE-TOOL for one step, held to LEFT-MS: a :TIMEOUT the tool declares is
 clamped to it, and the wait on the tool ends with it, cancelling the tool's
-own token. That token is cancelled with CANCEL."
+own token. A tool still running +PLAN-KILL-GRACE+ seconds after that is
+killed, and its supervisor restarts it. That token is cancelled with CANCEL."
   (let ((token (make-cancel-token)))
     (when cancel
       (on-cancel cancel (lambda () (cancel token))))
@@ -179,7 +184,9 @@ own token. That token is cancelled with CANCEL."
           (multiple-value-bind (reply status)
               (m:call process message :timeout (min timeout (/ left-ms 1000.0)))
             (when (eq status :timeout)
-              (cancel token))
+              (cancel token)
+              (when (stuck-p token +plan-kill-grace+)
+                (m:kill process)))
             (%call-result reply status))))))
 
 (defun clamp-timeout (name args left-ms)
