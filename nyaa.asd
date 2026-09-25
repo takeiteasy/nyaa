@@ -7,7 +7,7 @@
   :license "GPLv3"
   :version "0.1.0"
   :depends-on ("meow" "meow/logger" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
-               "usocket" "bordeaux-threads" "uiop" "puri" "chunga" "cl+ssl")
+               "usocket" "bordeaux-threads" "uiop" "puri" "chunga" "cl+ssl" "cl-base64")
   :serial t
   :components ((:file "package")
                (:file "nyaa")

@@ -142,7 +142,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 |---|---|---|
 | `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
-| `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the response body is decoded as text ([below](#tool-http-text)). |
+| `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the body comes back as text or base64, named by `:body-encoding` ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. An id idle past the mount's `:idle` (600 s by default) is dropped. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
@@ -200,9 +200,17 @@ against time since the last one finished, not time since the session
 started.
 
 <a id="tool-http-text"></a>
-`tool-http` decodes a response body in the charset its `Content-Type`
-declares, else as UTF-8, else as Latin-1 when the bytes are not valid UTF-8.
+`tool-http` answers `:body` with `:body-encoding` `"text"` or `"base64"`:
 
+
+| `Content-Type` | `:body` | `:body-encoding` |
+|---|---|---|
+| `text/*`, JSON, XML, JavaScript (also `+json`, `+xml`), form data | decoded in the declared charset, else UTF-8, else Latin-1 | `"text"` |
+| none, bytes valid UTF-8 | decoded as UTF-8 | `"text"` |
+| none, bytes not valid UTF-8 | base64 | `"base64"` |
+| anything else (`image/png`, `application/zip`, ...) | base64 | `"base64"` |
+
+An empty body is `""`, `"text"`.
 `tool-http` folds a caller-supplied `Content-Type` into drakma's own argument,
 so it is sent once, as asked, rather than duplicated or overridden.
 
@@ -303,8 +311,11 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- `tool-http` returns a non-text body as garbled text rather than an error
-  ([#138](https://todo.sr.ht/~takeiteasy/nyaa/138)).
+- `tool-fs` is text only, so a base64 `tool-http` body cannot be written to a
+  file as bytes ([#155](https://todo.sr.ht/~takeiteasy/nyaa/155)).
+- `define-tool` checks that a `:default` reads back, but a tool built from
+  `defservice` and `define-tool-handler` is not checked
+  ([#156](https://todo.sr.ht/~takeiteasy/nyaa/156)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).

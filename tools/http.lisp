@@ -2,7 +2,8 @@
 
 ;;; Single-shot HTTP client. One request in, one response out, bounded by a
 ;;; caller deadline. Redirects are not followed and statuses pass through
-;;; untouched: callers decide what a 3xx or a 404 means for them.
+;;; untouched: callers decide what a 3xx or a 404 means for them. A text body
+;;; comes back as a string and any other as base64, named by :BODY-ENCODING.
 ;;;
 ;;; The exchange runs under CALL-WITH-DEADLINE, which owns the connection so
 ;;; the deadline or a cancel can close it.
@@ -54,11 +55,14 @@
                          :content-type (or (cdr (assoc "content-type" headers
                                                        :test #'string=))
                                            "application/octet-stream"))))
-        (ok :status status
-            :headers (loop for (name . value) in response-headers
-                           collect (string-downcase (string name))
-                           collect value)
-            :body (decode-body payload (cdr (assoc :content-type response-headers)))))
+        (multiple-value-bind (body encoding)
+            (decode-body payload (cdr (assoc :content-type response-headers)))
+          (ok :status status
+              :headers (loop for (name . value) in response-headers
+                             collect (string-downcase (string name))
+                             collect value)
+              :body body
+              :body-encoding encoding)))
     (usocket:socket-error () (fail :unavailable))
     (error (e) (fail (list :error (princ-to-string e))))))
 
@@ -70,14 +74,34 @@ names none or one flexi-streams does not know."
                                                   (position #\; content-type :start start)))))
     (find-symbol (string-upcase name) :keyword)))
 
+(defun text-media-type-p (content-type)
+  "Whether CONTENT-TYPE's media type, ignoring its parameters, is text: text/*,
+form data, or JSON, XML or JavaScript in any spelling such as +json."
+  (let ((type (string-downcase
+               (string-trim " " (subseq content-type 0 (position #\; content-type))))))
+    (or (a:starts-with-subseq "text/" type)
+        (string= type "application/x-www-form-urlencoded")
+        (some (lambda (word) (search word type)) '("json" "xml" "javascript")))))
+
 (defun decode-body (octets content-type)
-  "OCTETS as text: in the charset CONTENT-TYPE declares, else UTF-8, else
-Latin-1 when they are not valid UTF-8. Drakma is asked for octets because
-it would otherwise decode a text type with no charset as Latin-1."
+  "OCTETS as (values body encoding). A text CONTENT-TYPE is decoded to a
+string in its declared charset, else UTF-8, else Latin-1, with encoding
+\"text\". No CONTENT-TYPE is text only when the bytes are valid UTF-8. Anything
+else is base64, encoding \"base64\". Drakma is asked for octets because it
+would otherwise decode a text type with no charset as Latin-1."
   (flet ((decode (format)
-           (ignore-errors (flexi-streams:octets-to-string octets :external-format format))))
-    (or (and (null octets) "")
-        (a:when-let ((format (declared-charset content-type)))
-          (decode format))
-        (decode :utf-8)
-        (decode :latin-1))))
+           (ignore-errors (flexi-streams:octets-to-string octets :external-format format)))
+         (base64 ()
+           (values (cl-base64:usb8-array-to-base64-string octets) "base64")))
+    (cond ((zerop (length octets)) (values "" "text"))
+          ((null content-type)
+           (a:if-let ((text (decode :utf-8)))
+             (values text "text")
+             (base64)))
+          ((text-media-type-p content-type)
+           (values (or (a:when-let ((format (declared-charset content-type)))
+                         (decode format))
+                       (decode :utf-8)
+                       (decode :latin-1))
+                   "text"))
+          (t (base64)))))

@@ -593,6 +593,54 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   (with-tools
     (is (equal "" (http-body-of (list 204 '() ""))))))
 
+(defun http-result-of (answer)
+  "The whole (:ok plist) tool-http returns for a server that answers ANSWER."
+  (let ((server (start-fake-http (lambda (&rest request)
+                                   (declare (ignore request))
+                                   answer))))
+    (unwind-protect
+         (tool :tool-http :url (format nil "~a/any" (fake-http-url server)))
+      (stop-fake-http server))))
+
+(defparameter +png-octets+ (octets #x89 80 78 71 13 10 26 10 0 255 254))
+
+(test http-returns-a-non-text-body-as-base64
+  (with-tools
+    (let ((result (http-result-of (list :octets 200 '("Content-Type" "image/png")
+                                        +png-octets+))))
+      (is (equal "base64" (result-value result :body-encoding)))
+      (is (equalp +png-octets+
+                  (cl-base64:base64-string-to-usb8-array (result-value result :body)))))))
+
+(test http-labels-a-text-body-as-text
+  (with-tools
+    (is (equal "text" (result-value (http-result-of (list 200 '("Content-Type" "text/plain") "hi"))
+                                    :body-encoding)))))
+
+(test http-treats-a-structured-suffix-type-as-text
+  (with-tools
+    (let ((result (http-result-of (list :octets 200
+                                        '("Content-Type" "application/vnd.x+json; charset=utf-8")
+                                        (utf-8-octets "{}")))))
+      (is (equal "{}" (result-value result :body)))
+      (is (equal "text" (result-value result :body-encoding))))))
+
+(test http-decodes-utf-8-with-no-content-type-as-text
+  (with-tools
+    (let ((result (http-result-of (list :octets 200 '() (utf-8-octets +non-ascii-text+)))))
+      (is (equal +non-ascii-text+ (result-value result :body)))
+      (is (equal "text" (result-value result :body-encoding))))))
+
+(test http-returns-invalid-utf-8-with-no-content-type-as-base64
+  (with-tools
+    (is (equal "base64"
+               (result-value (http-result-of (list :octets 200 '() (octets 104 233 108)))
+                             :body-encoding)))))
+
+(test http-returns-an-empty-non-text-body-as-an-empty-string
+  (with-tools
+    (is (equal "" (http-body-of (list :octets 200 '("Content-Type" "image/png") (octets)))))))
+
 (test declared-charset-reads-the-charset-parameter
   (is (eq :utf-8 (nyaa::declared-charset "text/plain; charset=UTF-8")))
   (is (eq :utf-8 (nyaa::declared-charset "text/plain; charset=\"utf-8\"; format=flowed")))
