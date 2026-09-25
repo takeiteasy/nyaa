@@ -375,10 +375,7 @@ another process holds or that is already consumed."
   (close-detached service :abandoned)
   (record-input-done service :abandoned)
   (retire-emitters service)
-  ;; TODO: a :temporary agent exits :done, as one about to restart does, so
-  ;; its subscribers outlive it and a later mount of the name inherits them.
-  ;; Needs meow to tell the service it will not be restarted (#197).
-  (when (eq reason :shutdown)
+  (when (or (eq reason :shutdown) (not (m:will-restart-p service reason)))
     (setf (subscribers service) nil)))
 
 (defun cancel-run (service)

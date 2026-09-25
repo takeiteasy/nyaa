@@ -47,7 +47,8 @@ A `sink` is a function, a symbol naming one, or a meow process.
 | Snapshots | subscribers are not part of a [checkpoint](checkpoints.md) |
 
 Subscriptions belong to the agent's name, so they outlive the restart after
-each run and end when the agent is unmounted.[^subscribers] A sub-agent has no
+each run and end when the agent is unmounted or exits and is not
+restarted.[^subscribers] A sub-agent has no
 subscribers of its own: its events reach its parent's.
 
 ## Events
@@ -112,9 +113,6 @@ says a run is under way and its turn.
 
 - A subscriber that attaches mid-run cannot see the run so far, only what
   follows ([#196](https://todo.sr.ht/~takeiteasy/nyaa/196)).
-- A `:temporary` agent's subscribers outlive it, and a later mount under the
-  same name inherits them
-  ([#197](https://todo.sr.ht/~takeiteasy/nyaa/197)).
 - Operator approvals ([#118](https://todo.sr.ht/~takeiteasy/nyaa/118)) and the
   live list of agents and sub-agents
   ([#121](https://todo.sr.ht/~takeiteasy/nyaa/121)) are not part of the

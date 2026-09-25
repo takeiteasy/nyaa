@@ -162,6 +162,19 @@ restarting it after its last run. Returns the answer."
         (recorded-events fresh)
         (is (eql 1 (run-dones recorder)))))))
 
+(test a-subscription-goes-with-a-temporary-agent-that-will-not-restart
+  (with-agent ((streamed-reply "ok"))
+    (let ((recorder (make-recorder)))
+      (mount-assistant :restart :temporary)
+      (send-to-assistant (list :subscribe (recorder-sink recorder)))
+      (run-assistant recorder 1)
+      (is-true (eventually (lambda () (null (m:lookup :assistant)))))
+      (let ((fresh (make-recorder)))
+        (mount-assistant :sink (recorder-sink fresh))
+        (run-assistant fresh 1)
+        (recorded-events fresh)
+        (is (eql 1 (run-dones recorder)))))))
+
 (test a-sub-agents-events-carry-parent-and-do-not-end-the-parents
   (let ((n 0))
     (with-agent ((lambda (&rest request)
