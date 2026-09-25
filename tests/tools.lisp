@@ -295,6 +295,48 @@ last resort with no dedicated OS mechanism behind it."
     (is (equal '(:forbidden "path escapes sandbox root")
                (nyaa:tool-error (tool :tool-fs :op :read :path "alias.txt"))))))
 
+(test fs-rmdir-removes-an-empty-directory
+  (with-tools
+    (tool :tool-fs :op :mkdir :path "gone/inner")
+    (is (eq :ok (first (tool :tool-fs :op :rmdir :path "gone/inner"))))
+    (is (null (result-value (tool :tool-fs :op :list :path "gone") :files)))
+    (is (eq :ok (first (tool :tool-fs :op :rmdir :path "gone"))))
+    (is (not (member "gone" (result-value (tool :tool-fs :op :list :path ".") :files)
+                     :test #'string=)))))
+
+(test fs-rmdir-refuses-a-non-empty-directory
+  (with-tools
+    (tool :tool-fs :op :write :path "full/a.txt" :data "x")
+    (is (equal '(:bad-request "directory not empty")
+               (nyaa:tool-error (tool :tool-fs :op :rmdir :path "full"))))
+    (is (equal "x" (result-value (tool :tool-fs :op :read :path "full/a.txt") :data)))))
+
+(test fs-rmdir-refuses-a-file
+  (with-tools
+    (tool :tool-fs :op :write :path "f.txt" :data "x")
+    (is (equal '(:bad-request "not a directory")
+               (nyaa:tool-error (tool :tool-fs :op :rmdir :path "f.txt"))))
+    (is (equal "x" (result-value (tool :tool-fs :op :read :path "f.txt") :data)))))
+
+(test fs-rmdir-refuses-a-symlink-leaf
+  (with-tools
+    (tool :tool-fs :op :mkdir :path "real")
+    (make-symlink (concatenate 'string *sandbox* "/real")
+                  (concatenate 'string *sandbox* "/alias"))
+    (is (equal '(:forbidden "path escapes sandbox root")
+               (nyaa:tool-error (tool :tool-fs :op :rmdir :path "alias"))))
+    (is (eq :ok (first (tool :tool-fs :op :list :path "real"))))))
+
+(test fs-rmdir-refuses-the-root
+  (with-tools
+    (is (equal :bad-request (first (nyaa:tool-error (tool :tool-fs :op :rmdir :path ".")))))
+    (is (eq :ok (first (tool :tool-fs :op :list :path "."))))))
+
+(test fs-rmdir-reports-a-missing-path
+  (with-tools
+    (is (equal '(:error "no such file")
+               (nyaa:tool-error (tool :tool-fs :op :rmdir :path "nope"))))))
+
 (test fs-refuses-to-delete-a-symlink-leaf
   (with-tools
     (tool :tool-fs :op :write :path "real.txt" :data "hello")

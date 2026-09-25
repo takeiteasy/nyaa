@@ -4,10 +4,10 @@
 
 (define-tool :tool-fs
     (:trust :agent
-     :summary "Read, write, list and delete files inside the sandboxed root"
+     :summary "Read, write, list and delete files, and remove empty directories, inside the sandboxed root"
      :slots ((root :initarg :root :reader fs-root :type string)
              (hide-links :initarg :hide-links :initform nil :reader fs-hide-links))
-     :params ((:op (member :read :write :list :mkdir :delete) :required t
+     :params ((:op (member :read :write :list :mkdir :delete :rmdir) :required t
                :doc "operation to perform")
               (:path string :required t
                :doc "path relative to the sandbox root")
@@ -103,6 +103,7 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
                  (:write (fs-op-write dirfd leaf data))
                  (:mkdir (fs-op-mkdir dirfd leaf))
                  (:delete (fs-op-delete dirfd leaf))
+                 (:rmdir (fs-op-rmdir dirfd leaf))
                  (t (bad-request "unknown op ~s" op)))
             (fs-close dirfd))))))
 
@@ -154,6 +155,22 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
                ;; Linux reports EISDIR for the same attempt.
                ((member errno '(:eisdir :eperm)) (bad-request "delete refuses directories"))
                (t (errno-result errno)))))))
+
+;;; The kernel refuses a non-empty directory, so no recursive removal is possible.
+
+(defun fs-op-rmdir (dirfd leaf)
+  (if (null leaf)
+      (bad-request "rmdir refuses the sandbox root")
+      ;; Before the unlink: a symlink to a directory also fails ENOTDIR.
+      (if (fs-symlink-leaf-p dirfd leaf)
+          (fail (list :forbidden "path escapes sandbox root"))
+          (multiple-value-bind (success errno) (fs-rmdir-leaf dirfd leaf)
+            (declare (ignore success))
+            (case errno
+              ((nil) (ok))
+              ((:enotempty :eexist) (bad-request "directory not empty"))
+              (:enotdir (bad-request "not a directory"))
+              (t (errno-result errno)))))))
 
 (defun fs-slurp-fd (fd)
   (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))

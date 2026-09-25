@@ -140,7 +140,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
+| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`, `rmdir`. `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the body comes back as text or base64, named by `:body-encoding` ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
@@ -171,8 +171,9 @@ and refuse one. Each tool's exact types are in its `:params`; see
 (m:mount context 'nyaa:tool-vault)
 ```
 
-`tool-fs` refuses to delete directories, and offers no recursive delete: a tool
-this easy to call should not be able to `rm -rf`.
+`tool-fs` `delete` refuses directories, and there is no recursive delete: a tool
+this easy to call should not be able to `rm -rf`. `rmdir` removes a directory
+only when it is empty, and refuses a file, a symlink and the sandbox root.
 
 `tool-eval` and `tool-repl` answer `(:ok (:value "<printed first value>"
 :values ("<printed value>" ...) :out "<what the form printed>" :elided

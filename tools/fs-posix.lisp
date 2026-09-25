@@ -20,6 +20,7 @@
         ((= errno sb-posix:enotdir) :enotdir)
         ((= errno sb-posix:eisdir) :eisdir)
         ((= errno sb-posix:eperm) :eperm)
+        ((= errno sb-posix:enotempty) :enotempty)
         ((= errno sb-posix:eloop) :eloop)
         (t :other)))
 
@@ -50,6 +51,9 @@ nothing runs between the failing call and here."
 
 (sb-alien:define-alien-routine ("unlinkat" %unlinkat) sb-alien:int
   (dirfd sb-alien:int) (name sb-alien:c-string) (flags sb-alien:int))
+
+;;; Not exported by sb-posix.
+(defconstant +at-removedir+ #+darwin #x80 #+linux #x200)
 
 (sb-alien:define-alien-routine ("readlinkat" %readlinkat) sb-alien:long
   (dirfd sb-alien:int) (name sb-alien:c-string)
@@ -96,6 +100,11 @@ errno keyword."
 
 (defun fs-unlink-leaf (dirfd name)
   (syscall-result t (minusp (%unlinkat dirfd name 0))))
+
+(defun fs-rmdir-leaf (dirfd name)
+  "T on success, or (values nil errno-keyword). Fails on a directory that is
+not empty, and on anything that is not a directory."
+  (syscall-result t (minusp (%unlinkat dirfd name +at-removedir+))))
 
 (defun fs-symlink-leaf-p (dirfd name)
   "True when NAME under DIRFD is itself a symlink, dangling or not.

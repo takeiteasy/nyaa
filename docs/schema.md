@@ -7,7 +7,7 @@ an external tool arrives with. One validator, one coercion path.
 ```lisp
 :params '((:cmd     string                     :doc "command string to run")
           (:timeout (integer 1) :default 30000 :doc "kill after this many ms")
-          (:op      (member :read :write :list :mkdir :delete) :required t
+          (:op      (member :read :write :list :mkdir :delete :rmdir) :required t
                     :doc "operation to perform"))
 ```
 
