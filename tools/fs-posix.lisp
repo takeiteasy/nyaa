@@ -2,147 +2,151 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute) (require :sb-posix))
 
-;;; Primitives for tool-fs's atomic sandbox walk (~takeiteasy/nyaa#52, #53),
-;;; via sb-posix. Each path component is opened with O_NOFOLLOW -- refusing
-;;; a symlink outright rather than resolving it -- and FCHDIR steps the
-;;; process into it. The final component is then operated on relative to
-;;; that directory, so the check that it is not a symlink and the operation
-;;; itself share one file descriptor and cannot be swapped apart.
+;;; Primitives for tool-fs's atomic sandbox walk (~takeiteasy/nyaa#52, #53,
+;;; #59). Each path component is opened with O_NOFOLLOW relative to the
+;;; directory fd held for its parent -- refusing a symlink outright rather
+;;; than resolving it -- and the final component is operated on relative to
+;;; the last fd, so the check that it is not a symlink and the operation share
+;;; one file descriptor and cannot be swapped apart. The process's current
+;;; directory is never touched.
 ;;;
-;;; TODO: the process's current directory is one global resource, and every
-;;; step of the walk mutates it under *FS-LOCK* -- which serialises tool-fs
-;;; against itself, but not against any other code in the process that
-;;; reads or sets the cwd without taking this lock. Upgrade path: openat(2),
-;;; mkdirat(2), unlinkat(2) and fdopendir(2)/readdir(2) against a held
-;;; directory fd, via sb-alien, once worth the FFI surface. Tracked in
-;;; ~takeiteasy/nyaa#59.
-
-(defvar *fs-lock* (bt:make-lock :name "nyaa-fs-walk")
-  "Serialises tool-fs's directory walk, which works by changing the
-process's current directory. See the TODO above FS-WALK.")
+;;; sb-posix carries none of the *at calls, so they are bound here.
 
 ;;; --- errno, normalised to keywords -----------------------------------
 
+(defun errno-keyword (errno)
+  (cond ((= errno sb-posix:enoent) :enoent)
+        ((= errno sb-posix:eexist) :eexist)
+        ((= errno sb-posix:enotdir) :enotdir)
+        ((= errno sb-posix:eisdir) :eisdir)
+        ((= errno sb-posix:eperm) :eperm)
+        ((= errno sb-posix:eloop) :eloop)
+        (t :other)))
+
 (defun sb-posix-errno-keyword (condition)
-  (let ((errno (sb-posix:syscall-errno condition)))
-    (cond ((= errno sb-posix:enoent) :enoent)
-          ((= errno sb-posix:eexist) :eexist)
-          ((= errno sb-posix:enotdir) :enotdir)
-          ((= errno sb-posix:eisdir) :eisdir)
-          ((= errno sb-posix:eperm) :eperm)
-          ((= errno sb-posix:eloop) :eloop)
-          (t :other))))
+  (errno-keyword (sb-posix:syscall-errno condition)))
 
-;;; --- open a directory component, O_NOFOLLOW ---------------------------
-;;; Returns an fd, or (values nil errno-kw).
+(defun syscall-result (value failed)
+  "VALUE, or (values nil errno-keyword) when FAILED. Reads errno at once, so
+nothing runs between the failing call and here."
+  (if failed
+      (values nil (errno-keyword (sb-alien:get-errno)))
+      (values value nil)))
 
-(defun fs-open-dir-component (name)
-  (handler-case (values (sb-posix:open name (logior sb-posix:o-directory
+;;; --- the *at calls ----------------------------------------------------
+
+;;; openat(2) is variadic: on arm64 macOS a variadic argument travels on the
+;;; stack, so binding MODE as an ordinary fixed argument hands the kernel
+;;; garbage. Declaring it after &OPTIONAL makes SBCL use the variadic
+;;; convention, as sb-posix's own OPEN does.
+(defun %openat (dirfd name flags mode)
+  (sb-alien:alien-funcall
+   (sb-alien:extern-alien "openat" (function sb-alien:int sb-alien:int sb-alien:c-string
+                                             sb-alien:int &optional sb-alien:unsigned-int))
+   dirfd name flags mode))
+
+(sb-alien:define-alien-routine ("mkdirat" %mkdirat) sb-alien:int
+  (dirfd sb-alien:int) (name sb-alien:c-string) (mode sb-alien:unsigned-int))
+
+(sb-alien:define-alien-routine ("unlinkat" %unlinkat) sb-alien:int
+  (dirfd sb-alien:int) (name sb-alien:c-string) (flags sb-alien:int))
+
+(sb-alien:define-alien-routine ("readlinkat" %readlinkat) sb-alien:long
+  (dirfd sb-alien:int) (name sb-alien:c-string)
+  (buffer (* sb-alien:char)) (size sb-alien:unsigned-long))
+
+(sb-alien:define-alien-routine ("fdopendir" %fdopendir) sb-alien:system-area-pointer
+  (fd sb-alien:int))
+
+;;; --- directory fds ----------------------------------------------------
+;;; Each returns an fd, or (values nil errno-kw).
+
+(defun fs-open-root (root)
+  (handler-case (values (sb-posix:open root (logior sb-posix:o-directory
                                                      sb-posix:o-nofollow))
                         nil)
     (sb-posix:syscall-error (e) (values nil (sb-posix-errno-keyword e)))))
 
-(defun fs-fchdir (fd)
-  (handler-case (progn (sb-posix:fchdir fd) t)
-    (sb-posix:syscall-error () nil)))
+(defun fs-open-dir (dirfd name)
+  "NAME under DIRFD as a directory, refusing a symlink."
+  (let ((fd (%openat dirfd name (logior sb-posix:o-directory sb-posix:o-nofollow) 0)))
+    (syscall-result fd (minusp fd))))
 
 (defun fs-close (fd)
   (ignore-errors (sb-posix:close fd)))
 
 ;;; --- the leaf: open, mkdir, unlink, readlink, list --------------------
 
-(defun fs-open-leaf (name flags mode)
-  "NAME under the current directory, opened with FLAGS (a list of :RDONLY
-:WRONLY :CREAT :TRUNC), always with O_NOFOLLOW added. Returns an fd, or
-(values nil errno-keyword)."
-  (handler-case
-      (values (sb-posix:open name
-                             (logior sb-posix:o-nofollow
-                                     (if (member :wronly flags) sb-posix:o-wronly sb-posix:o-rdonly)
-                                     (if (member :creat flags) sb-posix:o-creat 0)
-                                     (if (member :trunc flags) sb-posix:o-trunc 0))
-                             mode)
-              nil)
-    (sb-posix:syscall-error (e) (values nil (sb-posix-errno-keyword e)))))
+(defun fs-open-leaf (dirfd name flags mode)
+  "NAME under DIRFD, opened with FLAGS (a list of :RDONLY :WRONLY :CREAT
+:TRUNC), always with O_NOFOLLOW added. Returns an fd, or (values nil
+errno-keyword)."
+  (let ((fd (%openat dirfd name
+                     (logior sb-posix:o-nofollow
+                             (if (member :wronly flags) sb-posix:o-wronly sb-posix:o-rdonly)
+                             (if (member :creat flags) sb-posix:o-creat 0)
+                             (if (member :trunc flags) sb-posix:o-trunc 0))
+                     mode)))
+    (syscall-result fd (minusp fd))))
 
-(defun fs-mkdir-leaf (name mode)
+(defun fs-mkdir-leaf (dirfd name mode)
   "T on success, (values nil :eexist) if it is already there, or another
 errno keyword."
-  (handler-case (progn (sb-posix:mkdir name mode) t)
-    (sb-posix:syscall-error (e) (values nil (sb-posix-errno-keyword e)))))
+  (syscall-result t (minusp (%mkdirat dirfd name mode))))
 
-(defun fs-unlink-leaf (name)
-  (handler-case (progn (sb-posix:unlink name) t)
-    (sb-posix:syscall-error (e) (values nil (sb-posix-errno-keyword e)))))
+(defun fs-unlink-leaf (dirfd name)
+  (syscall-result t (minusp (%unlinkat dirfd name 0))))
 
-(defun fs-symlink-leaf-p (name)
-  "True when NAME (relative to the current directory) is itself a symlink,
-dangling or not. READLINK fails with EINVAL on anything else, which is
-enough to tell the two apart without a full STAT."
-  (and (ignore-errors (sb-posix:readlink name)) t))
+(defun fs-symlink-leaf-p (dirfd name)
+  "True when NAME under DIRFD is itself a symlink, dangling or not.
+READLINKAT fails with EINVAL on anything else, which is enough to tell the
+two apart without a full STAT."
+  (sb-alien:with-alien ((buffer (array sb-alien:char 8)))
+    (not (minusp (%readlinkat dirfd name (sb-alien:cast buffer (* sb-alien:char)) 8)))))
 
-(defun fs-list-names ()
-  "Every entry of the current directory, sorted. Listing is not part of the
-O_NOFOLLOW walk above -- by the time this runs, FS-WALK has already
-positioned the process inside a directory it verified was not a symlink,
-so an ordinary (and portable) directory listing is safe here.
-
-UIOP:DIRECTORY-FILES and UIOP:SUBDIRECTORIES merge \".\" against
-*DEFAULT-PATHNAME-DEFAULTS*, a Lisp-level variable FCHDIR does not touch --
-not against the OS's own idea of the current directory -- so the walk's
-FCHDIR is invisible to them unless the directory is named explicitly.
-UIOP:GETCWD does call GETCWD(2), so it is used here instead of \".\".
-
-This does mean :LIST re-resolves a path by name rather than reading the fd
-FS-WALK already validated -- a narrower race than the one #52 closed for
-the other ops, since all it can do is list the wrong directory's names,
-never open, write or delete outside the root. Covered by the same TODO
-above."
-  (let ((here (uiop:getcwd)))
-    (sort (append (mapcar #'fs-entry-name (uiop:subdirectories here))
-                 (mapcar #'fs-entry-name (uiop:directory-files here)))
-          #'string<)))
-
-(defun fs-entry-name (pathname)
-  (if (uiop:directory-pathname-p pathname)
-      (car (last (pathname-directory pathname)))
-      (file-namestring pathname)))
+(defun fs-list-names (dirfd name &key hide-links)
+  "Every entry of NAME under DIRFD (DIRFD itself when NAME is NIL), sorted.
+Returns the list, or (values nil errno-keyword) if the directory cannot be
+opened. HIDE-LINKS leaves symlinks out. Entries are read from the fd the walk
+already validated, so the listing cannot be redirected by a swapped path."
+  (multiple-value-bind (fd errno) (fs-open-dir dirfd (or name "."))
+    (unless fd (return-from fs-list-names (values nil errno)))
+    (let ((sap (%fdopendir fd)))
+      (when (zerop (sb-sys:sap-int sap))
+        (fs-close fd)
+        (return-from fs-list-names (values nil :other)))
+      ;; CLOSEDIR now owns FD.
+      (let ((dir (sb-alien:sap-alien sap (* t)))
+            (names '()))
+        (unwind-protect
+             (loop for entry = (sb-posix:readdir dir)
+                   until (sb-alien:null-alien entry)
+                   do (let ((entry-name (sb-posix:dirent-name entry)))
+                        (unless (or (string= entry-name ".") (string= entry-name "..")
+                                    (and hide-links (fs-symlink-leaf-p fd entry-name)))
+                          (push entry-name names))))
+          (sb-posix:closedir dir))
+        (values (sort names #'string<) nil)))))
 
 ;;; --- the walk ----------------------------------------------------------
 
 (defun fs-walk (root components &key create)
-  "Change the current directory to ROOT, then step into each of COMPONENTS
-in turn -- each one opened with O_NOFOLLOW before FCHDIR steps into it, so
-a symlink anywhere along the way is refused rather than followed. Returns
-T once positioned in the last component's directory, or (values nil
-errno-keyword) at the component that failed.
+  "Open ROOT, then each of COMPONENTS in turn relative to the one before --
+each with O_NOFOLLOW, so a symlink anywhere along the way is refused rather
+than followed. Returns an fd for the last directory, which the caller closes,
+or (values nil errno-keyword) at the component that failed.
 
-CREATE makes a missing component with MKDIR first and retries the open --
+CREATE makes a missing component with MKDIRAT first and retries the open --
 still through O_NOFOLLOW, so a symlink swapped in between the two is
 refused exactly as an existing one would be, rather than trusted because
 this walk just created it."
-  (multiple-value-bind (root-fd errno) (fs-open-dir-component root)
-    (unless root-fd (return-from fs-walk (values nil errno)))
-    (unless (fs-fchdir root-fd)
-      (fs-close root-fd)
-      (return-from fs-walk (values nil :other)))
-    (fs-close root-fd)
-    (dolist (component components t)
-      (multiple-value-bind (fd errno) (fs-open-dir-component component)
-        (when (and (not fd) create (eq errno :enoent))
-          (fs-mkdir-leaf component #o755)
-          (setf (values fd errno) (fs-open-dir-component component)))
-        (unless fd (return-from fs-walk (values nil errno)))
-        (let ((ok (fs-fchdir fd)))
-          (fs-close fd)
-          (unless ok (return-from fs-walk (values nil :other))))))))
-
-(defmacro with-fs-cwd-saved (&body body)
-  "Save and restore the process's current directory around BODY, so
-tool-fs's walk never leaves the process pointed somewhere else -- even
-though nothing but *FS-LOCK* stops another thread from observing it
-mid-walk (see the TODO above)."
-  (let ((saved (gensym)))
-    `(let ((,saved (fs-open-dir-component ".")))
-       (unwind-protect (progn ,@body)
-         (when ,saved (fs-fchdir ,saved) (fs-close ,saved))))))
+  (multiple-value-bind (fd errno) (fs-open-root root)
+    (unless fd (return-from fs-walk (values nil errno)))
+    (dolist (component components fd)
+      (multiple-value-bind (next errno) (fs-open-dir fd component)
+        (when (and (not next) create (eq errno :enoent))
+          (fs-mkdir-leaf fd component #o755)
+          (setf (values next errno) (fs-open-dir fd component)))
+        (fs-close fd)
+        (unless next (return-from fs-walk (values nil errno)))
+        (setf fd next)))))

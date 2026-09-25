@@ -304,6 +304,58 @@ last resort with no dedicated OS mechanism behind it."
                (nyaa:tool-error (tool :tool-fs :op :delete :path "alias.txt"))))
     (is (equal "hello" (result-value (tool :tool-fs :op :read :path "real.txt") :data)))))
 
+;;; --- fs: fd-relative walk (~takeiteasy/nyaa#59) -------------------------
+
+(test fs-walk-never-changes-the-process-cwd
+  (with-tools
+    (let* ((stop nil)
+           (changed nil)
+           (start (sb-posix:getcwd))
+           (watcher (bt:make-thread
+                     (lambda ()
+                       (loop until stop
+                             do (unless (string= start (sb-posix:getcwd))
+                                  (setf changed t)))))))
+      (unwind-protect
+           (dotimes (i 200)
+             (let ((path (format nil "d~d/e/f~d.txt" (mod i 5) i)))
+               (tool :tool-fs :op :write :path path :data "x")
+               (tool :tool-fs :op :read :path path)
+               (tool :tool-fs :op :list :path (format nil "d~d/e" (mod i 5)))
+               (tool :tool-fs :op :mkdir :path (format nil "m~d/n" i))
+               (tool :tool-fs :op :delete :path path)))
+        (setf stop t)
+        (bt:join-thread watcher))
+      (is (not changed))
+      (is (string= start (sb-posix:getcwd))))))
+
+(test fs-write-creates-a-file-with-the-usual-mode
+  (with-tools
+    (let ((old (sb-posix:umask #o022)))
+      (unwind-protect (tool :tool-fs :op :write :path "m.txt" :data "x")
+        (sb-posix:umask old)))
+    (is (= #o644 (logand #o777 (sb-posix:stat-mode
+                                (sb-posix:stat (concatenate 'string *sandbox* "/m.txt"))))))))
+
+(defun listing-fixture ()
+  (write-file (concatenate 'string *sandbox* "/.hidden") "h")
+  (write-file (concatenate 'string *sandbox* "/real.txt") "r")
+  (ensure-directories-exist (concatenate 'string *sandbox* "/sub/"))
+  (make-symlink "real.txt" (concatenate 'string *sandbox* "/live"))
+  (make-symlink "nowhere" (concatenate 'string *sandbox* "/dangling")))
+
+(test fs-list-shows-every-entry-by-default
+  (with-tools
+    (listing-fixture)
+    (is (equal '(".hidden" "dangling" "live" "real.txt" "sub")
+               (result-value (tool :tool-fs :op :list :path ".") :files)))))
+
+(test fs-list-hides-symlinks-when-asked
+  (with-tools
+    (listing-fixture)
+    (is (equal '(".hidden" "real.txt" "sub")
+               (result-value (nyaa::apply-fs-op :list *sandbox* *sandbox* nil t) :files)))))
+
 ;;; --- shell -------------------------------------------------------------
 
 (test shell-captures-merged-output-and-exit-status

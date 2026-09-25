@@ -5,7 +5,8 @@
 (define-tool :tool-fs
     (:trust :agent
      :summary "Read, write, list and delete files inside the sandboxed root"
-     :slots ((root :initarg :root :reader fs-root :type string))
+     :slots ((root :initarg :root :reader fs-root :type string)
+             (hide-links :initarg :hide-links :initform nil :reader fs-hide-links))
      :params ((:op (member :read :write :list :mkdir :delete) :required t
                :doc "operation to perform")
               (:path string :required t
@@ -15,7 +16,7 @@
     (let ((lexical (normalize-path (join-path (fs-root service) path))))
       (if (not (under-root (fs-root service) lexical))
           (fail (list :forbidden "path escapes sandbox root"))
-          (apply-fs-op op (fs-root service) lexical data)))))
+          (apply-fs-op op (fs-root service) lexical data (fs-hide-links service))))))
 
 (defmethod initialize-instance :after ((service tool-fs) &key)
   ;; Normalise once, without a trailing slash, so UNDER-ROOT's boundary
@@ -36,8 +37,8 @@
 
 ;;; A lexical check first, so a path outside the root is rejected before
 ;;; anything touches the filesystem, then an fd walk from the root (see
-;;; tools/fs-posix.lisp): each component is opened with O_NOFOLLOW and
-;;; stepped into, refusing every symlink below the root rather than
+;;; tools/fs-posix.lisp): each component is opened with O_NOFOLLOW relative
+;;; to its parent's fd, refusing every symlink below the root rather than
 ;;; resolving it. The final component is operated on relative to that
 ;;; directory, so the symlink check and the operation share one file
 ;;; descriptor -- there is no window between them for a swap to land in
@@ -87,70 +88,65 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
     (:enoent (fail (list :error not-found-message)))
     (t (fail (list :error (string-downcase errno))))))
 
-(defun apply-fs-op (op root lexical data)
-  (bt:with-lock-held (*fs-lock*)
-    (with-fs-cwd-saved
-      (let* ((components (path-components root lexical))
-             (dirs (butlast components))
-             (leaf (car (last components))))
-        (multiple-value-bind (ok errno)
-            (fs-walk root dirs :create (member op '(:write :mkdir)))
-          (if (not ok)
-              (errno-result errno)
-              (case op
-                (:list (fs-op-list leaf))
-                (:read (fs-op-read leaf))
-                (:write (fs-op-write leaf data))
-                (:mkdir (fs-op-mkdir leaf))
-                (:delete (fs-op-delete leaf))
-                (t (bad-request "unknown op ~s" op)))))))))
+(defun apply-fs-op (op root lexical data hide-links)
+  (let* ((components (path-components root lexical))
+         (dirs (butlast components))
+         (leaf (car (last components))))
+    (multiple-value-bind (dirfd errno)
+        (fs-walk root dirs :create (member op '(:write :mkdir)))
+      (if (not dirfd)
+          (errno-result errno)
+          (unwind-protect
+               (case op
+                 (:list (fs-op-list dirfd leaf hide-links))
+                 (:read (fs-op-read dirfd leaf))
+                 (:write (fs-op-write dirfd leaf data))
+                 (:mkdir (fs-op-mkdir dirfd leaf))
+                 (:delete (fs-op-delete dirfd leaf))
+                 (t (bad-request "unknown op ~s" op)))
+            (fs-close dirfd))))))
 
-(defun fs-op-list (leaf)
-  (if (null leaf)
-      (ok :files (fs-list-names))
-      (multiple-value-bind (fd errno) (fs-open-dir-component leaf)
-        (if (not fd)
-            (errno-result errno "no such directory")
-            (progn
-              (unwind-protect
-                   (if (fs-fchdir fd)
-                       (ok :files (fs-list-names))
-                       (fail (list :error "cannot enter directory")))
-                (fs-close fd)))))))
+(defun fs-op-list (dirfd leaf hide-links)
+  (multiple-value-bind (names errno) (fs-list-names dirfd leaf :hide-links hide-links)
+    (if errno
+        (errno-result errno "no such directory")
+        (ok :files names))))
 
-(defun fs-op-read (leaf)
+;;; The fd-stream in FS-SLURP-FD and FS-SPIT-FD owns the fd and closes it:
+;;; closing it again here would risk closing a descriptor another thread has
+;;; since been handed.
+
+(defun fs-op-read (dirfd leaf)
   (if (null leaf)
       (fail (list :error "is a directory"))
-      (multiple-value-bind (fd errno) (fs-open-leaf leaf '(:rdonly) 0)
-        (if (not fd)
-            (errno-result errno)
-            (unwind-protect (ok :data (fs-slurp-fd fd))
-              (fs-close fd))))))
+      (multiple-value-bind (fd errno) (fs-open-leaf dirfd leaf '(:rdonly) 0)
+        (if fd
+            (ok :data (fs-slurp-fd fd))
+            (errno-result errno)))))
 
-(defun fs-op-write (leaf data)
-  (cond
-    ((null leaf) (fail (list :error "is a directory")))
-    (t (multiple-value-bind (fd errno)
-           (fs-open-leaf leaf '(:wronly :creat :trunc) #o644)
-         (if (not fd)
-             (errno-result errno)
-             (unwind-protect (progn (fs-spit-fd fd data) (ok))
-               (fs-close fd)))))))
+(defun fs-op-write (dirfd leaf data)
+  (if (null leaf)
+      (fail (list :error "is a directory"))
+      (multiple-value-bind (fd errno)
+          (fs-open-leaf dirfd leaf '(:wronly :creat :trunc) #o644)
+        (if fd
+            (progn (fs-spit-fd fd data) (ok))
+            (errno-result errno)))))
 
-(defun fs-op-mkdir (leaf)
+(defun fs-op-mkdir (dirfd leaf)
   (if (null leaf)
       (ok) ; the root itself always exists as a directory
-      (multiple-value-bind (success errno) (fs-mkdir-leaf leaf #o755)
+      (multiple-value-bind (success errno) (fs-mkdir-leaf dirfd leaf #o755)
         (cond (success (ok))
-              ((and (eq errno :eexist) (not (fs-symlink-leaf-p leaf))) (ok))
+              ((and (eq errno :eexist) (not (fs-symlink-leaf-p dirfd leaf))) (ok))
               ((eq errno :eexist) (fail (list :forbidden "path escapes sandbox root")))
               (t (errno-result errno))))))
 
-(defun fs-op-delete (leaf)
+(defun fs-op-delete (dirfd leaf)
   (cond
     ((null leaf) (bad-request "delete refuses directories"))
-    ((fs-symlink-leaf-p leaf) (fail (list :forbidden "path escapes sandbox root")))
-    (t (multiple-value-bind (success errno) (fs-unlink-leaf leaf)
+    ((fs-symlink-leaf-p dirfd leaf) (fail (list :forbidden "path escapes sandbox root")))
+    (t (multiple-value-bind (success errno) (fs-unlink-leaf dirfd leaf)
          (cond (success (ok))
                ;; Directories are refused and recursive delete is not
                ;; offered: a tool this easy to call should not be able to

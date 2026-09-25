@@ -137,7 +137,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. |
+| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`. `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the response body is decoded as text ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
@@ -281,10 +281,12 @@ All seven are trusted-operator surfaces, marked `:trust :operator` at the
 definition site. `tool-fs` is confined to its sandbox root: a lexical check
 first, so a path outside the root is rejected before anything touches the
 filesystem, then an fd-based walk from the root, opening each component with
-`O_NOFOLLOW` and stepping into it — a symlink anywhere below the root is
-refused outright rather than resolved, and the final component is operated on
-relative to that same directory, so the check and the operation share one file
-descriptor with no window between them for a swap to land in.
+`O_NOFOLLOW` relative to its parent's directory fd — a symlink anywhere below
+the root is refused outright rather than resolved, and the final component is
+operated on relative to that same fd, so the check and the operation share one
+file descriptor with no window between them for a swap to land in. The
+process's current directory is never changed, so the walk cannot disturb, or be
+disturbed by, other code in the process.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.
