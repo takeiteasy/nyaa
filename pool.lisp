@@ -25,6 +25,10 @@ it uncapped.")
 (defparameter *pool-abandon-grace* 5
   "Seconds a job may run past its deadline before its pool abandons it.")
 
+(defparameter *pool-max-abandoned* 16
+  "The most abandoned threads still stuck a pool tolerates before it refuses new
+completions. Nil never refuses.")
+
 (defparameter *pool-idle-seconds* 30
   "Seconds a pooled thread waits for work before it exits.")
 
@@ -33,7 +37,7 @@ it uncapped.")
   (lock (bt:make-lock :name "nyaa-pool"))
   (cv (bt:make-condition-variable))
   (queue '())
-  (threads 0) (idle 0) (starting 0) (spawned 0) (abandoned 0)
+  (threads 0) (idle 0) (starting 0) (spawned 0) (abandoned 0) (stuck 0)
   (running-by-key (make-hash-table :test 'eq))
   retiring)
 
@@ -151,7 +155,8 @@ uncounted here, under the lock, so a lowered cap sheds exactly the excess."
 thread and key, so the caller leaves those alone."
   (bt:with-lock-held ((pool-lock pool))
     (if (eq (pool-job-state job) :abandoned)
-        :abandoned
+        (progn (decf (pool-stuck pool))
+               :abandoned)
         (progn
           (%release-key pool job)
           (setf (pool-job-state job) :done)
@@ -159,9 +164,13 @@ thread and key, so the caller leaves those alone."
           (bt:condition-notify (pool-cv pool))
           nil))))
 
-;;; TODO: an abandoned thread is never reclaimed, so threads stuck for good
-;;; leak. Upgrade path: none in SBCL short of a process restart, as
-;;; DESTROY-THREAD is an interrupt too. Tracked in ~takeiteasy/nyaa#152.
+(defun pool-overloaded-p (pool)
+  "True when POOL holds *POOL-MAX-ABANDONED* abandoned threads still stuck. SBCL
+cannot reclaim one stuck past interrupts, so the pool stops taking work
+that a wedged backend would only add to."
+  (bt:with-lock-held ((pool-lock pool))
+    (and *pool-max-abandoned* (>= (pool-stuck pool) *pool-max-abandoned*))))
+
 (defun pool-abandon (job)
   "Give up on JOB, still running: its thread and key are released now and a
 queued job may take the slot, though the thread itself stays wherever it is
@@ -174,6 +183,7 @@ never after it finished."
         (%release-key pool job)
         (decf (pool-threads pool))
         (incf (pool-abandoned pool))
+        (incf (pool-stuck pool))
         (if (and (> (%runnable-count pool) (+ (pool-idle pool) (pool-starting pool)))
                  (%room-p pool))
             (%spawn-pool-worker pool)
@@ -204,7 +214,8 @@ never after it finished."
             :queued (length (pool-queue pool))
             :running (- (pool-threads pool) (pool-idle pool))
             :spawned (pool-spawned pool)
-            :abandoned (pool-abandoned pool)))))
+            :abandoned (pool-abandoned pool)
+            :stuck (pool-stuck pool)))))
 
 (defun retire-idle-workers (&key (timeout 5))
   "Have every idle pooled thread exit, waiting at most TIMEOUT seconds. The

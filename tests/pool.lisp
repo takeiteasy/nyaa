@@ -205,3 +205,26 @@
     (m:mount *protocol-context* 'protocol-spawner)
     (nyaa:complete :protocol-spawner :messages '((:role :user :content "hi")))
     (is (equal '(0 nil) *spawned-depths*))))
+
+;;; A pool holding its cap of abandoned threads still stuck refuses new work
+;;; until one returns.
+
+(test a-pool-full-of-stuck-threads-refuses-completions-until-one-returns
+  (with-pool-sizes (0 2)
+    (with-protocol
+      (let ((grace nyaa::*pool-abandon-grace*)
+            (cap nyaa::*pool-max-abandoned*))
+        (setf nyaa::*pool-abandon-grace* 0.1
+              nyaa::*pool-max-abandoned* 1)
+        (unwind-protect
+             (progn
+               (is (eq :timeout (nyaa:tool-error
+                                 (apply #'nyaa:complete :protocol-echo
+                                        (hello :stall 1.2 :timeout 200)))))
+               (is-true (eventually (lambda () (= 1 (getf (nyaa:pool-stats 0) :stuck)))))
+               (is (eq :unavailable (nyaa:tool-error
+                                     (apply #'nyaa:complete :protocol-echo (hello)))))
+               (is-true (eventually (lambda () (zerop (getf (nyaa:pool-stats 0) :stuck))) 3))
+               (is (eq :ok (first (apply #'nyaa:complete :protocol-echo (hello))))))
+          (setf nyaa::*pool-abandon-grace* grace
+                nyaa::*pool-max-abandoned* cap))))))

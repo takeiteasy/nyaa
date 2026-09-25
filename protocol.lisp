@@ -494,12 +494,15 @@ runs in the pool of REQUEST's :DEPTH, and completions it makes run one deeper."
                            (if ran (answer result) (answer-unrun result)))))
                      :key host :limit (host-max-in-flight host)
                      :registry (m:service-registry host)))
-          (track-completion host token)
-          (when (pool-submit (pool-for depth) job)
-            (m:after host (/ timeout 1000) (lambda () (withdraw :timeout))))
-          (on-cancel token (lambda () (withdraw :cancelled)))
-          (a:when-let ((caller (getf request :cancel)))
-            (on-cancel caller (lambda () (cancel token))))))))
+          (if (pool-overloaded-p (pool-for depth))
+              (answer-unrun (fail :unavailable))
+              (progn
+                (track-completion host token)
+                (when (pool-submit (pool-for depth) job)
+                  (m:after host (/ timeout 1000) (lambda () (withdraw :timeout))))
+                (on-cancel token (lambda () (withdraw :cancelled)))
+                (a:when-let ((caller (getf request :cancel)))
+                  (on-cancel caller (lambda () (cancel token))))))))))
   nil)
 
 ;;; --- the exchange -------------------------------------------------------
