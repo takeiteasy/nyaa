@@ -866,3 +866,17 @@ HANDLE, so a protocol must not use those heads."
                               (declare (ignorable ,request))
                               ,@body)))))
          (t (bad-request "unknown message ~s" (first message)))))))
+
+(defmacro define-protocol (name (&key summary params) (service request) &body body)
+  "Define the protocol NAME, a keyword such as :PROTOCOL-OPENAI: a service
+class over COMPLETION-HOST, its METADATA and its :COMPLETE handler
+(DEFINE-PROTOCOL-HANDLER), registered in the definitions table. SUMMARY and
+PARAMS are forms, evaluated for each :describe."
+  (let ((class (intern (symbol-name name))))
+    `(progn
+       (m:defservice ,class (completion-host) ()
+         (:name ,name))
+       (register-definition ,name :protocol ',class)
+       (defmethod m:metadata ((,service ,class))
+         (list :kind :protocol :name ,name :summary ,summary :params ,params))
+       (define-protocol-handler ,class (,service ,request) ,@body))))

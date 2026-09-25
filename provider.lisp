@@ -232,6 +232,7 @@ the declaration."
          (:name ,(a:make-keyword class))
          (:depends-on ,protocol)
          (:default-initargs :base-url ,(getf declaration :base-url)))
+       (register-definition ,(a:make-keyword class) :provider ',class '(,protocol))
        (defmethod provider-declaration ((service ,class))
          (load-time-value
           (check-provider-declaration

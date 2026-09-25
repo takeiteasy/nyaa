@@ -19,6 +19,9 @@
                ;; Ahead of protocol.lisp and agent.lisp, which submit to it.
                (:file "pool")
                (:file "schema")
+               ;; Ahead of tool.lisp, provider.lisp and the protocols: their
+               ;; DEFINE- macros record here.
+               (:file "definitions")
                (:file "tool")
                ;; Right after tool.lisp: CHECKPOINT and ROLLBACK need only
                ;; the SNAPSHOT/RESTORE convention it declares, and every
@@ -82,6 +85,7 @@
   :components ((:file "package")
                (:file "suite")
                (:file "schema")
+               (:file "definitions")
                (:file "smoke")
                (:file "protocol")
                (:file "fake-http")

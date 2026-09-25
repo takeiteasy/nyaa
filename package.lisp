@@ -10,6 +10,7 @@
    #:tools #:describe-tool #:invoke-tool
    #:tool-error #:tool-error-p #:tool-trust #:tool-schema
    #:define-tool
+   #:define-protocol #:definitions #:ensure-mounted
    ;; protocol convention
    #:protocols #:describe-protocol #:complete #:check-request
    #:define-protocol-handler #:completion-host #:backend-error

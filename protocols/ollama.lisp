@@ -20,16 +20,9 @@
 declared parameter is not itself: an entry with one groups under that key in
 the request body rather than at the top level.")
 
-(m:defservice protocol-ollama (completion-host) ()
-  (:name :protocol-ollama))
-
-(defmethod m:metadata ((service protocol-ollama))
-  (list :kind :protocol
-        :name :protocol-ollama
-        :summary "Ollama native chat"
-        :params +ollama-params+))
-
-(define-protocol-handler protocol-ollama (service request)
+(define-protocol :protocol-ollama
+    (:summary "Ollama native chat" :params +ollama-params+)
+    (service request)
   (let ((problem (check-ollama-request request)))
     (if problem
         (bad-request "~a" problem)

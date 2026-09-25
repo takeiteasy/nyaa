@@ -111,6 +111,20 @@ itself.
 (nyaa:tools)  ; => (:tool-fs :tool-http :tool-shell)
 ```
 
+## Definitions
+
+`define-tool`, `define-protocol` and [`define-provider`](providers.md) record
+each definition by name, so a front end can mount one without a hand-kept list:
+
+```lisp
+(nyaa:definitions :kind :provider)              ; => (:provider-ollama)
+(nyaa:ensure-mounted ctx :provider-ollama :model "llama3.2")
+```
+
+`ensure-mounted` mounts a provider's protocol first, and does nothing for a
+name already registered. The initargs apply to the named service only. It
+signals for a name nothing defines.
+
 ## Invocation
 
 ```lisp

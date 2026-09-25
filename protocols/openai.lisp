@@ -17,16 +17,9 @@
   "The sampling parameters the shape understands, advertised and rendered
 from one declaration.")
 
-(m:defservice protocol-openai (completion-host) ()
-  (:name :protocol-openai))
-
-(defmethod m:metadata ((service protocol-openai))
-  (list :kind :protocol
-        :name :protocol-openai
-        :summary "OpenAI-compatible chat completions"
-        :params +openai-params+))
-
-(define-protocol-handler protocol-openai (service request)
+(define-protocol :protocol-openai
+    (:summary "OpenAI-compatible chat completions" :params +openai-params+)
+    (service request)
   (let ((problem (check-openai-request request)))
     (if problem
         (bad-request "~a" problem)

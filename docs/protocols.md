@@ -19,24 +19,23 @@ A protocol registers under `:protocol-<name>`, and its `metadata` plist carries
 `:kind :protocol`, a `:summary`, and optionally `:params`:
 
 ```lisp
-(m:defservice protocol-example (nyaa:completion-host) ()
-  (:name :protocol-example))
-
-(defmethod m:metadata ((service protocol-example))
-  (list :kind :protocol
-        :name :protocol-example
-        :summary "One line on the wire shape"
-        :params '((:temperature number :doc "sampling temperature"))))
+(nyaa:define-protocol :protocol-example
+    (:summary "One line on the wire shape"
+     :params '((:temperature number :doc "sampling temperature")))
+    (service request)
+  (nyaa:fail :unavailable))
 ```
+
+`define-protocol` expands to the service class, its `metadata` and a
+`define-protocol-handler`, and records the protocol in the
+[definitions](tools.md#definitions) table. The body runs for each `:complete`,
+with `request` bound to the checked plist.
 
 `:params` is a typed [schema](schema.md) advertising the sampling parameters the
 protocol understands. It is advertisement, for a provider to layer defaults on —
 not a coercion gate, since a request may carry keys no protocol knows.
 
-Use an explicit keyword for the name, as tools do: `defservice` otherwise
-defaults to the class symbol, and names compare with `equal`.
-
-It answers two messages, through `define-protocol-handler`:
+It answers two messages:
 
 - `(:describe)` — replies with the metadata plist
 - `(:complete . plist)` — checks the request, then performs one turn

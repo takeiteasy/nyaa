@@ -221,6 +221,7 @@ DEFSERVICE and DEFINE-TOOL-HANDLER directly."
          (%check-readable-defaults ,name (list ,@(mapcar #'%param-form params)))
          (m:defservice ,class () ,slots
            (:name ,name))
+         (register-definition ,name :tool ',class)
          (defmethod m:metadata ((service ,class))
            (list :kind :tool
                  :name ,name
