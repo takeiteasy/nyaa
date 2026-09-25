@@ -24,14 +24,14 @@
 (defun cancel (token)
   "Cancel whatever TOKEN was passed to as :CANCEL. Idempotent; true the first
 time."
-  ;; FIXME: answers nil the first time when no action was registered,
-  ;; against the docstring (~takeiteasy/nyaa#150).
-  (let ((actions (bt:with-lock-held ((cancel-token-lock token))
-                   (unless (cancel-token-cancelled token)
-                     (setf (cancel-token-cancelled token) t)
-                     (shiftf (cancel-token-actions token) nil)))))
+  (let* ((first nil)
+         (actions (bt:with-lock-held ((cancel-token-lock token))
+                    (unless (cancel-token-cancelled token)
+                      (setf first t
+                            (cancel-token-cancelled token) t)
+                      (shiftf (cancel-token-actions token) nil)))))
     (mapc #'funcall actions)
-    (and actions t)))
+    first))
 
 (defun stuck-p (token grace)
   "True when the call TOKEN was passed to is running and, GRACE seconds on,

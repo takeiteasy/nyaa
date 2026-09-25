@@ -423,6 +423,11 @@
     (is-true (nyaa:cancelled-p token))
     (is (= 1 runs))))
 
+(test cancel-answers-true-the-first-time-with-no-actions
+  (let ((token (nyaa:make-cancel-token)))
+    (is-true (nyaa:cancel token))
+    (is-false (nyaa:cancel token))))
+
 (test an-action-registered-after-cancel-runs-at-once
   (let ((token (nyaa:make-cancel-token))
         (runs 0))
