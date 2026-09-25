@@ -115,7 +115,8 @@ received `:timeout` adds a third entry,
 
 `:previous-source` is `:define`'s defined name's `symbol-source`
 ([introspection](introspection.md)) as it stood before the write --
-rollback restores declared service state, never code
+a `:file`/`:position`, or the old `:form` when it was itself defined in the
+image -- rollback restores declared service state, never code
 ([#48](https://todo.sr.ht/~takeiteasy/nyaa/48)), so this pointer is the
 only way back to the old definition. The log is an append-only
 s-expression file (`:log`, default `~/.nyaa/self.log`), read the same

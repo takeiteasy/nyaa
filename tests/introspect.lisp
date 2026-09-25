@@ -64,10 +64,38 @@ travels in a TOOL-IMAGE reply.")
   (with-tools
     (let ((result (tool :tool-image :op :source :symbol "complete" :package "nyaa")))
       (is (eq :ok (first result)))
-      ;; Well-formed either way: a location, or a plain miss.
-      (if (result-value result :available)
-          (is (stringp (result-value result :file)))
-          (is (eq nil (result-value result :available)))))))
+      (is (eq t (result-value result :available)))
+      (is (stringp (result-value result :file))))))
+
+(defun define-in-image (name body)
+  (handler-bind ((warning #'muffle-warning))
+    (eval `(defun ,name (x) ,body))))
+
+(test image-source-shows-the-form-of-an-in-image-definition
+  (with-tools
+    (define-in-image 'nyaa/tests::%introspect-repl-fn '(1+ x))
+    (let ((result (tool :tool-image :op :source :symbol "%introspect-repl-fn"
+                                    :package "nyaa/tests")))
+      (is (eq t (result-value result :available)))
+      (is (search "1+" (result-value result :form)))
+      (is (eq nil (result-value result :truncated)))
+      (is (null (result-value result :file))))))
+
+(test image-source-caps-a-long-form
+  (with-tools
+    (define-in-image 'nyaa/tests::%introspect-long-fn
+      `(quote ,(loop for i below 2000 collect i)))
+    (let ((result (tool :tool-image :op :source :symbol "%introspect-long-fn"
+                                    :package "nyaa/tests")))
+      (is (eq t (result-value result :truncated)))
+      (is (= 4000 (length (result-value result :form)))))))
+
+(test image-describe-carries-the-form
+  (with-tools
+    (define-in-image 'nyaa/tests::%introspect-describe-fn '(1+ x))
+    (let ((result (tool :tool-image :op :describe :symbol "%introspect-describe-fn"
+                                    :package "nyaa/tests")))
+      (is (stringp (getf (result-value result :source) :form))))))
 
 (test image-packages-lists-the-loaded-image
   (with-tools

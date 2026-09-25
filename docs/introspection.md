@@ -20,7 +20,7 @@ even for a bound special: `tool-eval`, `tool-repl` and `tool-self`, all
 | `:describe` | `:symbol` (required), `:package` | `:name`, `:package`, `:fboundp`, `:boundp`, `:kind`, `:lambda-list`, `:documentation`, `:variable-documentation`, `:source` |
 | `:apropos` | `:pattern` (required), `:package`, `:external-only` (default `t`), `:limit` (default 100) | `:symbols`, `:total`, `:truncated` |
 | `:documentation` | `:symbol` (required), `:doc-type` (default `:function`) | `:documentation` |
-| `:source` | `:symbol` (required), `:doc-type` | `:available`, and `:file`/`:position` when it is |
+| `:source` | `:symbol` (required), `:doc-type` | `:available`, and `:file`/`:position` or `:form`/`:truncated` when it is |
 | `:packages` | — | `:packages` — each loaded package's name and nicknames |
 
 `:symbol` is `"nyaa:complete"` or `"complete"` against `:package` (or
@@ -44,9 +44,19 @@ even for a bound special: `tool-eval`, `tool-repl` and `tool-self`, all
 thousands of symbols, so it reports `:total` and `:truncated` rather than
 cutting silently.
 
-Lambda lists and source locations come from `sb-introspect`. Absent — an
-interpreted definition — reports `:available nil` rather than erroring
-([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
+`:source` is a `:file` and `:position` for a function loaded from a file.
+One defined in the image — at a REPL, or through `tool-self` — answers its
+printed lambda expression as `:form`, capped at 4000 characters with
+`:truncated` set when it is cut.[^form] A function with neither reports
+`:available nil` rather than erroring.
+
+```lisp
+(nyaa:invoke-tool :tool-image :op :source :symbol "my-fn")
+;; => (:ok (:available t :form "(LAMBDA (X) (BLOCK MY-FN (1+ X)))" :truncated nil))
+```
+
+Lambda lists and file locations come from `sb-introspect`; `:form` comes from
+`function-lambda-expression`.
 
 ## `tool-services`
 
@@ -81,3 +91,6 @@ published metadata for exactly that reason (see
 and `:fboundp` as flags and nothing more. `tool-services` never reads a
 slot at all; everything it answers already travels through `metadata` or
 `m:children`.
+
+[^form]: `:form` is the definition's own code, so a literal written into it
+    (a string, say) travels with it. A variable's value never does.

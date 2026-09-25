@@ -292,15 +292,14 @@ and only tools that are themselves `:agent`-trusted — see
 `tool-image` and `tool-services` are `:agent`-trusted and read-only: neither
 ever returns a value or a slot, only flags and shapes, so a provider's
 `:api-key` (kept out of published metadata; see [providers](providers.md))
-cannot surface through either. Seeing a value stays `tool-eval`, `tool-repl`
+cannot surface through either. `tool-image :source` does return a
+function's own code, literals included. Seeing a value stays `tool-eval`, `tool-repl`
 or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
 - `tool-http` returns a non-text body as garbled text rather than an error
   ([#138](https://todo.sr.ht/~takeiteasy/nyaa/138)).
-- `tool-image` has no source location for an interpreted definition
-  ([#47](https://todo.sr.ht/~takeiteasy/nyaa/47)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).

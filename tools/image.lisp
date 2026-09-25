@@ -13,6 +13,8 @@
 ;;; metadata for exactly that reason -- this tool must hold the same line,
 ;;; so every op below reports flags and shapes, never SYMBOL-VALUE. Seeing
 ;;; a value stays TOOL-EVAL, TOOL-REPL or TOOL-SELF's job, at :operator.
+;;; The one content it returns is a function's own code (:form), so a
+;;; literal written into that code travels with it.
 ;;;
 ;;; Symbols are looked up with FIND-SYMBOL, never READ-FROM-STRING or
 ;;; INTERN: a lookup must not be able to grow the image.
@@ -156,11 +158,26 @@ the implementation cannot say."
       (apply #'ok :available t source)
       (ok :available nil))))
 
+(defconstant +source-form-limit+ 4000
+  "Characters of a definition's printed form :source returns.")
+
 (defun symbol-source (symbol)
-  "SYMBOL's (:file ... :position ...), or NIL when it is not fbound or has
-no source location -- an interpreted definition, never loaded from a
-compiled file."
-  (and (fboundp symbol) (function-source symbol)))
+  "SYMBOL's (:file ... :position ...) or, for a definition made in the image,
+its (:form ... :truncated ...); NIL when it is not fbound or has neither."
+  (and (fboundp symbol)
+       (or (function-source symbol) (function-form symbol))))
+
+(defun function-form (symbol)
+  (let ((expression (ignore-errors (function-lambda-expression (fdefinition symbol)))))
+    (and expression
+         (let ((text (ignore-errors
+                      (with-standard-io-syntax
+                        (let ((*print-readably* nil) (*print-pretty* nil)
+                              (*package* (find-package '#:nyaa)))
+                          (prin1-to-string expression))))))
+           (and text
+                (list :form (subseq text 0 (min (length text) +source-form-limit+))
+                      :truncated (> (length text) +source-form-limit+)))))))
 
 (defun function-source (symbol)
   (let ((source (first (ignore-errors
