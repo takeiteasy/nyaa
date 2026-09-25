@@ -152,6 +152,12 @@ string or pathname: record there instead.")
     (:deadline (deadline-run service))
     (:detach (destructuring-bind (ref id name) (rest message)
                (detach-call service ref id name)))
+    ;; Not routed through CALL-RESULT: a detached call has no timeout to hit,
+    ;; and its cell holds a stub that TOOL-REPLY leaves alone.
+    (:call-timeout (destructuring-bind (ref id) (rest message)
+                     (when (eql ref (%step-ref service))
+                       (tool-reply service id (fail :timeout)))
+                     nil))
     (:retry (when (and (%retry-pending service) (eql (second message) (%step-ref service)))
               (resend-turn service)
               nil))
@@ -390,16 +396,26 @@ lands ahead of the assistant reply or tool results already owed."
     (send-call service (list :turn ref) #'%completion-call (agent-model service) request)
     nil))
 
-(defun send-call (service tag prepare name args)
+(defun send-call (service tag prepare name args &key unbounded)
   "Send the call PREPARE builds for NAME and ARGS -- %COMPLETION-CALL or
 %TOOL-CALL -- without waiting. Its reply reaches HANDLE as (:REPLY TAG value
-status). A call that cannot be sent is answered at once."
+status). A call that cannot be sent is answered at once.
+
+UNBOUNDED sends it with no meow timeout and answers the seconds it would have
+had, for the caller to time only while the call is attached: a detached call
+outlasts it. TODO: a tool that ignores cancel and never answers leaves its
+meow pending call alive for good, as call-async cannot withdraw it (#188)."
   (multiple-value-bind (process message timeout)
       (handler-case (funcall prepare name args :registry (m:service-registry service))
         (error (e) (values nil (fail (list :error (princ-to-string e))))))
-    (if process
-        (m:call-async process message :timeout timeout :tag tag)
-        (m:cast (m:self) (list :reply tag message nil)))))
+    (cond ((null process)
+           (m:cast (m:self) (list :reply tag message nil))
+           nil)
+          (unbounded
+           (m:call-async process message :timeout nil :tag tag)
+           timeout)
+          (t (m:call-async process message :timeout timeout :tag tag)
+             nil))))
 
 (defun route-reply (service tag result)
   "Hand RESULT to the turn or tool call TAG names."
@@ -607,11 +623,19 @@ must not answer it."
          (args (getf call :arguments))
          (token (call-token service id))
          (ref (%step-ref service)))
-    (send-call service (list :tool ref id) #'%tool-call name (list* :cancel token args))
+    (a:when-let ((timeout (send-call service (list :tool ref id) #'%tool-call name
+                                     (list* :cancel token args) :unbounded t)))
+      (arm-call-timeout service ref id timeout))
     (if (getf (tool-metadata name :registry (m:service-registry service)) :background)
         (m:cast (m:self) (list :detach ref id name))
         (arm-detach service call))
     nil))
+
+(defun arm-call-timeout (service ref id seconds)
+  "Answer call ID (:ERROR :TIMEOUT) after SECONDS unless it has settled or
+detached by then."
+  (let ((self (m:self)))
+    (m:after service seconds (lambda () (m:cast self (list :call-timeout ref id))))))
 
 (defun arm-detach (service call)
   "Detach CALL if it is still running after :TOOL-GRACE."
@@ -809,7 +833,9 @@ FORCE resumes a call to a tool that is not :RESUMABLE."
           (%detached service))
     (call-log-running (call-log-of service) (list log-id))
     (emit-event (agent-events service) (tool-resumed-event (m:agent-ref service) call-id name))
-    (send-call service (list :tool ref log-id) #'%tool-call name (list* :cancel token arguments))))
+    (send-call service (list :tool ref log-id) #'%tool-call name (list* :cancel token arguments)
+              :unbounded t)
+    nil))
 
 (defun pending-tool-messages (service)
   "A :TOOL message for each call dispatched this turn, in order: its result,

@@ -28,9 +28,9 @@ repeating."
 
 (defun request-body (n) (getf (nth (1- n) (requests)) :body))
 
-(defun run-detached (child)
+(defun run-detached (child &optional (timeout 8))
   (m:cast child (list :run :messages '((:role :user :content "go"))))
-  (multiple-value-bind (message received) (m:receive :timeout 8)
+  (multiple-value-bind (message received) (m:receive :timeout timeout)
     (is-true received)
     (fourth message)))
 
@@ -186,3 +186,55 @@ repeating."
         (is (= turns (length (requests))) "every turn is one request, none issued twice")
         (is (search "tool call c1" (request-body turns)))
         (is (search "tool call c2" (request-body turns)))))))
+
+;;; A call's meow timeout is the tool's :TIMEOUT plus 5s. The agent times a call
+;;; itself, only while it is attached (~takeiteasy/nyaa#183).
+
+(m:defservice tool-unbounded () () (:name :tool-unbounded))
+
+(defmethod m:metadata ((service tool-unbounded))
+  (list :kind :tool :name :tool-unbounded :trust :agent :background t
+        :summary "Answer after six seconds, whatever its timeout"
+        :params '((:timeout (integer 1) :default 1 :doc "milliseconds"))))
+
+(nyaa::define-tool-handler tool-unbounded (service args)
+  args
+  (sleep 6)
+  (nyaa::ok :unbounded t))
+
+(m:defservice tool-unbounded-attached () () (:name :tool-unbounded-attached))
+
+(defmethod m:metadata ((service tool-unbounded-attached))
+  (list :kind :tool :name :tool-unbounded-attached :trust :agent
+        :summary "Answer after six seconds, whatever its timeout"
+        :params '((:timeout (integer 1) :default 1 :doc "milliseconds"))))
+
+(nyaa::define-tool-handler tool-unbounded-attached (service args)
+  args
+  (sleep 6)
+  (nyaa::ok :unbounded t))
+
+(test a-detached-call-outlasts-its-call-timeout
+  (with-agent ((scripted (tool-call-reply "c1" "tool-unbounded" "{}")
+                         (final-reply "moving on")
+                         (final-reply "got it"))
+               'tool-unbounded)
+    (m:with-process (runner)
+      (let* ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                :tools '(:tool-unbounded)))
+             (result (run-detached child 15)))
+        (is (= 3 (getf (second result) :turns)))
+        (is (search "tool call c1 (tool-unbounded) finished" (request-body 3)))
+        (is (search "unbounded" (request-body 3)))
+        (is (not (search "error" (request-body 3))))))))
+
+(test an-attached-call-still-times-out
+  (with-agent ((scripted (tool-call-reply "c1" "tool-unbounded-attached" "{}")
+                         (final-reply "done"))
+               'tool-unbounded-attached)
+    (m:with-process (runner)
+      (let* ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                :tools '(:tool-unbounded-attached)))
+             (result (run-detached child 15)))
+        (is (= 2 (getf (second result) :turns)))
+        (is (search "{\\\"error\\\":\\\"timeout\\\"}" (request-body 2)))))))

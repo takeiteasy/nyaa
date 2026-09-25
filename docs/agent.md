@@ -117,7 +117,7 @@ and issues the next turn with the steer folded in, without waiting on the
 slowest call. Between turns or before `:run`, `:interrupt` does nothing extra
 and the steer waits for the next turn.
 
-The rest — `:step`, `:detach`, `:deadline` — are internal,
+The rest — `:step`, `:detach`, `:call-timeout`, `:deadline` — are internal,
 driving the machine between spawned work and the agent's own mailbox.
 
 ## The result
@@ -184,6 +184,11 @@ past `:tool-grace`, or at once when its tool's [metadata](tools.md) says
 A detached call frees its `:max-parallel-tools` slot. A sub-agent detaches like
 any other call. The result is cut to `:max-tool-result` once, when it is
 folded in. An interrupting `:steer` leaves detached calls running.[^detached]
+
+An attached call answers `(:error :timeout)` once the tool's `:timeout` plus 5
+seconds lapse. A detached call has no such bound: its tool's own `:timeout`,
+a [cancel](#cancelling-tool-calls), the run's `:deadline` or its process going
+down end it. A run that stopped to wait on one stays open until then.
 
 ### Capping a tool result
 
@@ -353,9 +358,11 @@ leaving the original alone -- see [forking](forking.md).
 - A streamed turn on an OpenAI-style backend reports no prompt-token count,
   so it does not recalibrate the ratio
   ([#142](https://todo.sr.ht/~takeiteasy/nyaa/142)).
-- A detached tool call is still bounded by its call timeout, the tool's
-  `:timeout` plus 5 seconds; a sub-agent is not
-  ([#183](https://todo.sr.ht/~takeiteasy/nyaa/183)).
+- A detached call still ends with its run, so work longer than the run's
+  `:deadline` has no home; that needs a job a tool hands back and the agent
+  polls ([#189](https://todo.sr.ht/~takeiteasy/nyaa/189)).
+- A tool that ignores a cancel and never answers keeps its call pending for
+  good ([#188](https://todo.sr.ht/~takeiteasy/nyaa/188)).
 - Nothing caps how many calls are detached at once
   ([#184](https://todo.sr.ht/~takeiteasy/nyaa/184)).
 - A restored agent runs a call detached when it was checkpointed again rather
