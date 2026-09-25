@@ -113,7 +113,13 @@ string or pathname: record there instead.")
    (retry-pending :initform nil :accessor %retry-pending)
    (turn-stream :initform nil :accessor %turn-stream)
    (last-request-chars :initform nil :accessor %last-request-chars)
-   (emitter :initform nil :accessor %emitter))
+   (fanout :initform nil :accessor %fanout)
+   ;; (sink . emitter) for each function sink this agent started an emitter for.
+   (emitters :initform nil :accessor %emitters)
+   (local-subscribers :initform nil :accessor %local-subscribers)
+   ;; Unbound for a root agent, so a child's events are told apart by the key
+   ;; being present even when its parent is unnamed.
+   (parent-name :initarg :parent-name :reader agent-parent-name))
   (:default-initargs :name nil))
 
 (defmethod m:metadata ((service agent))
@@ -156,6 +162,8 @@ string or pathname: record there instead.")
     (:steer (queue-steer service (rest message)))
     (:resume (resume-request service (rest message)))
     (:cancel (cancel-run service))
+    (:subscribe (subscribe service (second message)))
+    (:unsubscribe (unsubscribe service (second message)))
     (:step (step-agent service))
     (:deadline (deadline-run service))
     (:detach (destructuring-bind (ref id name) (rest message)
@@ -241,16 +249,22 @@ log or the id was used for other messages."
         ;; first turn below, after the seed messages.
         (%allow-list service) (resolve-tools service)
         (%running-p service) t)
-  (unless (%emitter service)
-    (setf (%emitter service) (start-emitter (agent-sink service))))
+  (unless (%fanout service)
+    (open-fanout service))
   (let* ((ids (getf args :resume))
-         (answer (and ids (resume-calls service ids (getf args :force)))))
-    (cond ((and ids (not (getf args :messages)) (null (getf (second answer) :resumed)))
+         (answer nil)
+         (resumed nil))
+    (when ids
+      (multiple-value-setq (answer resumed) (resume-calls service ids (getf args :force))))
+    (cond ((and ids (not (getf args :messages)) (null resumed))
            (setf (%running-p service) nil)
            (record-input-done service :error)
-           (retire-emitter service)
+           (retire-emitters service)
            answer)
-          (t (arm-deadline service)
+          (t (emit service (run-start-event (m:agent-ref service) (getf args :messages)
+                                            (and (getf args :continue) t)))
+             (dispatch-resumed-calls service resumed)
+             (arm-deadline service)
              (if (or (getf args :messages) (null ids))
                  (m:cast (m:self) '(:step))
                  (setf (%awaiting-detached service) t))
@@ -294,7 +308,9 @@ usual."
                           (vault-record path (m:service-name service) content
                                         :claim t :input-id input-id)))
                (cond ((not duplicate)
-                      (push (list* id path (list :role :user :content content))
+                      (push (list id path (list :role :user :content content)
+                                  (list :steer t :interrupt (and (getf args :interrupt) t)
+                                        :input-id input-id))
                             (%steer-queue service))
                       (wake-if-waiting service)
                       (steer-interrupted service args))
@@ -354,12 +370,16 @@ another process holds or that is already consumed."
                        (%steer-queue service))))
 
 (defmethod m:dispose ((service agent) reason)
-  (declare (ignore reason))
   (release-steer-claims service)
   (record-outstanding service :abandoned)
   (close-detached service :abandoned)
   (record-input-done service :abandoned)
-  (retire-emitter service))
+  (retire-emitters service)
+  ;; TODO: a :temporary agent exits :done, as one about to restart does, so
+  ;; its subscribers outlive it and a later mount of the name inherits them.
+  ;; Needs meow to tell the service it will not be restarted (#197).
+  (when (eq reason :shutdown)
+    (setf (subscribers service) nil)))
 
 (defun cancel-run (service)
   (if (%running-p service)
@@ -385,20 +405,26 @@ another process holds or that is already consumed."
   "Steering only folds in between turns, so a message queued mid-turn never
 lands ahead of the assistant reply or tool results already owed."
   (dolist (cell (nreverse (shiftf (%steer-queue service) nil)))
-    (push-message service (cddr cell))
-    (a:when-let ((id (car cell)))
-      (vault-consume (cadr cell) id :folded))))
+    (destructuring-bind (id path message meta) cell
+      (push-message service message)
+      (when (getf meta :steer)
+        (emit service (steer-event (m:agent-ref service) (getf message :content)
+                                   (getf meta :interrupt) (getf meta :input-id))))
+      (when id
+        (vault-consume path id :folded)))))
 
 (defun issue-turn (service)
   (fold-steers service)
   (incf (%turns service))
   (setf (%attempt service) 0)
-  (emit-event (agent-events service) (turn-event (m:agent-ref service) (%turns service)))
+  (emit service (turn-event (m:agent-ref service) (%turns service)))
   (send-turn service))
 
 (defun send-turn (service)
   (setf (%turn-in-flight service) t
-        (%turn-stream service) (and (agent-sink service) (make-turn-stream)))
+        (%turn-stream service) (and (%fanout service)
+                                   (fanout-listening-p (%fanout service))
+                                   (make-turn-stream)))
   (let ((ref (incf (%step-ref service)))
         (request (build-request service
                                 (setf (%turn-token service) (make-cancel-token))
@@ -455,7 +481,7 @@ dispatched in."
                           :reserved (%printed-size tools))
       (setf (%last-request-chars service) chars)
       (when record
-        (emit-event (agent-events service)
+        (emit service
                     (context-trimmed-event (m:agent-ref service) (%turns service) record)))
       (make-request service token stream messages tools))))
 
@@ -463,7 +489,7 @@ dispatched in."
   (list* :cancel token
          :messages messages
          :tools tools
-         :stream (and stream (turn-stream-sink stream (agent-events service)))
+         :stream (and stream (turn-stream-sink stream service))
          :ref (m:agent-ref service)
          :timeout (agent-turn-timeout service)
          (agent-sampling service)))
@@ -554,7 +580,7 @@ interrupt -- leaves the timer's :RETRY unmatchable."
          (ref (%step-ref service))
          (self (m:self)))
     (close-turn-stream service)
-    (emit-event (agent-events service)
+    (emit service
                 (turn-retry-event (m:agent-ref service) (%turns service) attempt
                                   (tool-error result)))
     (setf (%turn-in-flight service) t
@@ -583,7 +609,7 @@ interrupt -- leaves the timer's :RETRY unmatchable."
         (%queued service) calls)
   (record-accepted service calls)
   (dolist (call calls)
-    (emit-event (agent-events service)
+    (emit service
                 (tool-call-event (m:agent-ref service) (getf call :id)
                                  (getf call :name) (getf call :arguments))))
   (pump-calls service)
@@ -669,6 +695,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
          (child (m:delegate context 'agent :ref (cons (%step-ref service) id)
                             :model (agent-model service)
                             :tools (%allow-list service)
+                            :parent-name (m:service-name service)
                             :sub-agents nil
                             :max-turns (agent-max-turns service)
                             :max-parallel-tools (agent-max-parallel-tools service)
@@ -681,7 +708,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :retry-backoff (agent-retry-backoff service)
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
-                            :sink (agent-events service)
+                            :sink (%fanout service)
                             :vault (agent-vault service)
                             :call-log (agent-call-log service))))
     (on-cancel (call-token service id) (lambda () (m:cast child '(:cancel))))
@@ -706,7 +733,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
     (when (and cell (outstanding-p (cdr cell)))
       (setf (cdr cell) result)
       (record-done service (list (list id result)))
-      (emit-event (agent-events service) (tool-result-event (m:agent-ref service) id result))
+      (emit service (tool-result-event (m:agent-ref service) id result))
       (settle-calls service))
     nil))
 
@@ -736,7 +763,7 @@ call that has answered, or belongs to an earlier step, is left alone. Past
                         :log-id (call-log-id service id))
                   (%detached service))
             (setf (cdr cell) (ok :status "running" :note "the result follows in a later message"))
-            (emit-event (agent-events service) (tool-detached-event (m:agent-ref service) id name))
+            (emit service (tool-detached-event (m:agent-ref service) id name))
             (settle-calls service)
             t)
           (setf (%detach-deferred service)
@@ -761,14 +788,15 @@ deferred by :MAX-DETACHED."
       (setf (%detached service) (remove entry (%detached service)))
       (destructuring-bind (&key name log-id (call-id (cdr key)) &allow-other-keys) (cdr entry)
         (record-log-done service (list (list log-id result)))
-        (emit-event (agent-events service)
+        (emit service
                     (tool-result-event (m:agent-ref service) call-id result))
-        (push (list* nil nil
-                     (list :role :user
-                           :content (format nil "[tool call ~a (~(~a~)) finished: ~a]"
-                                            call-id name
-                                            (%cut-text (render-tool-result result)
-                                                       (agent-max-tool-result service)))))
+        (push (list nil nil
+                    (list :role :user
+                          :content (format nil "[tool call ~a (~(~a~)) finished: ~a]"
+                                           call-id name
+                                           (%cut-text (render-tool-result result)
+                                                      (agent-max-tool-result service))))
+                    nil)
               (%steer-queue service))
         (detach-deferred service)
         (wake-if-waiting service))))
@@ -792,7 +820,7 @@ issued twice."
         (a:when-let ((path (call-log-of service)))
           (when log-id (call-log-done path (list (list log-id outcome nil)))))
         (when (eq outcome :interrupted)
-          (emit-event (agent-events service)
+          (emit service
                       (tool-result-event (m:agent-ref service) (cdr (car entry))
                                          (fail :interrupted))))))))
 
@@ -819,7 +847,10 @@ on them, continuing the conversation."
         (force (getf args :force)))
     (cond ((null ids) (bad-request ":ids is required"))
           ((resume-problem service (list :resume ids :continue t)))
-          ((%running-p service) (resume-calls service ids force))
+          ((%running-p service)
+           (multiple-value-bind (answer resumed) (resume-calls service ids force)
+             (dispatch-resumed-calls service resumed)
+             answer))
           (t (start-run service (list :continue t :resume ids :force force))))))
 
 (defun resume-refusal (service entry force)
@@ -839,8 +870,9 @@ arguments."
                (error () "its arguments do not parse"))))))
 
 (defun resume-calls (service ids force)
-  "Run the logged calls IDS again in the run under way, each as a detached
-call, and answer (:OK :RESUMED ((old-id . new-id) ...) :REFUSED ((id reason) ...)).
+  "Choose and log the calls IDS to run again, and answer (:OK :RESUMED ((old-id
+. new-id) ...) :REFUSED ((id reason) ...)) and the chosen calls, for
+DISPATCH-RESUMED-CALLS to run, each as a detached call.
 FORCE resumes a call to a tool that is not :RESUMABLE. A resumed call is
 detached, so it counts toward :MAX-DETACHED, and one past it is refused."
   (multiple-value-bind (resumed refused)
@@ -854,12 +886,15 @@ detached, so it counts toward :MAX-DETACHED, and one past it is refused."
                                    ((and room (<= room 0)) "max-detached reached")
                                    (t (when room (decf room))
                                       (values nil arguments)))))))
-    (dolist (item resumed)
-      (destructuring-bind (old new entry arguments) item
-        (declare (ignore old))
-        (dispatch-resumed service new entry arguments)))
-    (ok :resumed (mapcar (lambda (item) (cons (first item) (second item))) resumed)
-        :refused refused)))
+    (values (ok :resumed (mapcar (lambda (item) (cons (first item) (second item))) resumed)
+                :refused refused)
+            resumed)))
+
+(defun dispatch-resumed-calls (service resumed)
+  (dolist (item resumed)
+    (destructuring-bind (old new entry arguments) item
+      (declare (ignore old))
+      (dispatch-resumed service new entry arguments))))
 
 (defun dispatch-resumed (service log-id entry arguments)
   (let ((name (getf entry :name))
@@ -869,7 +904,7 @@ detached, so it counts toward :MAX-DETACHED, and one past it is refused."
     (push (list (cons ref log-id) :name name :call-id call-id :token token :log-id log-id)
           (%detached service))
     (call-log-running (call-log-of service) (list log-id))
-    (emit-event (agent-events service) (tool-resumed-event (m:agent-ref service) call-id name))
+    (emit service (tool-resumed-event (m:agent-ref service) call-id name))
     (send-call service (list :tool ref log-id) #'%tool-call name (list* :cancel token arguments)
               :unbounded t)
     nil))
@@ -896,7 +931,7 @@ or an :INTERRUPTED error where none has arrived."
   (dolist (cell (%pending service))
     (when (outstanding-p (cdr cell))
       (setf (cdr cell) (fail :interrupted))
-      (emit-event (agent-events service)
+      (emit service
                   (tool-result-event (m:agent-ref service) (car cell) (cdr cell)))))
   (dolist (message (pending-tool-messages service))
     (push-message service message))
@@ -1120,18 +1155,94 @@ one that reads implausibly, leaves the last ratio."
 ;;; that blocks never holds up HANDLE. :RUN-DONE is the last event it sees.
 
 (defun agent-events (service)
-  "Where SERVICE's events go: its emitter, or a process or emitter sink. Nil
-when a function sink has no emitter running, so it is never called here."
-  (let ((sink (agent-sink service)))
-    (cond ((%emitter service))
-          ((typep sink '(or m:process emitter)) sink))))
+  "Where SERVICE's events go: its fanout over the :SINK and the subscribers,
+which is nil while no run is under way."
+  (%fanout service))
 
-(defun retire-emitter (service)
-  "Stop the emitter once it has delivered what it was sent, and kill it if
-the sink has not taken that within *SINK-GRACE*."
-  (a:when-let ((emitter (shiftf (%emitter service) nil)))
-    (stop-emitter emitter)
-    (reap-emitter emitter *sink-grace*)))
+(defun emit (service event)
+  "Deliver EVENT, tagged with SERVICE's name and, for a child, its parent's."
+  (when (%fanout service)
+    (emit-event (%fanout service)
+                (append event
+                        (list :agent (m:service-name service))
+                        (and (slot-boundp service 'parent-name)
+                             (list :parent (agent-parent-name service)))))))
+
+(defvar *subscribers-lock* (bt:make-lock))
+(defvar *subscribers* (make-hash-table :test 'eq :weakness :key)
+  "Registry -> name -> subscribed sinks, so a named agent's subscribers outlive
+the fresh instance mount restarts it as after each run.")
+
+(defun subscribers (service)
+  (a:if-let ((name (m:service-name service)))
+    (bt:with-lock-held (*subscribers-lock*)
+      (a:when-let ((table (gethash (m:service-registry service) *subscribers*)))
+        (gethash name table)))
+    (%local-subscribers service)))
+
+(defun (setf subscribers) (sinks service)
+  (a:if-let ((name (m:service-name service)))
+    (bt:with-lock-held (*subscribers-lock*)
+      (let ((table (or (gethash (m:service-registry service) *subscribers*)
+                       (setf (gethash (m:service-registry service) *subscribers*)
+                             (make-hash-table :test 'equal)))))
+        (setf (gethash name table) sinks)))
+    (setf (%local-subscribers service) sinks)))
+
+(defun sink-target (service sink)
+  "Where SINK's events go: an emitter SERVICE starts for a function, otherwise
+SINK itself."
+  (a:if-let ((emitter (start-emitter sink)))
+    (progn (push (cons sink emitter) (%emitters service))
+           emitter)
+    sink))
+
+(defun open-fanout (service)
+  (let ((fanout (make-fanout)))
+    (dolist (sink (append (and (agent-sink service) (list (agent-sink service)))
+                          (subscribers service)))
+      (fanout-add fanout (sink-target service sink)))
+    (setf (%fanout service) fanout)))
+
+(defun retire-emitter (emitter)
+  "Stop EMITTER once it has delivered what it was sent, and kill it if the sink
+has not taken that within *SINK-GRACE*."
+  (stop-emitter emitter)
+  (reap-emitter emitter *sink-grace*))
+
+(defun retire-emitters (service)
+  "Retire the emitters SERVICE started, and only those: a child's sink is its
+parent's fanout, which the parent's own run-end retires."
+  (setf (%fanout service) nil)
+  (dolist (cell (shiftf (%emitters service) nil))
+    (retire-emitter (cdr cell))))
+
+(defun subscribe (service sink)
+  (cond ((not (and sink (typep sink '(or function symbol m:process))))
+         (bad-request ":subscribe takes a function, a symbol or a process"))
+        (t (unless (or (eq sink (agent-sink service))
+                       (member sink (subscribers service)))
+             (setf (subscribers service) (append (subscribers service) (list sink)))
+             (a:when-let ((fanout (%fanout service)))
+               (fanout-add fanout (sink-target service sink))))
+           (if (%running-p service)
+               (ok :running t :turn (%turns service))
+               (ok :running nil)))))
+
+(defun unsubscribe (service sink)
+  (cond ((eq sink (agent-sink service))
+         (bad-request "the mount :sink cannot be unsubscribed"))
+        ((not (member sink (subscribers service)))
+         (bad-request "~s is not subscribed" sink))
+        (t (setf (subscribers service) (remove sink (subscribers service)))
+           (let ((cell (assoc sink (%emitters service)))
+                 (fanout (%fanout service)))
+             (when fanout
+               (fanout-remove fanout (if cell (cdr cell) sink)))
+             (when cell
+               (setf (%emitters service) (remove cell (%emitters service)))
+               (retire-emitter (cdr cell))))
+           :ok)))
 
 ;;; --- a turn's stream ------------------------------------------------------
 
@@ -1145,13 +1256,13 @@ the sink has not taken that within *SINK-GRACE*."
   (text (make-string-output-stream))
   (superseded nil))
 
-(defun turn-stream-sink (stream events)
+(defun turn-stream-sink (stream service)
   (lambda (event)
     (bt:with-lock-held ((turn-stream-lock stream))
       (unless (turn-stream-superseded stream)
         (when (eq (getf event :type) :text-delta)
           (write-string (getf event :text) (turn-stream-text stream)))
-        (emit-event events event)))))
+        (emit service event)))))
 
 (defun close-turn-stream (service &optional last-event)
   "Close the turn's stream to further events, emit LAST-EVENT, if given, and
@@ -1162,7 +1273,7 @@ tell or keep."
         (bt:with-lock-held ((turn-stream-lock stream))
           (setf (turn-stream-superseded stream) t)
           (when last-event
-            (emit-event (agent-events service) last-event))
+            (emit service last-event))
           (get-output-stream-string (turn-stream-text stream)))
         "")))
 
@@ -1191,12 +1302,12 @@ timeout."
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
   (incf (%step-ref service))
-  (emit-event (agent-events service)
+  (emit service
               (run-done-event (m:agent-ref service)
                               (if (tool-error-p result)
                                   (tool-error result)
                                   (getf (second result) :stop-reason))))
-  (retire-emitter service)
+  (retire-emitters service)
   (values :done result))
 
 (defun arm-deadline (service)
@@ -1215,6 +1326,12 @@ timeout."
 ;;; The protocol's own :TEXT-DELTA / :TOOL-CALL-DELTA / :DONE pass through
 ;;; the turn's stream. These are the loop's own, all echoing :REF as the
 ;;; protocol events do.
+
+(defun run-start-event (ref messages continue)
+  (list :type :run-start :ref ref :messages messages :continue continue))
+
+(defun steer-event (ref content interrupt input-id)
+  (list :type :steer :ref ref :content content :interrupt interrupt :input-id input-id))
 
 (defun turn-event (ref n) (list :type :turn :ref ref :turn n))
 

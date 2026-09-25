@@ -315,13 +315,34 @@ across deltas."
   scheduled stopping dead finished job thread
   (drained (bt:make-semaphore)))
 
+(defstruct (fanout (:constructor make-fanout (&optional targets)))
+  (lock (bt:make-lock)) targets)
+
+(defun fanout-add (fanout target)
+  (bt:with-lock-held ((fanout-lock fanout))
+    (pushnew target (fanout-targets fanout))))
+
+(defun fanout-remove (fanout target)
+  (bt:with-lock-held ((fanout-lock fanout))
+    (setf (fanout-targets fanout) (remove target (fanout-targets fanout)))))
+
+(defun fanout-listening-p (fanout)
+  "Whether anything is on the far end of FANOUT, however deeply nested."
+  (some (lambda (target)
+          (if (typep target 'fanout) (fanout-listening-p target) t))
+        (bt:with-lock-held ((fanout-lock fanout))
+          (fanout-targets fanout))))
+
 (defun emit-event (sink event)
-  "Deliver EVENT to SINK, a function, a meow process or an emitter. A null
-sink drops it."
+  "Deliver EVENT to SINK, a function, a meow process, an emitter or a fanout
+of those. A null sink drops it."
   (etypecase sink
     (null nil)
     (m:process (m:send sink event))
     (emitter (emitter-send sink event))
+    (fanout (dolist (target (bt:with-lock-held ((fanout-lock sink))
+                              (reverse (fanout-targets sink))))
+              (emit-event target event)))
     ((or function symbol) (funcall sink event)))
   event)
 

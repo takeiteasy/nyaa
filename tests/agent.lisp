@@ -406,10 +406,13 @@ sink's events, oldest first."
                        (last (getf (second result) :messages) 3))))
     (let ((body (getf (second requests) :body)))
       (is (< (search "partial " body) (search "change of plan" body))))
-    (is (equal '(:turn :text-delta :turn-interrupted :turn :text-delta :done :run-done)
+    (is (equal '(:run-start :turn :text-delta :turn-interrupted :steer :turn :text-delta :done :run-done)
                (event-types events)))
     (is (eql 1 (getf (find :turn-interrupted events :key (lambda (e) (getf e :type)))
-                     :turn)))))
+                     :turn)))
+    (let ((steer (find :steer events :key (lambda (e) (getf e :type)))))
+      (is (equal "change of plan" (getf steer :content)))
+      (is (eq t (getf steer :interrupt))))))
 
 (test an-interrupt-without-a-sink-keeps-nothing
   (let ((n 0))
@@ -805,7 +808,7 @@ RUN-ARGS and return the run's result."
       ;; :TEXT-DELTA/:DONE are the protocol's own, passed straight through
       ;; because :STREAM is handed down in the request; :TURN and :RUN-DONE
       ;; are the loop's.
-      (is (equal '(:turn :text-delta :text-delta :done :run-done)
+      (is (equal '(:run-start :turn :text-delta :text-delta :done :run-done)
                  (event-types (recorded-events recorder)))))))
 
 ;;; A failed turn ends the sink's turn with a failed :DONE, ahead of the loop's
@@ -817,9 +820,9 @@ RUN-ARGS and return the run's result."
                                :sink (recorder-sink recorder)))
            (events (recorded-events recorder)))
       (is (eq :backend-error (first (nyaa:tool-error result))))
-      (is (equal '(:turn :done :run-done)
+      (is (equal '(:run-start :turn :done :run-done)
                  (mapcar (lambda (e) (getf e :type)) events)))
-      (is (nyaa:tool-error-p (getf (second events) :reason))))))
+      (is (nyaa:tool-error-p (getf (third events) :reason))))))
 
 ;;; A function sink is called from one emitter per agent, a sub-agent's
 ;;; events included, one event at a time, so a sink that blocks never holds up
@@ -888,7 +891,7 @@ RUN-ARGS and return the run's result."
                (is-true (eventually (lambda () (recorder-has recorder :text-delta))))
                (m:cast child '(:cancel))
                (is-true (nth-value 1 (m:receive :timeout 5)))
-               (is (equal '(:turn :text-delta :run-done)
+               (is (equal '(:run-start :turn :text-delta :run-done)
                           (event-types (recorded-events recorder))))))
         (setf (car release) t)))))
 
@@ -907,7 +910,7 @@ RUN-ARGS and return the run's result."
                (setf (car release) t)
                (m:cast child (list :run :continue t))
                (is-true (nth-value 1 (m:receive :timeout 5)))
-               (is (equal '(:turn :text-delta :turn :text-delta :done :run-done)
+               (is (equal '(:run-start :turn :text-delta :run-start :turn :text-delta :done :run-done)
                           (event-types (recorded-events recorder))))))
         (setf (car release) t)))))
 
@@ -1239,7 +1242,7 @@ test's."
         (is (eq :stop (getf (second result) :stop-reason)))
         (let* ((events (recorded-events recorder))
                (retry (find :turn-retry events :key (lambda (e) (getf e :type)))))
-          (is (equal '(:turn :done :turn-retry) (subseq (event-types events) 0 3)))
+          (is (equal '(:run-start :turn :done :turn-retry) (subseq (event-types events) 0 4)))
           (is (= 1 (count :turn events :key (lambda (e) (getf e :type)))))
           (is (eq :run-done (getf (car (last events)) :type)))
           (is (= 1 (getf retry :attempt)))

@@ -25,7 +25,7 @@
    ;; agent convention
    #:agent #:agents #:describe-agent #:run-agent
    #:fork-conversation #:fork-agent
-   #:turn-event #:tool-call-event #:tool-result-event #:run-done-event
+   #:run-start-event #:steer-event #:turn-event #:tool-call-event #:tool-result-event #:run-done-event
    ;; checkpoints
    #:snapshot #:restore #:secret-initargs #:checkpoint #:rollback #:generations
    #:*generations-directory*

@@ -98,7 +98,8 @@ repeating."
           (let ((types (event-types (recorded-events recorder))))
             (is (< (position :tool-call types) (position :tool-detached types)))
             (is (< (position :tool-detached types) (position :tool-result types)))
-            (is (eq :run-done (car (last types))))))))))
+            (is (eq :run-done (car (last types))))
+            (is (not (member :steer types)) "a folded result is not a steer")))))))
 
 (test a-cancel-while-a-call-is-detached-closes-it
   (setf *tool-wait-cancelled* nil)

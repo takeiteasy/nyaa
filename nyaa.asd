@@ -126,6 +126,7 @@
                (:file "vault")
                (:file "calls")
                (:file "detach")
+               (:file "events")
                (:file "resume")
                (:file "inputs")
                (:file "image-generation")

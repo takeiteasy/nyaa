@@ -149,13 +149,15 @@ outcome, if given."
 
 (test resuming-with-nothing-to-say-starts-no-run-when-every-call-is-refused
   (with-vault-path (path)
+   (let ((recorder (make-recorder)))
     (seed-call path "slow" :name :tool-slow)
     (seed-call path "out" :name :tool-echo)
     (seed-call path "sub" :name :agent-task)
     (with-agent ((scripted (final-reply "unused")) 'tool-again 'tool-slow)
       (m:with-process (runner)
         (let* ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
-                                  :tools '(:tool-again :tool-slow) :call-log path))
+                                  :tools '(:tool-again :tool-slow) :call-log path
+                                  :sink (recorder-sink recorder)))
                (answer (call-child child (list :resume :ids '("slow" "out" "sub")))))
           (is (null (getf (second answer) :resumed)))
           (is (equal '("slow" "out" "sub") (mapcar #'first (getf (second answer) :refused))))
@@ -165,7 +167,8 @@ outcome, if given."
             (is (search "sub-agent" (second sub))))
           (is (null (requests)))
           (is (null (getf (call-child child '(:snapshot)) :in-flight))
-              "an agent that started no run is still idle"))))))
+              "an agent that started no run is still idle")
+          (is (null (recorded-events recorder)) "and announced nothing")))))))
 
 (test force-resumes-a-call-to-a-tool-that-is-not-resumable
   (with-vault-path (path)
