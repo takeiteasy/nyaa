@@ -1,6 +1,11 @@
 (in-package #:nyaa/tests)
 (in-suite :nyaa)
 
+(defun count-matches (needle haystack)
+  (loop for start = 0 then (+ found (length needle))
+        for found = (search needle haystack :start2 start)
+        while found count t))
+
 ;;; Checkpoints and rollback (~takeiteasy/nyaa#11): SNAPSHOT/RESTORE across
 ;;; the shared convention, the generation file on disk, drift reporting, the
 ;;; agent's own state trimming, and TOOL-CHECKPOINT.
@@ -88,6 +93,21 @@
                    (getf (first (getf (first (getf (nyaa::%read-generation path) :messages))
                                       :tool-calls))
                          :schema))))))))
+
+(test a-schema-two-calls-share-is-written-once-and-read-back-shared
+  (with-generations-directory (dir)
+    (ensure-directories-exist dir)
+    (let* ((path (merge-pathnames "shared.generation" dir))
+           (schema (list (list :cmd 'string :required t :doc "run it")))
+           (calls (loop for id in '("c1" "c2")
+                        collect (list :id id :name :tool-http :arguments nil :schema schema)))
+           (form (list :nyaa-generation 1 :messages
+                       (list (list :role :assistant :tool-calls calls)))))
+      (nyaa::%write-generation path form)
+      (is (= 1 (count-matches "run it" (uiop:read-file-string path))))
+      (let ((read (getf (first (getf (nyaa::%read-generation path) :messages)) :tool-calls)))
+        (is (equal calls read))
+        (is (eq (getf (first read) :schema) (getf (second read) :schema)))))))
 
 (test reading-a-generation-never-evaluates
   ;; *READ-EVAL* is nil around the read, the same guard tool-eval's worker

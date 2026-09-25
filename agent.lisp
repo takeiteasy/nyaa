@@ -627,7 +627,10 @@ model knows it saw part of it."
 (defun %message-size (message)
   (+ (length (content-text (getf message :content)))
      (let ((calls (getf message :tool-calls)))
-       (if calls (%printed-size calls) 0))))
+       ;; The schema a call carries never reaches the wire.
+       (if calls
+           (%printed-size (mapcar (lambda (call) (a:remove-from-plist call :schema)) calls))
+           0))))
 
 (defun %conversation-units (messages)
   "The indices of MESSAGES that go together, oldest first: an assistant turn

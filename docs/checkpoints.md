@@ -77,7 +77,9 @@ options, and its `:initargs` as text[^text]. Services are listed parent first.
 Read with `*read-eval*` bound to `nil` — the same guard `tool-eval`'s worker
 applies to a submitted form — so a generation can never run code merely by
 being read back in. Written through a temporary file and renamed in, so a
-torn write never replaces a good one.
+torn write never replaces a good one. A list the state shares, such as the tool
+schema each call in an agent's history carries, is written once and read back
+shared.
 
 ## Credentials
 

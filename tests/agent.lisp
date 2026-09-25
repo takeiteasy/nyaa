@@ -1427,3 +1427,10 @@ first message of each request as the backend saw it."
       (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
                                :max-context 1234)))
         (is (= 1234 (getf (m:call child '(:describe)) :max-context)))))))
+
+(test a-tool-calls-schema-does-not-count-toward-the-context-estimate
+  (let ((call (list :id "c1" :name :tool-http :arguments '(:url "x")))
+        (schema '((:url string :required t :doc "where to fetch"))))
+    (is (= (nyaa::%message-size (list :role :assistant :tool-calls (list call)))
+           (nyaa::%message-size (list :role :assistant
+                                      :tool-calls (list (list* :schema schema call))))))))

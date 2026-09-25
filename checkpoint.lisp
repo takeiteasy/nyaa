@@ -171,7 +171,10 @@ cannot bring back."
 renamed in, so a torn write never replaces a good generation."
   (uiop:with-temporary-file (:pathname tmp :directory (uiop:pathname-directory-pathname path)
                              :type "tmp" :keep t)
-    (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase))
+    ;; Circle detection writes a list the form shares, such as a tool schema
+    ;; several calls carry, once.
+    (let ((*package* (find-package "KEYWORD")) (*print-case* :downcase)
+          (*print-circle* t))
       (a:write-string-into-file (prin1-to-string form) tmp :if-exists :supersede))
     (uiop:rename-file-overwriting-target tmp path)))
 
