@@ -97,6 +97,28 @@ travels in a TOOL-IMAGE reply.")
                                     :package "nyaa/tests")))
       (is (stringp (getf (result-value result :source) :form))))))
 
+(defgeneric %introspect-generic (x))
+(defmethod %introspect-generic ((x integer)) x)
+(defmethod %introspect-generic ((x string)) x)
+
+(test image-source-lists-a-generic-functions-methods
+  (with-tools
+    (let ((result (tool :tool-image :op :source :symbol "%introspect-generic"
+                                    :package "nyaa/tests")))
+      (is (eq t (result-value result :available)))
+      (is (= 2 (result-value result :methods-total)))
+      (is (eq nil (result-value result :methods-truncated)))
+      (is (equal '("(INTEGER)" "(STRING)")
+                 (sort (mapcar (lambda (m) (getf m :specializers))
+                               (result-value result :methods))
+                       #'string<))))))
+
+(test image-describe-carries-a-plain-function-without-methods
+  (with-tools
+    (let ((result (tool :tool-image :op :describe :symbol "complete" :package "nyaa")))
+      (is (eq t (getf (result-value result :source) :available)))
+      (is (null (getf (result-value result :source) :methods))))))
+
 (test image-packages-lists-the-loaded-image
   (with-tools
     (is (member "NYAA" (mapcar (lambda (p) (getf p :name))

@@ -20,7 +20,7 @@ even for a bound special: `tool-eval`, `tool-repl` and `tool-self`, all
 | `:describe` | `:symbol` (required), `:package` | `:name`, `:package`, `:fboundp`, `:boundp`, `:kind`, `:lambda-list`, `:documentation`, `:variable-documentation`, `:source` |
 | `:apropos` | `:pattern` (required), `:package`, `:external-only` (default `t`), `:limit` (default 100) | `:symbols`, `:total`, `:truncated` |
 | `:documentation` | `:symbol` (required), `:doc-type` (default `:function`) | `:documentation` |
-| `:source` | `:symbol` (required), `:doc-type` | `:available`, and `:file`/`:position` or `:form`/`:truncated` when it is |
+| `:source` | `:symbol` (required), `:doc-type` | `:available`, and `:file`/`:position` or `:form`/`:truncated` when it is, and `:methods` for a generic function |
 | `:packages` | — | `:packages` — each loaded package's name and nicknames |
 
 `:symbol` is `"nyaa:complete"` or `"complete"` against `:package` (or
@@ -53,6 +53,19 @@ printed lambda expression as `:form`, capped at 4000 characters with
 ```lisp
 (nyaa:invoke-tool :tool-image :op :source :symbol "my-fn")
 ;; => (:ok (:available t :form "(LAMBDA (X) (BLOCK MY-FN (1+ X)))" :truncated nil))
+```
+
+A generic function also answers `:methods`: each method's `:specializers`,
+`:qualifiers` and, when it was loaded from a file, `:file` and `:position`.
+It is capped at 100, with `:methods-total` and `:methods-truncated`. A method
+defined in the image has no source form, only its specializers. `:describe`
+carries the same under its `:source`.
+
+```lisp
+(nyaa:invoke-tool :tool-image :op :source :symbol "my-generic")
+;; => (:ok (:available t :methods ((:specializers "(INTEGER)" :qualifiers "NIL"
+;;                                   :file "/.../my.lisp" :position 120))
+;;          :methods-total 1 :methods-truncated nil))
 ```
 
 Lambda lists and file locations come from `sb-introspect`; `:form` comes from

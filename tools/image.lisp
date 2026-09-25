@@ -88,7 +88,7 @@ answer the (:bad-request ...) naming what went wrong."
         :lambda-list (symbol-lambda-list symbol)
         :documentation (documentation symbol 'function)
         :variable-documentation (documentation symbol 'variable)
-        :source (or (symbol-source symbol) (list :available nil)))))
+        :source (source-report symbol))))
 
 (defun symbol-kind (symbol)
   "SYMBOL's role, best guess: a symbol can be several of these at once --
@@ -154,9 +154,18 @@ the implementation cannot say."
 (defun op-source (symbol-text package-text doc-type)
   (declare (ignore doc-type)) ;; only function source locations are offered; see docs/introspection.md
   (with-resolved-symbol (symbol symbol-text package-text)
-    (a:if-let (source (symbol-source symbol))
-      (apply #'ok :available t source)
-      (ok :available nil))))
+    (apply #'ok (source-report symbol))))
+
+(defun source-report (symbol)
+  "SYMBOL's :available, its source location or form, and for a generic
+function its :methods."
+  (let ((source (symbol-source symbol))
+        (methods (symbol-methods symbol)))
+    (append (list :available (and (or source methods) t))
+            source
+            (and methods (list :methods (mapcar #'method-report (subseq methods 0 (min (length methods) +method-limit+)))
+                               :methods-total (length methods)
+                               :methods-truncated (> (length methods) +method-limit+))))))
 
 (defconstant +source-form-limit+ 4000
   "Characters of a definition's printed form :source returns.")
@@ -167,14 +176,41 @@ its (:form ... :truncated ...); NIL when it is not fbound or has neither."
   (and (fboundp symbol)
        (or (function-source symbol) (function-form symbol))))
 
+(defconstant +method-limit+ 100
+  "Methods of a generic function :source lists.")
+
+(defun print-standard (object)
+  "OBJECT printed on one line, unaffected by the caller's *PRINT-* bindings,
+or NIL if it cannot be printed."
+  (ignore-errors
+   (with-standard-io-syntax
+     (let ((*print-readably* nil) (*print-pretty* nil)
+           (*package* (find-package '#:nyaa)))
+       (prin1-to-string object)))))
+
+(defun symbol-methods (symbol)
+  (and (fboundp symbol)
+       (typep (fdefinition symbol) 'generic-function)
+       (ignore-errors (sb-mop:generic-function-methods (fdefinition symbol)))))
+
+(defun method-report (method)
+  (let* ((source (ignore-errors (sb-introspect:find-definition-source method)))
+         (path (and source (sb-introspect:definition-source-pathname source))))
+    (append (list :specializers (print-standard (mapcar #'specializer-name
+                                                        (sb-mop:method-specializers method)))
+                  :qualifiers (print-standard (method-qualifiers method)))
+            (and path (list :file (namestring path)
+                            :position (sb-introspect:definition-source-character-offset source))))))
+
+(defun specializer-name (specializer)
+  (if (typep specializer 'sb-mop:eql-specializer)
+      (list 'eql (sb-mop:eql-specializer-object specializer))
+      (class-name specializer)))
+
 (defun function-form (symbol)
   (let ((expression (ignore-errors (function-lambda-expression (fdefinition symbol)))))
     (and expression
-         (let ((text (ignore-errors
-                      (with-standard-io-syntax
-                        (let ((*print-readably* nil) (*print-pretty* nil)
-                              (*package* (find-package '#:nyaa)))
-                          (prin1-to-string expression))))))
+         (let ((text (print-standard expression)))
            (and text
                 (list :form (subseq text 0 (min (length text) +source-form-limit+))
                       :truncated (> (length text) +source-form-limit+)))))))
