@@ -61,7 +61,8 @@ steer; it skips the check.
 - A duplicate is answered only to `m:call`; a `m:cast` caller sees no reply.
 - An id is remembered until compaction drops it: 7 days after the input
   finished ([`*call-log-max-age*`](calls.md#api),
-  [`*vault-max-age*`](vault.md#compaction)). A later redelivery is new.
+  [`*vault-max-age*`](vault.md#compaction)). A later redelivery is new
+  ([#182](https://todo.sr.ht/~takeiteasy/nyaa/182)).
 - A `:lost` input is reported, not re-run
   ([#77](https://todo.sr.ht/~takeiteasy/nyaa/77)).
 
