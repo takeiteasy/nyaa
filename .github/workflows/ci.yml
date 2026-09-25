@@ -3,7 +3,14 @@ name: ci
 on:
   push:
     branches: [trunk]
+    paths-ignore: ['docs/**', '**.md', LICENSE, .hut.scfg, .builds/**, .build.yml]
   pull_request:
+    paths-ignore: ['docs/**', '**.md', LICENSE, .hut.scfg, .builds/**, .build.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
