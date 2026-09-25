@@ -86,6 +86,7 @@ string or pathname: record there instead.")
    (queued :initform nil :accessor %queued)
    (call-tokens :initform nil :accessor %call-tokens)
    (call-log-ids :initform nil :accessor %call-log-ids)
+   (input-log-id :initform nil :accessor %input-log-id)
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
    (running-p :initform nil :accessor %running-p)
@@ -152,33 +153,67 @@ string or pathname: record there instead.")
     (t (bad-request "unknown message ~s" (first message)))))
 
 (defun start-run (service args)
-  (if (%running-p service)
-      (bad-request "agent is already running")
-      (progn
-        (setf (%messages service)
-              (revappend (getf args :messages)
-                         (if (and (getf args :continue) (%messages service))
-                             (%messages service)
-                             (and (agent-system service)
-                                  (not (eq :system (getf (first (getf args :messages)) :role)))
-                                  (list (list :role :system :content (agent-system service))))))
-              (%turns service) 0
-              (%pending service) nil
-              (%pending-order service) nil
-              (%queued service) nil
-              (%call-tokens service) nil
-              (%call-log-ids service) nil
-              ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
-              ;; a vault :restore) sent while the agent was idle waits in
-              ;; the queue rather than being dropped, and folds in on the
-              ;; first turn below, after the seed messages.
-              (%allow-list service) (resolve-tools service)
-              (%running-p service) t)
-        (unless (%emitter service)
-          (setf (%emitter service) (start-emitter (agent-sink service))))
-        (arm-deadline service)
-        (m:cast (m:self) '(:step))
-        :ok)))
+  (let ((keyed (and (getf args :input-id)
+                    (accept-input service args :record (not (%running-p service))))))
+    (cond ((tool-error-p keyed) keyed)
+          ((consp keyed) keyed)
+          ((%running-p service) (bad-request "agent is already running"))
+          (t (begin-run service args keyed)))))
+
+(defun messages-digest (messages)
+  (format nil "~(~{~2,'0x~}~)"
+          (coerce (sb-md5:md5sum-string (json:stringify (untyped->json messages))) 'list)))
+
+(defun accept-input (service args &key (record t))
+  "Log a :RUN keyed :INPUT-ID in the call log, unless RECORD is false. Answers
+the log id of a new one, nil when not recorded, or the reply for a
+redelivery, (:OK (:DUPLICATE status)); a bad-request when there is no call
+log or the id was used for other messages."
+  (let ((path (call-log-of service))
+        (input-id (getf args :input-id)))
+    (cond ((not (stringp input-id)) (bad-request ":input-id must be a string"))
+          ((not path) (bad-request ":input-id needs a :call-log"))
+          (t (let ((digest (messages-digest (getf args :messages))))
+               (multiple-value-bind (id duplicate status prior)
+                   (call-log-input path (m:service-name service) input-id digest
+                                   :record record)
+                 (cond ((not duplicate) id)
+                       ((not (equal prior digest))
+                        (bad-request "input-id ~a was used for other content" input-id))
+                       (t (ok :duplicate status)))))))))
+
+(defun record-input-done (service outcome)
+  (a:when-let ((path (call-log-of service)))
+    (a:when-let ((id (%input-log-id service)))
+      (call-log-done path (list (list id outcome nil)))
+      (setf (%input-log-id service) nil))))
+
+(defun begin-run (service args input-log-id)
+  (setf (%input-log-id service) input-log-id
+        (%messages service)
+        (revappend (getf args :messages)
+                   (if (and (getf args :continue) (%messages service))
+                       (%messages service)
+                       (and (agent-system service)
+                            (not (eq :system (getf (first (getf args :messages)) :role)))
+                            (list (list :role :system :content (agent-system service))))))
+        (%turns service) 0
+        (%pending service) nil
+        (%pending-order service) nil
+        (%queued service) nil
+        (%call-tokens service) nil
+        (%call-log-ids service) nil
+        ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
+        ;; a vault :restore) sent while the agent was idle waits in
+        ;; the queue rather than being dropped, and folds in on the
+        ;; first turn below, after the seed messages.
+        (%allow-list service) (resolve-tools service)
+        (%running-p service) t)
+  (unless (%emitter service)
+    (setf (%emitter service) (start-emitter (agent-sink service))))
+  (arm-deadline service)
+  (m:cast (m:self) '(:step))
+  :ok)
 
 (defun resolve-tools (service)
   "The allow-list for this run: an explicit list, or every discovered tool
@@ -197,18 +232,35 @@ whose :TRUST is :AGENT."
 (AGENT-VAULT) and ARGS names no :VAULT-ID, this is a fresh steer and gets
 recorded there first and claimed; a :VAULT-ID names an entry already in the
 vault, claimed by TOOL-VAULT's :RESTORE, which redelivers one this way
-rather than double-recording it, with :VAULT-PATH the log it lives in. The
+rather than double-recording it, with :VAULT-PATH the log it lives in. A
+caller's :INPUT-ID, which needs the vault, makes a redelivery answer (:OK
+(:DUPLICATE status)) instead of queueing a second time. The
 id and path travel in the queue cell, never in the message plist pushed onto
 %MESSAGES, so they can never reach a provider's request. :INTERRUPT true
 also abandons a model turn in flight (INTERRUPT-TURN) or the tool calls
 outstanding (INTERRUPT-TOOLS); otherwise the steer waits for the next turn as
 usual."
   (let* ((content (getf args :content))
-         (path (or (getf args :vault-path) (%vault-path (agent-vault service))))
-         (id (or (getf args :vault-id)
-                 (and path
-                      (vault-record path (m:service-name service) content :claim t)))))
-    (push (list* id path (list :role :user :content content)) (%steer-queue service)))
+         (input-id (getf args :input-id))
+         (path (or (getf args :vault-path) (%vault-path (agent-vault service)))))
+    (cond ((and input-id (not (stringp input-id)))
+           (bad-request ":input-id must be a string"))
+          ((and input-id (not path))
+           (bad-request ":input-id needs a :vault"))
+          (t (multiple-value-bind (id duplicate status prior)
+                 (or (getf args :vault-id)
+                     (and path
+                          (vault-record path (m:service-name service) content
+                                        :claim t :input-id input-id)))
+               (cond ((not duplicate)
+                      (push (list* id path (list :role :user :content content))
+                            (%steer-queue service))
+                      (steer-interrupted service args))
+                     ((not (equal prior content))
+                      (bad-request "input-id ~a was used for other content" input-id))
+                     (t (ok :duplicate status))))))))
+
+(defun steer-interrupted (service args)
   (if (getf args :interrupt)
       ;; An interrupt on the last allowed turn finishes the run, and
       ;; (VALUES :DONE result) is how HANDLE ends it.
@@ -263,6 +315,7 @@ another process holds or that is already consumed."
   (declare (ignore reason))
   (release-steer-claims service)
   (record-outstanding service :abandoned)
+  (record-input-done service :abandoned)
   (retire-emitter service))
 
 (defun cancel-run (service)
@@ -877,6 +930,9 @@ timeout."
         (%queued service) nil
         (%call-tokens service) nil
         (%call-log-ids service) nil)
+  (record-input-done service (if (tool-error-p result)
+                                 :error
+                                 (getf (second result) :stop-reason)))
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
   (incf (%step-ref service))
@@ -925,23 +981,30 @@ timeout."
 
 ;;; --- a blocking entry point --------------------------------------------
 
-(defun run-agent (context &rest initargs &key messages timeout &allow-other-keys)
+(defun run-agent (context &rest initargs &key messages timeout input-id &allow-other-keys)
   "Delegate an agent on CONTEXT (a mounted context's process), run it to
 completion and return its result. The one place nyaa reaches the loop
 synchronously: a plain process is the parent, since a service parent needs
 the meow fix a mounted agent does not (~takeiteasy/meow#59, already applied
-here but not assumed of the caller's own services)."
+here but not assumed of the caller's own services). With :INPUT-ID, which
+needs :CALL-LOG, a redelivered run returns (:OK (:DUPLICATE status)) rather
+than running again."
   (let ((deadline (getf initargs :deadline 300000)))
     (m:with-process (%runner)
-      (let ((child (apply #'m:delegate context 'agent
-                          (a:remove-from-plist initargs :messages :timeout))))
-        (m:cast child (list :run :messages messages))
-        (multiple-value-bind (message received)
-            (m:receive :timeout (or timeout (/ deadline 1000.0d0)))
-          (cond
-            ((not received) (fail :timeout))
-            ((eq (first message) :agent-done) (fourth message))
-            (t (fail (list :error (third message))))))))))
+      (let* ((child (apply #'m:delegate context 'agent
+                           (a:remove-from-plist initargs :messages :timeout :input-id)))
+             (accepted (multiple-value-call #'%call-result
+                         (m:call child (list* :run :messages messages
+                                              (and input-id (list :input-id input-id)))))))
+        (cond ((not (eq accepted :ok))
+               (m:kill child)
+               accepted)
+              (t (multiple-value-bind (message received)
+                     (m:receive :timeout (or timeout (/ deadline 1000.0d0)))
+                   (cond
+                     ((not received) (fail :timeout))
+                     ((eq (first message) :agent-done) (fourth message))
+                     (t (fail (list :error (third message))))))))))))
 
 ;;; --- checkpoints (~takeiteasy/nyaa#11) ----------------------------------
 
@@ -965,6 +1028,7 @@ here but not assumed of the caller's own services)."
   (cancel-turn service)
   (cancel-pending-calls service)
   (record-outstanding service :interrupted)
+  (record-input-done service :interrupted)
   (release-steer-claims service)
   (setf (%messages service) (reverse (getf state :messages))
         (%turns service) (getf state :turns)
@@ -972,6 +1036,7 @@ here but not assumed of the caller's own services)."
         (%pending-order service) nil
         (%call-tokens service) nil
         (%call-log-ids service) nil
+        (%input-log-id service) nil
         (%steer-queue service) nil
         (%turn-in-flight service) nil
         (%running-p service) nil)

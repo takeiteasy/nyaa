@@ -208,18 +208,39 @@ one lock hold and one read of the log."
   "Drop this image's claim on ID at PATH, if it still holds one."
   (vault-release-all path (list id)))
 
-(defun vault-record (path agent content &key claim)
+(defun vault-record (path agent content &key claim input-id)
   "Append a :STEER entry to PATH and return its id, claimed by this image
 when CLAIM. AGENT, a keyword or nil, names the target agent when it is
 registered under one; a delegated sub-agent has no name (agent.lisp,
 checkpoint.lisp's %CONTEXT-ENTRIES), so nil is recorded and a later
-VAULT-RESTORE-TARGET call must be given one explicitly."
+VAULT-RESTORE-TARGET call must be given one explicitly.
+
+INPUT-ID is the caller's own key for the steer. When PATH already holds a
+steer under it nothing is appended: the answer is its id, :DUPLICATE, its
+status (:PENDING, :FOLDED or :DISCARDED) and its content. The check and the
+append share one lock hold."
   (let ((id (%vault-id)))
-    (%append-log path (list* :kind :steer :id id :at (%now-iso8601)
-                             :agent agent :content content
-                             (and claim (list :claimed-by (%vault-owner)))))
-    (%vault-maybe-compact path)
-    id))
+    (flet ((entry ()
+             (list* :kind :steer :id id :at (%now-iso8601)
+                    :agent agent :content content
+                    (append (and input-id (list :input-id input-id))
+                            (and claim (list :claimed-by (%vault-owner)))))))
+      (if input-id
+          (with-log-lock (path)
+            (let* ((log (%read-log path))
+                   (prior (find-if (lambda (e) (and (eq (getf e :kind) :steer)
+                                                    (equal (getf e :input-id) input-id)))
+                                   log)))
+              (if prior
+                  (let ((done (gethash (getf prior :id) (%consumed-by-id log))))
+                    (return-from vault-record
+                      (values (getf prior :id) :duplicate
+                              (if done (getf done :how) :pending)
+                              (getf prior :content))))
+                  (%append-log-locked path (entry)))))
+          (%append-log path (entry)))
+      (%vault-maybe-compact path)
+      id)))
 
 (defun vault-consume (path id how)
   "Append a :CONSUMED entry marking ID as HOW (:FOLDED or :DISCARDED)."
@@ -250,7 +271,7 @@ or the status it already has."
 
 (defun vault-entries (path)
   "Every :STEER entry logged at PATH, oldest first, folded against any
-:CONSUMED entries that followed it: (:id :at :agent :content :status
+:CONSUMED entries that followed it: (:id :at :agent :content :input-id :status
 (:PENDING :FOLDED or :DISCARDED) :consumed-at :claimed), :CLAIMED true for a
 pending steer held by an agent's queue or a restore. An id with no :STEER entry
 -- a :CONSUMED line with nothing to consume -- is dropped rather than
@@ -263,6 +284,7 @@ surfaced, since it names nothing a caller could act on."
             collect (let ((done (gethash (getf entry :id) consumed)))
                       (list :id (getf entry :id) :at (getf entry :at)
                             :agent (getf entry :agent) :content (getf entry :content)
+                            :input-id (getf entry :input-id)
                             :status (if done (getf done :how) :pending)
                             :consumed-at (and done (getf done :at))
                             :claimed (and (not done) (%live-claim claims (getf entry :id)) t))))))

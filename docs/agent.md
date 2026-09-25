@@ -90,12 +90,12 @@ end a plain `complete` turn early inside a working conversation.
 | Message | Effect |
 |---|---|
 | `(:describe)` | the metadata plist |
-| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero |
+| `(:run . plist)` | start a run: `:messages` and any `complete` sampling keys. `:continue t` keeps the agent's current conversation and appends `:messages` to it; `:turns` and `:max-turns` still count from zero. `:input-id` makes a redelivery [a duplicate](inputs.md) |
 | `(:steer :content text)` | queue a `:user` message, folded in before the next turn -- even one queued before `:run`, or while the agent is idle. A steer queued during a turn that would end the run gets a turn of its own, unless `:max-turns` is spent |
 | `(:steer :content text :interrupt t)` | as `:steer`, but a model turn or tool calls in flight are abandoned and the steer folds in at once |
 | `(:cancel)` | finish the run now, reason `:cancelled` |
 
-`:steer` takes an optional `:vault-id`, naming an entry already in the
+`:steer` takes an optional `:input-id`, which makes a redelivery [a duplicate](inputs.md), and an optional `:vault-id`, naming an entry already in the
 [vault](vault.md) -- `tool-vault`'s `:restore` redelivers a steer this way
 rather than recording a second entry for the same one. A caller queueing a
 fresh steer never needs to pass it; when `:vault` is on, it is recorded and

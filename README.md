@@ -26,6 +26,7 @@ Runs on SBCL.
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)
 - [The call log](docs/calls.md)
+- [Redelivered inputs](docs/inputs.md)
 
 ## License
 

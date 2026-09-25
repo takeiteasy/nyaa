@@ -45,7 +45,13 @@ A call keeps the first outcome written for it.
  :name :tool-shell :arguments "<json>" :turn 1 :by (:pid 4242 ...))
 (:kind :running :id "..." :at "iso")
 (:kind :done    :id "..." :at "iso" :outcome :ok :content "<json>")
+(:kind :input   :id "..." :at "iso" :agent :assistant :input-id "k"
+ :digest "<md5>" :by (:pid 4242 ...))
 ```
+
+An `:input` is a `:run` keyed with an `:input-id`, [recorded to spot a
+redelivery](inputs.md). A `:done` entry finishes it as it does a call.
+`call-entries` leaves it out.
 
 `:id` is the log's own, one per dispatch. `:call-id` is the provider's, which
 a provider may reuse on a later turn. `:arguments` and `:content` are JSON
@@ -58,6 +64,7 @@ appended under the same lock as the [vault](vault.md#the-log).
 | Function | Answers |
 |---|---|
 | `(call-entries path)` | each call, oldest first, with its `:status`, `:done-at` and `:content` |
+| `(input-entries path)` | each keyed `:run`, oldest first, with its `:status` and `:done-at` |
 | `(call-log-compact path :max-age s)` | the calls dropped and kept |
 
 `call-log-compact` drops finished calls older than `max-age` seconds (default
@@ -72,8 +79,6 @@ Calls not finished are kept. A log with a malformed entry is left as it is and
   ([#180](https://todo.sr.ht/~takeiteasy/nyaa/180)).
 - A call is recorded, not resumed: nothing reattaches to or re-runs a `:lost`
   or `:abandoned` one ([#77](https://todo.sr.ht/~takeiteasy/nyaa/77)).
-- A redelivered input is not recognised as a repeat
-  ([#75](https://todo.sr.ht/~takeiteasy/nyaa/75)).
 - There is no tool to list the log
   ([#179](https://todo.sr.ht/~takeiteasy/nyaa/179)).
 - Writes are synchronous on the agent's process

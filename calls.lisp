@@ -10,6 +10,12 @@
 ;;;   (:kind :running :id "..." :at "iso")
 ;;;   (:kind :done    :id "..." :at "iso" :outcome :ok :content "<json>")
 ;;;
+;;;   (:kind :input   :id "..." :at "iso" :agent name-or-nil :input-id "k"
+;;;    :digest "md5hex" :by owner)
+;;;
+;;; An :INPUT is a :RUN a caller keyed with :INPUT-ID (~takeiteasy/nyaa#75); it
+;;; is finished by a :DONE line like a call. CALL-ENTRIES leaves it out.
+;;;
 ;;; :ID is the log's own, fresh per dispatch: a provider may reuse :CALL-ID on
 ;;; a later turn. CALL-ENTRIES folds the log into current state.
 
@@ -77,6 +83,55 @@ hold. A call already done keeps its first outcome."
         (unless (nth-value 1 (gethash (getf entry :id) table))
           (setf (gethash (getf entry :id) table) entry))))))
 
+(defun %live-status (log-entry id done running)
+  "The status of LOG-ENTRY, a :CALL or :INPUT: its :DONE outcome, else :LOST
+when its owner is gone, :RUNNING or :ACCEPTED."
+  (let ((end (gethash id done)))
+    (cond (end (getf end :outcome))
+          ((not (%claim-live-p (getf log-entry :by))) :lost)
+          ((gethash id running) :running)
+          (t :accepted))))
+
+(defun call-log-input (path agent input-id digest &key (record t))
+  "Record a :RUN keyed INPUT-ID at PATH and return its log id. When PATH holds
+one under INPUT-ID already nothing is appended: the answer is its id,
+:DUPLICATE, its status (its :DONE outcome, :LOST when its owner is gone, else
+:RUNNING) and its digest. The check and the append share one lock hold. With
+RECORD false a new input is not appended and the answer is nil."
+  (with-log-lock (path)
+    (let* ((log (%read-log path))
+           (prior (find-if (lambda (e) (and (eq (getf e :kind) :input)
+                                            (equal (getf e :input-id) input-id)))
+                           log)))
+      (if prior
+          (let ((id (getf prior :id)))
+            (values id :duplicate
+                    (let ((status (%live-status prior id (%done-by-id log) (make-hash-table))))
+                      (if (eq status :accepted) :running status))
+                    (getf prior :digest)))
+          (when record
+            (let ((id (format nil "~a-in" (%vault-id))))
+              (%append-log-locked path (list :kind :input :id id :at (%now-iso8601)
+                                             :agent agent :input-id input-id
+                                             :digest digest :by (%vault-owner)))
+              id))))))
+
+(defun input-entries (path)
+  "Every :RUN keyed with an :INPUT-ID logged at PATH, oldest first: (:id :at
+:agent :input-id :digest :status :done-at). :STATUS is the :OUTCOME of its
+:DONE entry (a stop reason, :ERROR, :INTERRUPTED or :ABANDONED), :RUNNING, or
+:LOST when the process running it is gone and nothing finished it."
+  (let* ((log (%read-log path))
+         (done (%done-by-id log)))
+    (loop for entry in log
+          when (eq (getf entry :kind) :input)
+            collect (let* ((id (getf entry :id))
+                           (status (%live-status entry id done (make-hash-table))))
+                      (list :id id :at (getf entry :at) :agent (getf entry :agent)
+                            :input-id (getf entry :input-id) :digest (getf entry :digest)
+                            :status (if (eq status :accepted) :running status)
+                            :done-at (getf (gethash id done) :at))))))
+
 (defun call-entries (path)
   "Every call logged at PATH, oldest first: (:id :at :agent :call-id :name
 :arguments :turn :status :done-at :content). :STATUS is :ACCEPTED, :RUNNING,
@@ -95,10 +150,7 @@ gone and nothing finished it."
                       (list :id id :at (getf entry :at) :agent (getf entry :agent)
                             :call-id (getf entry :call-id) :name (getf entry :name)
                             :arguments (getf entry :arguments) :turn (getf entry :turn)
-                            :status (cond (end (getf end :outcome))
-                                          ((not (%claim-live-p (getf entry :by))) :lost)
-                                          ((gethash id running) :running)
-                                          (t :accepted))
+                            :status (%live-status entry id done running)
                             :done-at (getf end :at)
                             :content (getf end :content))))))
 
@@ -122,5 +174,5 @@ file untouched, when the log has a malformed entry."
             (dolist (entry log)
               (when (and (eq (getf entry :kind) :call) (gethash (getf entry :id) expired))
                 (incf dropped)))
-            (when (plusp dropped) (%write-log path survivors))
+            (unless (equal survivors log) (%write-log path survivors))
             (values dropped (count :call survivors :key (lambda (e) (getf e :kind))))))))))

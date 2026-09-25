@@ -50,6 +50,9 @@ after the seed messages, on the first turn.
  :how :folded)
 ```
 
+A steer sent with an `:input-id` carries it as `:input-id` on its `:steer`
+line, and a redelivery is [a duplicate](inputs.md), not a second entry.
+
 `vault-entries` folds the log into current state, the same way
 [`generations`](checkpoints.md) derives its list from files on disk rather
 than an index. `:how` is `:folded` or `:discarded`. Read with `*read-eval*`
