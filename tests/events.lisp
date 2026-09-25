@@ -156,9 +156,11 @@ restarting it after its last run. Returns the answer."
       (send-to-assistant (list :subscribe (recorder-sink recorder)))
       (run-assistant recorder 1)
       (m:unmount *ctx* :assistant)
-      (mount-assistant)
-      (run-assistant (make-recorder) 0)
-      (is (eql 1 (run-dones recorder))))))
+      (let ((fresh (make-recorder)))
+        (mount-assistant :sink (recorder-sink fresh))
+        (run-assistant fresh 1)
+        (recorded-events fresh)
+        (is (eql 1 (run-dones recorder)))))))
 
 (test a-sub-agents-events-carry-parent-and-do-not-end-the-parents
   (let ((n 0))
@@ -184,3 +186,42 @@ restarting it after its last run. Returns the answer."
           (is (< (position-if (lambda (e) (and (member :parent e) (eq :run-done (getf e :type))))
                               events)
                  (position :tool-result events :key (lambda (e) (getf e :type))))))))))
+
+(defun stalling-sub-agent-backend (release)
+  "The parent's first turn delegates a task; the child's turn streams
+\"partial \" and stalls until RELEASE's car is set; later turns answer at once."
+  (let ((n 0))
+    (lambda (&rest request)
+      (declare (ignore request))
+      (case (incf n)
+        (1 (sse-tool-call "c1" "agent-task" "{\"task\":\"help\"}"))
+        (2 (list :stall
+                 (format nil "HTTP/1.1 200 OK~c~cContent-Type: text/event-stream~c~cConnection: close~c~c~c~c~a"
+                         #\Return #\Newline #\Return #\Newline #\Return #\Newline
+                         #\Return #\Newline (sse-body (delta-chunk "partial ")))
+                 (lambda () (not (car release)))))
+        (t (streamed-reply "done"))))))
+
+(test a-subscriber-joining-mid-run-hears-a-sub-agent-through-the-parents-fanout
+  (let ((release (list nil))
+        (early (make-recorder))
+        (late (make-recorder)))
+    (with-agent ((stalling-sub-agent-backend release))
+      (unwind-protect
+           (progn
+             (mount-assistant :sub-agents t)
+             (send-to-assistant (list :subscribe (recorder-sink early)))
+             (send-to-assistant '(:run :messages ((:role :user :content "go"))))
+             (is-true (eventually (lambda () (recorder-has early :text-delta))))
+             (send-to-assistant (list :subscribe (recorder-sink late)))
+             (setf (car release) t)
+             (await-run-dones late 2)
+             (let* ((events (recorded-events late))
+                    (child-done (position-if (lambda (e) (and (member :parent e)
+                                                              (eq :run-done (getf e :type))))
+                                             events)))
+               (is (integerp child-done) "the child's :run-done reached the late subscriber")
+               (is (find :tool-result events :key (lambda (e) (getf e :type)) :start (or child-done 0)))
+               (is (not (member :parent (car (last events)))))
+               (is (eq :run-done (getf (car (last events)) :type)))))
+        (setf (car release) t)))))

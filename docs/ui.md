@@ -42,7 +42,7 @@ A `sink` is a function, a symbol naming one, or a meow process.
 | The mount `:sink` | is the first subscriber, and `:unsubscribe` refuses it |
 | Subscribing twice | once is enough; the second changes nothing |
 | Idle agent | the sink is kept and hears the next run from its `:run-start` |
-| Running agent | the sink hears everything from now on; the answer says which turn |
+| Running agent | the sink hears everything from now on, and a turn sent while nothing listened has no `:text-delta`; the answer says which turn |
 | Unsubscribing | events already queued for the sink are still delivered; nothing after |
 | Snapshots | subscribers are not part of a [checkpoint](checkpoints.md) |
 
@@ -97,7 +97,7 @@ folds in as a `:user` message is not a steer: it has its `:tool-result`.
 | Per sink, in order | each sink hears events one at a time, in the order they happened, whichever agent in the tree emitted them |
 | `:run-start` first | it precedes every other event of a run, `:tool-resumed` included |
 | `:run-done` last | the root's `:run-done` is the last event of a run; a sub-agent's comes earlier, with `:parent` |
-| One `:done` per turn | a turn that is interrupted, cancelled or timed out has none |
+| One `:done` per turn | a turn that is interrupted, cancelled or cut short by `:deadline` has none |
 | A slow sink | never holds up the agent or another sink; `:steer` and `:cancel` still land |
 | A stuck sink | five seconds after the run ends its remaining events are dropped, and the other sinks are unaffected |
 | A failing sink | loses that event and carries on |

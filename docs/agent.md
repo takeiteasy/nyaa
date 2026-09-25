@@ -109,7 +109,7 @@ consumed automatically.
 An interrupting steer cancels the turn in flight and issues the next one
 straight away. Text the turn had already streamed to the `:sink` is kept as
 an assistant message ahead of the steer; a half-streamed tool call is
-dropped, and with no `:sink` nothing is kept. The abandoned turn counts
+dropped, and with no sink or subscriber nothing is kept. The abandoned turn counts
 against `:max-turns`, so an interrupt on the last allowed turn finishes the
 run as `:max-turns` and leaves the steer queued.
 
