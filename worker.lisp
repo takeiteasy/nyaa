@@ -53,12 +53,17 @@ different binary or with different flags than the host's own invocation.")
 (defconstant +worker-start-timeout+ 5000
   "Milliseconds a worker gets to answer its handshake.")
 
-(defun worker-argv ()
-  "The host's bare, quiet, non-interactive invocation."
+(defun worker-argv (&optional heap)
+  "The host's bare, quiet, non-interactive invocation, with a HEAP megabyte
+dynamic space when HEAP is given. A memory-exhausted worker exits rather than
+waiting in the debugger for its deadline."
   (or *worker-command*
-      (list (namestring sb-ext:*runtime-pathname*)
-            "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
-            "--eval")))
+      (append (list (namestring sb-ext:*runtime-pathname*))
+              (when heap
+                (list "--dynamic-space-size" (princ-to-string heap)
+                      "--disable-ldb" "--lose-on-corruption"))
+              (list "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
+                    "--eval"))))
 
 (defvar *boot* (list :boot)
   "Identifies this process image. A worker records the value it started
@@ -88,12 +93,13 @@ pipes belong to that image, so nothing here may signal or touch them."
       (setf *live-workers* (remove worker *live-workers*))
       t)))
 
-(defun start-worker ()
-  "A running worker, or NIL if the child never answered its handshake."
+(defun start-worker (&key heap)
+  "A running worker, or NIL if the child never answered its handshake. HEAP
+caps its heap in megabytes; *WORKER-COMMAND* is used as given and ignores it."
   (let ((worker (ignore-errors
                  (%make-worker
                   (launch-in-process-group
-                   (append (worker-argv) (list *worker-program*))
+                   (append (worker-argv heap) (list *worker-program*))
                    :input :stream :output :stream
                    ;; Diagnostics are reported in band; anything else the
                    ;; child writes to stderr would corrupt the protocol.

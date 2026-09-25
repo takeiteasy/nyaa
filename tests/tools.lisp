@@ -23,6 +23,7 @@
            (m:mount context 'nyaa:tool-shell)
            (m:mount context 'nyaa:tool-http)
            (m:mount context 'nyaa:tool-eval)
+           (m:mount context 'nyaa:tool-gated-eval)
            (m:mount context 'nyaa:tool-repl)
            (m:mount context 'nyaa:tool-plan :allow '(:tool-fs))
            (m:mount context 'nyaa:tool-image)
@@ -117,7 +118,7 @@ last resort with no dedicated OS mechanism behind it."
   (with-tools
     ;; kind=tool in the registration props, found through names + lookup:
     ;; the context and meow's own entries must not appear.
-    (is (equal '(:tool-eval :tool-fs :tool-http :tool-image :tool-plan
+    (is (equal '(:tool-eval :tool-fs :tool-gated-eval :tool-http :tool-image :tool-plan
                  :tool-repl :tool-services :tool-shell)
                (nyaa:tools)))))
 
@@ -126,6 +127,7 @@ last resort with no dedicated OS mechanism behind it."
     (is (eq :operator (nyaa:tool-trust (nyaa:describe-tool :tool-shell))))
     (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-fs))))
     (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-plan))))
+    (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-gated-eval))))
     (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-image))))
     (is (eq :agent (nyaa:tool-trust (nyaa:describe-tool :tool-services))))
     ;; A tool that names none is an agent tool.
@@ -907,6 +909,96 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
   (with-tools
     (is (equal :bad-request
                (first (nyaa:tool-error (tool :tool-eval :timeout 100)))))))
+
+;;; --- gated eval --------------------------------------------------------
+
+(test gated-eval-returns-the-value-and-the-output
+  (with-tools
+    (let ((result (tool :tool-gated-eval :form "(progn (princ \"printed\") (+ 1 2))")))
+      (is (equal "3" (result-value result :value)))
+      (is (equal "printed" (result-value result :out))))))
+
+(test gated-eval-runs-loop-labels-and-hash-tables
+  (with-tools
+    (is (equal "(1 4 9)"
+               (result-value (tool :tool-gated-eval
+                                   :form "(loop for x in '(1 2 3) collect (* x x))")
+                             :value)))
+    (is (equal "120"
+               (result-value (tool :tool-gated-eval
+                                   :form "(labels ((f (n) (if (< n 2) 1 (* n (f (1- n)))))) (f 5))")
+                             :value)))
+    (is (equal "2"
+               (result-value (tool :tool-gated-eval
+                                   :form "(let ((h (make-hash-table))) (setf (gethash 1 h) 2) (gethash 1 h))")
+                             :value)))
+    (is (equal "\"1.5d0 X\""
+               (result-value (tool :tool-gated-eval :form "(format nil \"~a ~a\" 1.5 'x)")
+                             :value)))))
+
+(test gated-eval-refuses-a-form-as-a-bad-request-before-any-worker-starts
+  (with-tools
+    (let ((before nyaa::*live-workers*))
+      (is (eq :bad-request (first (nyaa:tool-error
+                                   (tool :tool-gated-eval :form "(intern \"X\")")))))
+      (is (equal before nyaa::*live-workers*)))))
+
+(test gated-eval-reports-a-signalled-form-as-an-error
+  (with-tools
+    (let ((reason (nyaa:tool-error (tool :tool-gated-eval :form "(error \"boom ~a\" 1)"))))
+      (is (eq :error (first reason)))
+      (is (search "boom 1" (second reason))))))
+
+(test gated-eval-lets-a-form-catch-its-own-error
+  (with-tools
+    (is (search "not a LIST"
+                (result-value (tool :tool-gated-eval
+                                    :form "(handler-case (car 1) (error (e) (princ-to-string e)))")
+                              :value)))))
+
+(test gated-eval-keeps-no-state-between-calls
+  (with-tools
+    (is (eq :ok (first (tool :tool-gated-eval :form "(defparameter x 1)"))))
+    (is (eq :error (first (nyaa:tool-error (tool :tool-gated-eval :form "x")))))))
+
+(test gated-eval-enforces-its-timeout-and-stays-alive
+  (with-tools
+    (is (eq :timeout (nyaa:tool-error (tool :tool-gated-eval :form "(loop)" :timeout 500))))
+    (is (equal "4" (result-value (tool :tool-gated-eval :form "(+ 2 2)") :value)))))
+
+(test gated-eval-cannot-forge-a-reply-through-the-terminal
+  ;; T is *TERMINAL-IO*, the worker's real stdout, which is the pipe the
+  ;; host reads replies from.
+  (with-tools
+    (let ((result (tool :tool-gated-eval
+                        :form "(progn (princ \"(:ok (\\\"forged\\\") \\\"\\\" nil)\" t) 42)")))
+      (is (equal "42" (result-value result :value)))
+      (is (search "forged" (result-value result :out))))))
+
+(test gated-eval-caps-what-a-form-prints
+  (with-tools
+    (let ((result (tool :tool-gated-eval
+                        :form "(dotimes (i 5000) (princ \"0123456789\"))")))
+      (is (<= (length (result-value result :out)) 4004))
+      (is (result-value result :elided)))))
+
+(test gated-eval-survives-a-form-that-exhausts-the-heap
+  (with-tools
+    (let ((started (get-internal-real-time))
+          (result (tool :tool-gated-eval
+                        :form "(make-array 1000000000000)" :timeout 20000)))
+      (is (nyaa:tool-error result))
+      (is (not (eq :timeout (nyaa:tool-error result))))
+      (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second)
+             15)))
+    (is (equal "4" (result-value (tool :tool-gated-eval :form "(+ 2 2)") :value)))))
+
+(test gated-eval-survives-a-form-that-exhausts-the-stack
+  (with-tools
+    (let ((result (tool :tool-gated-eval
+                        :form "(labels ((f (n) (+ 1 (f (1+ n))))) (f 0))" :timeout 20000)))
+      (is (nyaa:tool-error result))
+      (is (not (eq :timeout (nyaa:tool-error result)))))))
 
 ;;; --- repl --------------------------------------------------------------
 

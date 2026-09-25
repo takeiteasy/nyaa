@@ -69,7 +69,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 ## The allow-list and trust
 
 `:tools` defaults to every discovered tool whose [`:trust`](tools.md) is
-`:agent` — `tool-fs`, `tool-plan`, `tool-image` and `tool-services` today;
+`:agent` — `tool-fs`, `tool-plan`, `tool-gated-eval`, `tool-image` and `tool-services` today;
 `tool-shell`, `tool-http`, `tool-eval`, `tool-repl`, `tool-checkpoint` and
 `tool-self` are all `:operator` and only reach the model when the mount
 site names them explicitly:

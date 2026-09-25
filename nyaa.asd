@@ -32,6 +32,8 @@
                (:file "vault")
                (:file "protocol")
                (:file "worker")
+               ;; Ahead of tools/gated-eval.lisp, which checks a form through it.
+               (:file "gate")
                (:static-file "worker-program.lisp")
                (:module "tools"
                 :components (;; Ahead of "fs": the atomic sandbox walk it
@@ -41,6 +43,7 @@
                              (:file "shell")
                              (:file "http")
                              (:file "eval")
+                             (:file "gated-eval")
                              (:file "repl")
                              (:file "plan")
                              (:file "image")
@@ -87,6 +90,7 @@
                (:file "pool")
                (:file "agent")
                (:file "worker")
+               (:file "gate")
                (:file "tools")
                (:file "plan")
                (:file "introspect")

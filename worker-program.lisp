@@ -5,6 +5,10 @@
 
 (let ((p (or (find-package "NYAA-WORKER")
              (make-package "NYAA-WORKER" :use '("CL")))))
+  ;; Where the gate's fresh symbols live (gate.lisp): it uses nothing, so a
+  ;; name a form invents can never be a name the worker already has.
+  (unless (find-package "NYAA-GATE")
+    (make-package "NYAA-GATE" :use '()))
   (labels ((render-under (v length level)
              (let ((*print-length* length) (*print-level* level)
                    (*print-readably* nil) (*print-circle* t))
@@ -39,6 +43,12 @@
                        (incf total (length s))
                        (when e (setf elided t)))))
                (values (nreverse rendered) elided)))
+           (cap-output (s)
+             ;; The same cap RENDER puts on a value, so a form that prints
+             ;; without end cannot flood the pipe.
+             (if (> (length s) 4000)
+                 (values (concatenate 'string (subseq s 0 4000) " ...") t)
+                 (values s nil)))
            (say (form)
              (prin1 form)
              (terpri)
@@ -54,8 +64,22 @@
             (say (handler-case
                      (let ((form (read-from-string (second message))))
                        (handler-case
-                           (let ((values (let ((*standard-output* out)
-                                               (*error-output* out))
+                           (let ((values (let* ((*standard-output* out)
+                                                (*error-output* out)
+                                                ;; The pipe to the host is
+                                                ;; this process's real
+                                                ;; stdin and stdout, which
+                                                ;; T and the *-IO* streams
+                                                ;; reach; a form that wrote
+                                                ;; there could forge a
+                                                ;; reply.
+                                                (*terminal-io*
+                                                  (make-two-way-stream
+                                                   (make-concatenated-stream) out))
+                                                (*query-io* *terminal-io*)
+                                                (*debug-io* *terminal-io*)
+                                                (*trace-output* out)
+                                                (*standard-input* (make-concatenated-stream)))
                                           (multiple-value-list (eval form)))))
                              ;; The REPL's own history, so a value the
                              ;; reply elided can still be inspected: *,
@@ -66,8 +90,13 @@
                              (setf *** ** ** * * (first values))
                              (setf /// // // / / values)
                              (multiple-value-bind (rendered elided) (render-values values)
-                               (list :ok rendered (get-output-stream-string out)
-                                     (if elided :elided nil))))
-                         (error (e) (list :error (princ-to-string e)
-                                          (get-output-stream-string out)))))
+                               (multiple-value-bind (printed cut) (cap-output (get-output-stream-string out))
+                                 (list :ok rendered printed
+                                       (if (or elided cut) :elided nil)))))
+                         ;; SERIOUS-CONDITION, not ERROR: exhausting the
+                         ;; stack or the heap is one, and would otherwise
+                         ;; end the worker.
+                         (serious-condition (e)
+                           (list :error (princ-to-string e)
+                                 (cap-output (get-output-stream-string out))))))
                    (error (e) (list :reader-error (princ-to-string e)))))))))))

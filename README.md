@@ -15,6 +15,7 @@ Runs on SBCL.
 - [Tools](docs/tools.md)
 - [Introspection](docs/introspection.md)
 - [The plan gate](docs/plan.md)
+- [The allowlist gate](docs/gate.md)
 - [Protocols](docs/protocols.md)
 - [Providers](docs/providers.md)
 - [The agent loop](docs/agent.md)

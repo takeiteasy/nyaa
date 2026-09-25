@@ -44,8 +44,9 @@ the call's [cancel token](#cancelling-a-call), or nil.
 `:trust` is `:operator` for a tool only a trusted operator may reach, and
 `:agent` for one a model may call. `tool-trust` reads it, and answers `:agent`
 for metadata that names none. The [agent loop](agent.md)'s default allow-list
-is exactly the `:agent`-trusted tools — `tool-fs`, `tool-plan`, `tool-image`
-and `tool-services` are the standard tools at that level, so granting the
+is exactly the `:agent`-trusted tools — `tool-fs`, `tool-plan`,
+`tool-gated-eval`, `tool-image` and `tool-services` are the standard tools at
+that level, so granting the
 others to a model is explicit at the mount site.
 
 A tool needing another `handle` clause beyond `:describe` and `:invoke` falls
@@ -133,7 +134,7 @@ coerced against its schema.
 Every tool refuses a call whose token is already cancelled, without running
 it -- a call queued behind another on the same tool included. Cancelling one
 already running stops its work, as a lapsed `:timeout` does, in `tool-shell`
-(the whole process group), `tool-http` (the connection), `tool-eval` and
+(the whole process group), `tool-http` (the connection), `tool-eval`, `tool-gated-eval` and
 `tool-repl` (the worker, so that `:id` starts empty), `tool-plan` (the step
 in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the wait on a `:reload`; see
 [self-modification](self.md)). The other tools finish what they started.
@@ -146,6 +147,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the body comes back as text or base64, named by `:body-encoding` ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
+| `:tool-gated-eval` | `:form`, `:timeout` | Evaluates one form that passed an allowlist, in a single-use worker with a heap cap. `:agent`-trusted. See [the allowlist gate](gate.md). |
 | `:tool-repl` | `:id`, `:form`, `:pristine`, `:timeout` | One session per `:id`, started on first use, so state threads through successive forms. `:pristine` restarts its worker. Sessions run concurrently with each other. An id idle past the mount's `:idle` (600 s by default) is dropped. |
 | `:tool-plan` | `:steps`, `:timeout` | Runs a checked sequence of declared tool calls. See [the plan gate](plan.md). |
 | `:tool-image` | `:op`, `:symbol`, `:package`, `:pattern`, `:external-only`, `:limit`, `:doc-type` | Read-only introspection over the live Lisp image: `describe`, `apropos`, `documentation`, `source`, `packages`. See [introspection](introspection.md). |
@@ -240,7 +242,7 @@ the server answers. The exchange runs on the tool's own thread.
 
 ## Workers
 
-`tool-eval` and `tool-repl` evaluate in a worker: a separate Lisp process that
+`tool-eval`, `tool-gated-eval` and `tool-repl` evaluate in a worker: a separate Lisp process that
 loads nothing — no Quicklisp, no meow, no nyaa — and runs a read/eval/print loop
 over stdio. A crash or a hang there costs a deadline, never the host image.
 
@@ -261,6 +263,11 @@ rather than desynchronising the stream. Each value prints under
 element is `:elided` when any value was cut that way, when the form returned
 more than 100 values, or when their combined printed form ran past 4000
 characters (later values dropped), `nil` when everything printed in full.
+
+Output a form prints is capped at 4000 characters the same way, and sets
+`:elided`. `t` and the `*-io*` streams are rebound to that captured output
+around each form, so a form cannot write to the pipe the host reads replies
+from. A form that exhausts the stack or heap answers `:error`.
 
 No value is lost to elision on a `tool-repl` session: the worker keeps a REPL
 history under `*`, `**` and `***` for the first value and `/`, `//` and `///`
@@ -314,6 +321,8 @@ operated on relative to that same fd, so the check and the operation share one
 file descriptor with no window between them for a swap to land in. The
 process's current directory is never changed, so the walk cannot disturb, or be
 disturbed by, other code in the process.
+`tool-gated-eval` is `:agent`-trusted: its form passes [an allowlist](gate.md)
+first, and its worker has a deadline and a heap cap.
 `tool-plan` is `:agent`-trusted, but only reaches what its own `:allow` names,
 and only tools that are themselves `:agent`-trusted — see
 [the plan gate](plan.md) for what that buys and what it does not.

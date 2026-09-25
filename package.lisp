@@ -38,6 +38,8 @@
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema
    #:array-of #:object #:map-of #:any
+   ;; the allowlist gate
+   #:gate-check
    ;; workers
    #:*worker-command*
    ;; protocols
@@ -46,5 +48,5 @@
    ;; providers
    #:provider-ollama
    ;; tools
-   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-repl #:tool-plan
+   #:tool-fs #:tool-shell #:tool-http #:tool-eval #:tool-gated-eval #:tool-repl #:tool-plan
    #:tool-image #:tool-services #:tool-checkpoint #:tool-self #:tool-vault))

@@ -18,8 +18,9 @@
 ;;; is dropped the same way an unmounted tool-repl drops every session --
 ;;; see the idle timer below.
 ;;;
-;;; Trust posture: arbitrary evaluation. Trusted operator only, until the
-;;; DSL gate (~takeiteasy/nyaa#6) can constrain what a form may do.
+;;; Trust posture: arbitrary evaluation. Trusted operator only. A model
+;;; reaches evaluation through tool-gated-eval, which checks a form against
+;;; an allowlist (~takeiteasy/nyaa#44); no gated form of this tool exists.
 
 (defstruct worker-box
   "A session's current worker, boxed so tool-repl's cleanup can read and

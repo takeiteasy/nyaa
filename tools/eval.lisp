@@ -3,8 +3,9 @@
 ;;; Evaluate one form in a worker that is started for it and killed after
 ;;; it. No state survives a call.
 ;;;
-;;; Trust posture: arbitrary evaluation. Trusted operator only, until the
-;;; DSL gate (~takeiteasy/nyaa#6) can constrain what a form may do.
+;;; Trust posture: arbitrary evaluation. Trusted operator only. A model
+;;; reaches evaluation through tool-gated-eval, which checks a form against
+;;; an allowlist (~takeiteasy/nyaa#44); no gated form of this tool exists.
 
 (define-tool :tool-eval
     (:trust :operator

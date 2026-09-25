@@ -9,9 +9,8 @@ tool's own schema.
 This gates *what a plan may call*, not arbitrary evaluation. `tool-eval` and
 `tool-repl` stay `:trust :operator`, untouched — a model reaches them only if
 an operator explicitly grants them, exactly as before. The other shape the
-gate could have taken, an allowlist over raw Lisp reaching `tool-eval`
-itself, is a separate, harder problem
-([#44](https://todo.sr.ht/~takeiteasy/nyaa/44)).
+gate could have taken, an allowlist over raw Lisp, is
+[`tool-gated-eval`](gate.md).
 
 This gate is for untrusted input. The operator's own code — an
 [orchestrator definition](agent.md), a [config file](getting-started.md), or
