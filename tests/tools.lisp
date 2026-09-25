@@ -740,6 +740,13 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
                                                  :encoding :base64 :data "a$b!")))))
     (is (equal "keep" (result-value (tool :tool-fs :op :read :path "k.txt") :data)))))
 
+(test fs-text-read-of-non-utf-8-is-a-bad-request
+  (with-tools
+    (tool :tool-fs :op :write :path "n.bin" :encoding :base64 :data (base64-of +png-octets+))
+    (is (eq :bad-request (first (nyaa:tool-error (tool :tool-fs :op :read :path "n.bin")))))
+    (is (equal (base64-of +png-octets+)
+               (result-value (tool :tool-fs :op :read :path "n.bin" :encoding :base64) :data)))))
+
 (test fs-saves-a-tool-http-body
   (with-tools
     (let ((result (http-result-of (list :octets 200 '("Content-Type" "image/png")

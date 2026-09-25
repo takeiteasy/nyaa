@@ -126,7 +126,9 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
         (cond ((null fd) (errno-result errno))
               ((eq encoding :base64)
                (ok :data (cl-base64:usb8-array-to-base64-string (fs-slurp-octets-fd fd))))
-              (t (ok :data (fs-slurp-fd fd)))))))
+              (t (handler-case (ok :data (fs-slurp-fd fd))
+                   (sb-int:stream-decoding-error ()
+                     (bad-request "file is not valid UTF-8; read it with :encoding base64"))))))))
 
 (defun fs-op-write (dirfd leaf data encoding)
   (if (null leaf)
@@ -183,7 +185,6 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
               (:enotdir (bad-request "not a directory"))
               (t (errno-result errno)))))))
 
-;;; A file that is not valid UTF-8 signals a decoding error here (#157).
 (defun fs-slurp-fd (fd)
   (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))
     (uiop:slurp-stream-string s)))

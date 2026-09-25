@@ -204,7 +204,9 @@ started.
 
 <a id="tool-fs-bytes"></a>
 `tool-fs` `:encoding` `"base64"` reads and writes a file's bytes as base64 in
-`:data`. Invalid base64 is a `:bad-request` and leaves the file untouched.
+`:data`. Invalid base64 is a `:bad-request` and leaves the file untouched. A `text`
+read of a file that is not valid UTF-8 is a `:bad-request` too; read it as
+`base64`.
 Saving a `tool-http` body as it came:
 
 ```lisp
@@ -325,9 +327,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- `tool-fs` `read` as `text` crashes the tool on a file that is not valid
-  UTF-8; read it as `base64` instead
-  ([#157](https://todo.sr.ht/~takeiteasy/nyaa/157)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).
