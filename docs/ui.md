@@ -8,6 +8,8 @@ hears back as events. Nothing else crosses the line.
 | Front end to agent | [commands](#commands): `:run`, `:steer`, `:cancel`, `:subscribe`, `:unsubscribe` |
 | Agent to front end | [events](#events), one plist each, to every subscribed sink |
 
+[Client state](client-state.md) folds these events for a front end to draw.
+
 ```lisp
 (m:mount *ctx* 'nyaa:agent :name :assistant :model :provider-ollama)
 (m:call (m:lookup :assistant) (list :subscribe #'draw-event))
@@ -22,7 +24,7 @@ hears back as events. Nothing else crosses the line.
 | `(:run :continue t :messages ms)` | `:ok` | carry on from the agent's conversation, appending `ms` |
 | `(:steer :content text)` | `:ok` | fold a `:user` message in before the next turn |
 | `(:steer :content text :interrupt t)` | `:ok` | as `:steer`, abandoning the turn or tool calls in flight |
-| `(:cancel)` | `:ok` | finish the run now, reason `:cancelled` |
+| `(:cancel)` | `:ok`, or the run's result while one is under way | finish the run now, reason `:cancelled` |
 | `(:subscribe sink)` | `(:ok (:running t :turn n))` or `(:ok (:running nil))` | hear this agent's events |
 | `(:unsubscribe sink)` | `:ok` | stop hearing them |
 

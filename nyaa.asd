@@ -98,8 +98,19 @@
   :components ((:file "package")
                (:file "run")))
 
+(defsystem "nyaa/ui"
+  :description "Headless client state for nyaa front ends."
+  :author "George Watson"
+  :license "GPLv3"
+  :depends-on ("nyaa" "alexandria" "bordeaux-threads")
+  :pathname "ui/"
+  :serial t
+  :components ((:file "package")
+               (:file "state")
+               (:file "client")))
+
 (defsystem "nyaa/tests"
-  :depends-on ("nyaa" "nyaa/cli" "fiveam" "uiop" "usocket")
+  :depends-on ("nyaa" "nyaa/cli" "nyaa/ui" "fiveam" "uiop" "usocket")
   :pathname "tests/"
   :serial t
   :components ((:file "package")
@@ -127,6 +138,7 @@
                (:file "calls")
                (:file "detach")
                (:file "events")
+               (:file "ui")
                (:file "resume")
                (:file "inputs")
                (:file "image-generation")

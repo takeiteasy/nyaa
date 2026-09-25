@@ -20,6 +20,7 @@ Runs on SBCL.
 - [Providers](docs/providers.md)
 - [The agent loop](docs/agent.md)
 - [The front-end contract](docs/ui.md)
+- [Client state](docs/client-state.md)
 - [Parameter schemas](docs/schema.md)
 - [Checkpoints and rollback](docs/checkpoints.md)
 - [Forking a conversation](docs/forking.md)
