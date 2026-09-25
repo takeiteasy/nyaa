@@ -145,7 +145,8 @@ travels in a TOOL-IMAGE reply.")
     (let ((children (result-value (tool :tool-services :op :children) :children)))
       (is (find :tool-image children :key (lambda (c) (getf c :name))))
       (is (eq :running
-              (getf (find :tool-image children :key (lambda (c) (getf c :name))) :state))))))
+              (getf (find :tool-image children :key (lambda (c) (getf c :name))) :state)))
+      (is (every (lambda (c) (eq :ready (getf c :status))) children)))))
 
 (test services-describe-an-unregistered-name-is-a-bad-request
   (with-tools
@@ -164,3 +165,8 @@ travels in a TOOL-IMAGE reply.")
       (is (eq :tool (getf (result-value result :props) :kind)))
       (is (eq t (result-value result :alive)))
       (is (listp (result-value result :effects))))))
+
+(test services-describe-reports-lifecycle-status
+  (with-tools
+    (dolist (name '("tool-fs" "tool-services"))
+      (is (eq :ready (result-value (tool :tool-services :op :describe :name name) :status))))))

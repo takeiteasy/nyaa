@@ -6,11 +6,10 @@
 ;;;
 ;;; Every answer is built from what METADATA already publishes and what
 ;;; M:CHILDREN already reports -- both key-free by construction, so this
-;;; tool adds no new way to leak a slot. It carries no lifecycle status
-;;; beyond M:CHILDREN's own :STATE, which is restart bookkeeping rather
-;;; than the richer :starting/:waiting/:ready SERVICE-STATUS tracks; that
-;;; needs a status message meow does not yet expose across processes.
-;;; Tracked as a meow follow-up in ~takeiteasy/nyaa#46.
+;;; tool adds no new way to leak a slot. :STATE is M:CHILDREN's restart
+;;; bookkeeping; :STATUS is the service's own lifecycle status, asked of its
+;;; process, so it is nil for a child that is restarting, gone or too busy
+;;; to answer.
 
 (define-tool :tool-services
     (:trust :agent
@@ -53,21 +52,36 @@
     (if (null context)
         (fail (list :error "not mounted under a context"))
         (handler-case
-            (ok :children (children-tree (m:service-process context) recursive))
+            (ok :children (children-tree service (m:service-process context) recursive))
           (error (e) (fail (list :error (princ-to-string e))))))))
 
-(defun children-tree (context-process recursive)
-  (mapcar (lambda (child) (child-entry child recursive)) (m:children context-process)))
+(defun children-tree (service context-process recursive)
+  (mapcar (lambda (child) (child-entry service child recursive)) (m:children context-process)))
 
-(defun child-entry (child recursive)
+(defconstant +status-timeout+ 1
+  "Seconds to wait for a service to report its status.")
+
+(defun process-status (service process)
+  "PROCESS's lifecycle status, or nil when it is gone or does not answer.
+SERVICE is this tool, which cannot call itself."
+  (when (and process (m:process-alive-p process))
+    (if (eq process (m:service-process service))
+        (m:service-status service)
+        (values (m:service-status process :timeout +status-timeout+)))))
+
+(defun child-entry (service child recursive)
   (let ((entry (list :name (getf child :name)
                      :class (string-downcase (symbol-name (getf child :class)))
                      :restart (getf child :restart)
                      :state (getf child :state)
+                     ;; TODO: one call per child, so a busy tool costs up to
+                     ;; +STATUS-TIMEOUT+ each; fan out with m:call-async if
+                     ;; :children latency matters (#149).
+                     :status (process-status service (getf child :process))
                      :restart-in (getf child :restart-in)
                      :alive (and (getf child :process) (m:process-alive-p (getf child :process)) t))))
     (if (and recursive (subtypep (getf child :class) 'm:context) (getf child :process))
-        (append entry (list :children (children-tree (getf child :process) recursive)))
+        (append entry (list :children (children-tree service (getf child :process) recursive)))
         entry)))
 
 (defun op-service-describe (service name)
@@ -78,5 +92,8 @@
           (if (null process)
               (bad-request "no service named ~a" name)
               (ok :name name :props props :alive (and (m:process-alive-p process) t)
-                  :effects (m:effects process))))
+                  :status (process-status service process)
+                  :effects (m:effects (if (eq process (m:service-process service))
+                                          service
+                                          process)))))
       (error (e) (fail (list :error (princ-to-string e)))))))

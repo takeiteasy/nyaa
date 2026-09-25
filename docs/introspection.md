@@ -76,8 +76,8 @@ Lambda lists and file locations come from `sb-introspect`; `:form` comes from
 | `:op` | Params | Answers |
 |---|---|---|
 | `:registry` | `:kind` | every registered name and its published props, sorted, optionally filtered to one `:kind` |
-| `:children` | `:recursive` (default `t`) | the mount tree under this tool's own context: `:name`, `:class`, `:restart`, `:state`, `:restart-in`, `:alive` |
-| `:describe` | `:name` (required) | that name's props, `:alive`, and its effect labels |
+| `:children` | `:recursive` (default `t`) | the mount tree under this tool's own context: `:name`, `:class`, `:restart`, `:state`, `:status`, `:restart-in`, `:alive` |
+| `:describe` | `:name` (required) | that name's props, `:alive`, `:status` and its effect labels |
 
 Props are exactly what each service's `metadata` already publishes — the
 same source `describe-tool` reads, key-free by construction.
@@ -85,12 +85,13 @@ same source `describe-tool` reads, key-free by construction.
 ```lisp
 (nyaa:invoke-tool :tool-services :op :children)
 ;; => (:ok (:children ((:name :tool-fs :class "tool-fs" :restart :transient
-;;                       :state :running :restart-in nil :alive t) ...)))
+;;                       :state :running :status :ready :restart-in nil :alive t) ...)))
 ```
 
-`:state` is `m:children`'s own restart bookkeeping (`:running` or
-`:restarting`), not the richer lifecycle `service-status` tracks
-([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)). A tool mounted outside a
+`:state` is `m:children`'s restart bookkeeping (`:running` or
+`:restarting`). `:status` is the service's own lifecycle status, `:waiting`
+(a dependency is missing) or `:ready`. It is nil when the child is
+restarting, has stopped or does not answer within a second.[^status] A tool mounted outside a
 context — `:children` needs one to walk — answers `(:error "not mounted
 under a context")`.
 
@@ -104,6 +105,16 @@ published metadata for exactly that reason (see
 and `:fboundp` as flags and nothing more. `tool-services` never reads a
 slot at all; everything it answers already travels through `metadata` or
 `m:children`.
+
+## Limitations
+
+- `:children` asks each child for its status one after another, so busy
+  children add up to a second each
+  ([#149](https://todo.sr.ht/~takeiteasy/nyaa/149)).
+
+[^status]: Asked over a call with `m:service-status`; `:starting`, `:stopping`
+    and `:stopped` are never visible from another process. See
+    [Limitations](#limitations).
 
 [^form]: `:form` is the definition's own code, so a literal written into it
     (a string, say) travels with it. A variable's value never does.
