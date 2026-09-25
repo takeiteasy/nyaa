@@ -440,14 +440,26 @@ runs in the pool of REQUEST's :DEPTH, and completions it makes run one deeper."
            (timeout (getf request :timeout +default-tool-timeout+))
            (depth (getf request :depth 0))
            (queued-at (get-internal-real-time))
+           (settled nil)
+           (settled-lock (bt:make-lock))
            (job nil))
-      (labels ((answer (result)
-                 (m:reply cell result)
-                 (untrack-completion host token))
+      (labels ((claim ()
+                 (bt:with-lock-held (settled-lock)
+                   (unless settled (setf settled t))))
+               (answer (result)
+                 (when (claim)
+                   (m:reply cell result)
+                   (untrack-completion host token)))
                (answer-unrun (result)
-                 ;; FUNCTION never ran, so nothing ended the stream.
-                 (emit-done-detached (getf request :stream) (getf request :ref) result)
-                 (answer result))
+                 ;; FUNCTION never ran to its end, so nothing ended the stream.
+                 (when (claim)
+                   (emit-done-detached (getf request :stream) (getf request :ref) result)
+                   (m:reply cell result)
+                   (untrack-completion host token)))
+               (abandon ()
+                 (when (pool-abandon job)
+                   (bt:make-thread (lambda () (answer-unrun (fail :timeout)))
+                                   :name "nyaa-abandon")))
                (remaining ()
                  (- timeout (floor (* 1000 (- (get-internal-real-time) queued-at))
                                    internal-time-units-per-second))))
@@ -457,18 +469,23 @@ runs in the pool of REQUEST's :DEPTH, and completions it makes run one deeper."
           (setf job (make-pool-job
                      (lambda ()
                        (let ((result (fail :cancelled))
-                             (ran nil))
+                             (ran nil)
+                             (disarm nil))
                          (unwind-protect
                               (setf result
                                     (let ((left (remaining)))
                                       (if (plusp left)
                                           (handler-case
                                               (let ((*completion-depth* depth))
+                                                (setf ran left
+                                                      disarm (m:schedule (+ (/ left 1000) *pool-abandon-grace*)
+                                                                         #'abandon))
                                                 (funcall function
-                                                         (list* :cancel token :timeout (setf ran left)
+                                                         (list* :cancel token :timeout left
                                                                 (a:remove-from-plist request :cancel :timeout :depth))))
                                             (error (e) (fail (list :error (princ-to-string e)))))
                                           (fail :timeout))))
+                           (when disarm (funcall disarm))
                            (if ran (answer result) (answer-unrun result)))))
                      :key host :limit (host-max-in-flight host)
                      :registry (m:service-registry host)))
@@ -542,9 +559,6 @@ blocked in a read on it asleep, and a shutdown wakes it."
     (ignore-errors (usocket:socket-shutdown socket :io))
     (ignore-errors (usocket:socket-close socket))))
 
-;;; TODO: an exchange stuck where neither the shutdown nor the interrupt
-;;; reaches it holds its pooled thread. Upgrade path: have the pool replace a
-;;; thread whose job outlives its deadline. Tracked in ~takeiteasy/nyaa#131.
 (defun abandon-exchange (exchange reason)
   "End EXCHANGE's run for REASON, :TIMEOUT or :CANCELLED, unless something
 already has: shut its socket down, which wakes a read on it, and interrupt

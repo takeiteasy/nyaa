@@ -22,6 +22,9 @@ it uncapped.")
 (defparameter *max-completion-depth* 8
   "The deepest a completion may nest; a deeper one is refused.")
 
+(defparameter *pool-abandon-grace* 5
+  "Seconds a job may run past its deadline before its pool abandons it.")
+
 (defparameter *pool-idle-seconds* 30
   "Seconds a pooled thread waits for work before it exits.")
 
@@ -30,7 +33,7 @@ it uncapped.")
   (lock (bt:make-lock :name "nyaa-pool"))
   (cv (bt:make-condition-variable))
   (queue '())
-  (threads 0) (idle 0) (starting 0) (spawned 0)
+  (threads 0) (idle 0) (starting 0) (spawned 0) (abandoned 0)
   (running-by-key (make-hash-table :test 'eq))
   retiring)
 
@@ -137,13 +140,45 @@ uncounted here, under the lock, so a lowered cap sheds exactly the excess."
                                      (pool-queue pool)))
             (return (leave))))))))
 
+(defun %release-key (pool job)
+  "Called holding POOL's lock."
+  (a:when-let ((key (pool-job-key job)))
+    (when (zerop (decf (gethash key (pool-running-by-key pool))))
+      (remhash key (pool-running-by-key pool)))))
+
 (defun %finish-job (pool job)
+  "End JOB's run. Answers :ABANDONED when POOL-ABANDON already released its
+thread and key, so the caller leaves those alone."
   (bt:with-lock-held ((pool-lock pool))
-    (a:when-let ((key (pool-job-key job)))
-      (when (zerop (decf (gethash key (pool-running-by-key pool))))
-        (remhash key (pool-running-by-key pool))))
-    ;; A job its key held back may start now.
-    (bt:condition-notify (pool-cv pool))))
+    (if (eq (pool-job-state job) :abandoned)
+        :abandoned
+        (progn
+          (%release-key pool job)
+          (setf (pool-job-state job) :done)
+          ;; A job its key held back may start now.
+          (bt:condition-notify (pool-cv pool))
+          nil))))
+
+;;; TODO: an abandoned thread is never reclaimed, so threads stuck for good
+;;; leak. Upgrade path: none in SBCL short of a process restart, as
+;;; DESTROY-THREAD is an interrupt too. Tracked in ~takeiteasy/nyaa#152.
+(defun pool-abandon (job)
+  "Give up on JOB, still running: its thread and key are released now and a
+queued job may take the slot, though the thread itself stays wherever it is
+stuck. True only when JOB was running, so it is abandoned at most once and
+never after it finished."
+  (a:when-let ((pool (pool-job-pool job)))
+    (bt:with-lock-held ((pool-lock pool))
+      (when (eq (pool-job-state job) :running)
+        (setf (pool-job-state job) :abandoned)
+        (%release-key pool job)
+        (decf (pool-threads pool))
+        (incf (pool-abandoned pool))
+        (if (and (> (%runnable-count pool) (+ (pool-idle pool) (pool-starting pool)))
+                 (%room-p pool))
+            (%spawn-pool-worker pool)
+            (bt:condition-notify (pool-cv pool)))
+        t))))
 
 (defun pool-worker-loop (pool)
   (let ((job nil))
@@ -154,12 +189,13 @@ uncounted here, under the lock, so a lowered cap sheds exactly the excess."
                do (let ((m:*registry* (pool-job-registry job)))
                     (handler-case (funcall (pool-job-function job))
                       (error () nil)))
-                  (%finish-job pool (shiftf job nil)))
+                  (when (eq :abandoned (%finish-job pool (shiftf job nil)))
+                    (return)))
       ;; Killed mid-job rather than leaving through %NEXT-JOB.
       (when job
-        (%finish-job pool job)
-        (bt:with-lock-held ((pool-lock pool))
-          (decf (pool-threads pool)))))))
+        (unless (eq :abandoned (%finish-job pool job))
+          (bt:with-lock-held ((pool-lock pool))
+            (decf (pool-threads pool))))))))
 
 (defun pool-stats (key)
   (let ((pool (pool-for key)))
@@ -167,7 +203,8 @@ uncounted here, under the lock, so a lowered cap sheds exactly the excess."
       (list :threads (pool-threads pool) :idle (pool-idle pool)
             :queued (length (pool-queue pool))
             :running (- (pool-threads pool) (pool-idle pool))
-            :spawned (pool-spawned pool)))))
+            :spawned (pool-spawned pool)
+            :abandoned (pool-abandoned pool)))))
 
 (defun retire-idle-workers (&key (timeout 5))
   "Have every idle pooled thread exit, waiting at most TIMEOUT seconds. The

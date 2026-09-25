@@ -152,3 +152,28 @@
     (is-true (nyaa::await-emitter emitter 3))
     (is (equal (loop for i below 50 collect i) (reverse seen)))
     (is-true (eventually #'sinks-idle-p 5))))
+
+;;; A job stuck where no interrupt lands is abandoned a grace period past its
+;;; deadline: its caller is answered and its slot is free again.
+
+(test a-job-stuck-past-its-deadline-is-abandoned-and-its-slot-reused
+  (with-pool-sizes (0 1)
+    (with-protocol
+      (let ((grace nyaa::*pool-abandon-grace*)
+            (abandoned (getf (nyaa:pool-stats 0) :abandoned))
+            (start (get-internal-real-time)))
+        ;; Pooled threads read the global value, not a binding made here.
+        (setf nyaa::*pool-abandon-grace* 0.2)
+        (unwind-protect
+             (let ((stuck (in-thread (lambda ()
+                                       (apply #'nyaa:complete :protocol-echo
+                                              (hello :stall 1.5 :timeout 300))))))
+               (is (eq :timeout (nyaa:tool-error (bt:join-thread stuck))))
+               (is (< (elapsed-since start) 1.2))
+               (is (eq :ok (first (apply #'nyaa:complete :protocol-echo (hello)))))
+               (sleep 1.3)
+               (let ((stats (nyaa:pool-stats 0)))
+                 (is (<= 0 (getf stats :threads) 1))
+                 (is (<= 0 (getf stats :running) 1))
+                 (is (= 1 (- (getf stats :abandoned) abandoned)))))
+          (setf nyaa::*pool-abandon-grace* grace))))))

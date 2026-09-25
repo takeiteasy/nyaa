@@ -26,6 +26,8 @@
 (nyaa:define-protocol-handler protocol-echo (service request)
   (incf *echo-runs*)
   (when (getf request :delay) (sleep (getf request :delay)))
+  (when (getf request :stall)
+    (sb-sys:without-interrupts (sleep (getf request :stall))))
   (when (getf request :boom) (error "boom"))
   (if (getf request :hold)
       (echo-hold request)

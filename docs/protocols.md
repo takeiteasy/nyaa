@@ -234,6 +234,12 @@ Completions nested past `*max-completion-depth*` (8) answer `(:bad-request ...)`
 rather than running, which stops a protocol that completes on itself. A
 `complete` made from a thread a body spawns itself starts at depth 0 again.
 
+A job still running `*pool-abandon-grace*` (5) seconds past its `:timeout`, stuck
+where neither the socket shutdown nor an interrupt reaches it, is abandoned: its
+caller is answered `(:error :timeout)`, and its thread slot and in-flight slot
+are freed for the next job. The stuck thread stays where it is, and
+`pool-stats` counts it under `:abandoned`.
+
 An [agent](agent.md)'s turns and tool calls hold no thread while they wait: the
 reply arrives as a message.
 
@@ -381,8 +387,7 @@ the same way, since a provider answers the same messages.
 
 ## Limitations
 
-- An exchange stuck where neither the socket shutdown nor the interrupt
-  reaches it holds its pooled thread
-  ([#131](https://todo.sr.ht/~takeiteasy/nyaa/131)).
+- An abandoned thread is never reclaimed, so threads stuck for good leak
+  ([#152](https://todo.sr.ht/~takeiteasy/nyaa/152)).
 - A `complete` made from a thread a protocol body spawns itself starts at
   depth 0 ([#132](https://todo.sr.ht/~takeiteasy/nyaa/132)).
