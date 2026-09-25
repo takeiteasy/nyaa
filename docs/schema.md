@@ -14,7 +14,7 @@ an external tool arrives with. One validator, one coercion path.
 Each parameter is `(:name specifier . options)`. The options are `:doc`,
 `:required`, `:default` and `:required-when`; any other is a definition error. A `:default` must print and read back (a
 number, keyword, string or boolean, not a function or hash table); `define-tool`
-refuses one that does not.
+refuses one at load, and mounting any tool fails the same way.
 
 ## Conditional parameters
 

@@ -33,7 +33,9 @@ timeout) ...)` binds `cmd` and `timeout` from the plist, in their declared
 types — and it renders to the JSON Schema a model needs for tool calling.
 `tool-schema` reads it out of the metadata. A `:default` must print and read
 back, since a call carries the schema into a [checkpoint](checkpoints.md)
-generation: `define-tool` signals at load for a function or hash table.
+generation: `define-tool` signals at load for a function or hash table, and
+mounting any tool that defines its handler with `define-tool-handler` fails
+the same way.
 `:slots` passes extra slots
 through to the generated class, as `tool-fs`'s sandbox root does. Inside
 `:invoke`, the anaphoric `service` is the tool itself and `cancel-token` is
@@ -314,9 +316,6 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 - `tool-fs` is text only, so a base64 `tool-http` body cannot be written to a
   file as bytes ([#155](https://todo.sr.ht/~takeiteasy/nyaa/155)).
-- `define-tool` checks that a `:default` reads back, but a tool built from
-  `defservice` and `define-tool-handler` is not checked
-  ([#156](https://todo.sr.ht/~takeiteasy/nyaa/156)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).

@@ -364,6 +364,33 @@ last resort with no dedicated OS mechanism behind it."
 (test define-tool-accepts-a-default-that-reads-back
   (finishes (define-tool-with-defaults 3 :a "s" t 'nyaa::+default-tool-timeout+)))
 
+;;; A tool built without define-tool is checked when it is mounted (#156).
+
+(defun define-hand-written-tool (default-form)
+  (eval `(progn
+           (m:defservice tool-hand-probe () () (:name :tool-hand-probe))
+           (defmethod m:metadata ((service tool-hand-probe))
+             (list :kind :tool :name :tool-hand-probe :trust :agent :summary "probe"
+                   :params (list (list :p 'string :default ,default-form))))
+           (nyaa::define-tool-handler tool-hand-probe (service args)
+             (nyaa::ok)))))
+
+(test a-hand-written-tool-with-an-unreadable-default-fails-its-mount
+  (define-hand-written-tool '#'identity)
+  (with-tools
+    (is (search "does not print and read back"
+                (handler-case (m:mount *context* 'tool-hand-probe)
+                  (error (e) (princ-to-string e)))))
+    (is (null (m:lookup :tool-hand-probe)))))
+
+(test a-hand-written-tool-with-a-readable-default-mounts
+  (define-hand-written-tool 3)
+  (with-tools
+    (m:mount *context* 'tool-hand-probe)
+    (is (equal '(:default 3)
+               (nyaa::param-options (first (nyaa:tool-schema
+                                            (nyaa:describe-tool :tool-hand-probe))))))))
+
 ;;; --- fs: fd-relative walk (~takeiteasy/nyaa#59) -------------------------
 
 (test fs-walk-never-changes-the-process-cwd

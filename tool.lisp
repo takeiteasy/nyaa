@@ -138,36 +138,44 @@ runs BODY with ARGS bound to the plist, coerced against the metadata schema,
 and CANCEL to its :CANCEL token or NIL. A call whose token is already
 cancelled -- one queued behind another -- answers (:error :cancelled) without
 running BODY. Meow intercepts %update-config, %effects and %timer-fire before
-HANDLE, so a tool must not use those heads."
+HANDLE, so a tool must not use those heads.
+
+Mounting the tool also checks that every :DEFAULT in its metadata prints and
+reads back, as DEFINE-TOOL does at load: a call carries the schema into a
+generation file."
   (a:with-gensyms (problem)
-    `(defmethod m:handle ((,service ,class) message)
-       (case (first message)
-         (:describe (m:metadata ,service))
-         ;; INVOKE-TOOL coerces too; doing it here as well means a tool
-         ;; reached by a bare M:CALL sees the same checked arguments.
-         (:invoke (let ((,cancel (call-cancel-token (rest message))))
-                    (declare (ignorable ,cancel))
-                    (if (and ,cancel (cancelled-p ,cancel))
-                        (fail :cancelled)
-                        (multiple-value-bind (,args ,problem)
-                            (coerce-args (tool-schema (m:metadata ,service))
-                                         (a:remove-from-plist (rest message) :cancel))
-                          (declare (ignorable ,args))
-                          (if ,problem
-                              (bad-request "~a" ,problem)
-                              (unwind-protect
-                                   (progn (when ,cancel
-                                            (setf (cancel-token-phase ,cancel) :running))
-                                          ,@body)
-                                (when ,cancel
-                                  (setf (cancel-token-phase ,cancel) :settled)
-                                  (bt:signal-semaphore (cancel-token-settled ,cancel)))))))))
-         ;; Checkpoints (~takeiteasy/nyaa#11): every tool answers these
-         ;; through SNAPSHOT/RESTORE, which default to NIL, so a tool that
-         ;; holds no state worth carrying needs no method of its own.
-         (:snapshot (snapshot ,service))
-         (:restore (restore ,service (second message)))
-         (t (bad-request "unknown message ~s" (first message)))))))
+    `(progn
+      (defmethod m:init :before ((,service ,class))
+        (%check-readable-defaults (m:service-name ,service)
+                                  (tool-schema (m:metadata ,service))))
+      (defmethod m:handle ((,service ,class) message)
+         (case (first message)
+           (:describe (m:metadata ,service))
+           ;; INVOKE-TOOL coerces too; doing it here as well means a tool
+           ;; reached by a bare M:CALL sees the same checked arguments.
+           (:invoke (let ((,cancel (call-cancel-token (rest message))))
+                      (declare (ignorable ,cancel))
+                      (if (and ,cancel (cancelled-p ,cancel))
+                          (fail :cancelled)
+                          (multiple-value-bind (,args ,problem)
+                              (coerce-args (tool-schema (m:metadata ,service))
+                                           (a:remove-from-plist (rest message) :cancel))
+                            (declare (ignorable ,args))
+                            (if ,problem
+                                (bad-request "~a" ,problem)
+                                (unwind-protect
+                                     (progn (when ,cancel
+                                              (setf (cancel-token-phase ,cancel) :running))
+                                            ,@body)
+                                  (when ,cancel
+                                    (setf (cancel-token-phase ,cancel) :settled)
+                                    (bt:signal-semaphore (cancel-token-settled ,cancel)))))))))
+           ;; Checkpoints (~takeiteasy/nyaa#11): every tool answers these
+           ;; through SNAPSHOT/RESTORE, which default to NIL, so a tool that
+           ;; holds no state worth carrying needs no method of its own.
+           (:snapshot (snapshot ,service))
+           (:restore (restore ,service (second message)))
+           (t (bad-request "unknown message ~s" (first message))))))))
 
 ;;; --- define-tool -------------------------------------------------------
 
@@ -191,7 +199,7 @@ PARAMS is a literal schema, checked by VALIDATE-SCHEMA at macroexpansion --
 a bad specifier is a compile-time error. SLOTS is passed through to
 DEFSERVICE, as for TOOL-FS's sandbox root. A :DEFAULT must print and read
 back, since a call carries the schema into a generation file; the definition
-signals at load otherwise.
+signals at load otherwise, and a mount of the tool does too.
 
 INVOKE is exactly one (:INVOKE (name...) . body) clause. Each NAME binds
 (getf args :name), already coerced against PARAMS; SERVICE is bound
