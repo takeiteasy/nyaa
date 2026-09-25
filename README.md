@@ -25,6 +25,7 @@ Runs on SBCL.
 - [Image generations](docs/images.md)
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)
+- [The call log](docs/calls.md)
 
 ## License
 

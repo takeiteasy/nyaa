@@ -54,19 +54,22 @@ Guarded by *LOG-LOCKS-LOCK*.")
   (with-open-file (stream path :if-does-not-exist nil)
     (if stream (file-length stream) 0)))
 
-(defun %vault-maybe-compact (path)
-  "Compact PATH once it has doubled since the last attempt and passed
-*VAULT-COMPACT-SIZE*. A failure never reaches the caller: the log is
-rewritten through a temporary file, so the original survives one."
+(defun %maybe-compact (path threshold compact)
+  "Call COMPACT on PATH once it has doubled since the last attempt and passed
+THRESHOLD bytes. A failure never reaches the caller: the log is rewritten
+through a temporary file, so the original survives one."
   (let* ((key (%log-key path))
          (size (%log-size path))
          (last (bt:with-lock-held (*log-locks-lock*)
                  (gethash key *vault-compacted-sizes* 0))))
-    (when (>= size (max *vault-compact-size* (* 2 last)))
-      (ignore-errors (vault-compact path))
+    (when (>= size (max threshold (* 2 last)))
+      (ignore-errors (funcall compact path))
       (let ((after (or (ignore-errors (%log-size path)) size)))
         (bt:with-lock-held (*log-locks-lock*)
           (setf (gethash key *vault-compacted-sizes*) after))))))
+
+(defun %vault-maybe-compact (path)
+  (%maybe-compact path *vault-compact-size* #'vault-compact))
 
 ;;; A steer sitting in an agent's in-memory queue, or one a :RESTORE has cast
 ;;; at an agent, is claimed: still :PENDING in the log, but no second delivery

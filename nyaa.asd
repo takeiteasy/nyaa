@@ -30,6 +30,7 @@
                ;; %APPEND-LOG/%READ-LOG. Ahead of agent.lisp, which records
                ;; and folds a steer through it.
                (:file "vault")
+               (:file "calls")
                (:file "protocol")
                (:file "worker")
                ;; Ahead of tools/gated-eval.lisp, which checks a form through it.
@@ -96,6 +97,7 @@
                (:file "introspect")
                (:file "checkpoint")
                (:file "vault")
+               (:file "calls")
                (:file "image-generation")
                (:file "self"))
   :perform (test-op (o c)

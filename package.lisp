@@ -35,6 +35,9 @@
    #:vault-record #:vault-consume #:vault-consume-pending
    #:vault-claim-pending #:vault-release #:vault-release-all #:vault-entries #:vault-compact #:*vault-log*
    #:*vault-max-age* #:*vault-compact-size*
+   ;; call log
+   #:call-entries #:call-log-compact #:*call-log* #:*call-log-max-age*
+   #:*call-log-compact-size* #:*call-log-max-content*
    ;; parameter schemas
    #:validate-schema #:coerce-args
    #:schema->json-schema #:json-schema->schema

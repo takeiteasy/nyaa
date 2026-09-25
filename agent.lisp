@@ -72,6 +72,10 @@ to COMPLETE, e.g. :TEMPERATURE.")
           :documentation "NIL (the default): steering is in-memory only. T:
 record to the default vault log (~takeiteasy/nyaa#14). A string or
 pathname: record there instead.")
+   (call-log :initarg :call-log :initform nil :reader agent-call-log
+             :documentation "NIL (the default): dispatched tool calls are not
+recorded. T: record each to the default call log (~takeiteasy/nyaa#73). A
+string or pathname: record there instead.")
    ;; Run state, reset by START-RUN.
    ;; Newest first, so adding one is O(1); CONVERSATION reads it in order.
    (messages :initform nil :accessor %messages)
@@ -81,6 +85,7 @@ pathname: record there instead.")
    (pending-order :initform nil :accessor %pending-order)
    (queued :initform nil :accessor %queued)
    (call-tokens :initform nil :accessor %call-tokens)
+   (call-log-ids :initform nil :accessor %call-log-ids)
    (steer-queue :initform nil :accessor %steer-queue)
    (step-ref :initform 0 :accessor %step-ref)
    (running-p :initform nil :accessor %running-p)
@@ -107,7 +112,8 @@ pathname: record there instead.")
         :chars-per-token (%chars-per-token service)
         :turn-retries (agent-turn-retries service)
         :retry-backoff (agent-retry-backoff service)
-        :vault (agent-vault service)))
+        :vault (agent-vault service)
+        :call-log (agent-call-log service)))
 
 (defun agents (&key (registry m:*registry*))
   "Every registered agent name, sorted."
@@ -161,6 +167,7 @@ pathname: record there instead.")
               (%pending-order service) nil
               (%queued service) nil
               (%call-tokens service) nil
+              (%call-log-ids service) nil
               ;; %STEER-QUEUE is deliberately not cleared here: a steer (or
               ;; a vault :restore) sent while the agent was idle waits in
               ;; the queue rather than being dropped, and folds in on the
@@ -255,6 +262,7 @@ another process holds or that is already consumed."
 (defmethod m:dispose ((service agent) reason)
   (declare (ignore reason))
   (release-steer-claims service)
+  (record-outstanding service :abandoned)
   (retire-emitter service))
 
 (defun cancel-run (service)
@@ -452,6 +460,7 @@ interrupt -- leaves the timer's :RETRY unmatchable."
         (%call-tokens service) (mapcar (lambda (call) (cons (getf call :id) (make-cancel-token)))
                                        calls)
         (%queued service) calls)
+  (record-accepted service calls)
   (dolist (call calls)
     (emit-event (agent-events service)
                 (tool-call-event (m:agent-ref service) (getf call :id)
@@ -465,13 +474,17 @@ interrupt -- leaves the timer's :RETRY unmatchable."
 (defun pump-calls (service)
   "Dispatch queued calls while a slot is free. A call refused outright
 answers at once and never holds one."
-  (loop with cap = (agent-max-parallel-tools service)
-        while (and (%queued service)
-                   (or (null cap) (< (running-calls service) cap)))
-        do (let* ((call (pop (%queued service)))
-                  (cell (assoc (getf call :id) (%pending service) :test #'equal)))
-             (setf (cdr cell) :pending)
-             (dispatch-call service call))))
+  (let ((started '()))
+    (loop with cap = (agent-max-parallel-tools service)
+          while (and (%queued service)
+                     (or (null cap) (< (running-calls service) cap)))
+          do (let* ((call (pop (%queued service)))
+                    (cell (assoc (getf call :id) (%pending service) :test #'equal)))
+               (setf (cdr cell) :pending)
+               (push call started)))
+    (record-running service (mapcar (lambda (call) (getf call :id)) started))
+    (dolist (call (nreverse started))
+      (dispatch-call service call))))
 
 (defun dispatch-call (service call)
   "A call outside the allow-list, and a tool error of any kind, both come
@@ -528,7 +541,8 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
                             :turn-timeout (agent-turn-timeout service)
                             :deadline (agent-deadline service)
                             :sink (agent-events service)
-                            :vault (agent-vault service))))
+                            :vault (agent-vault service)
+                            :call-log (agent-call-log service))))
     (on-cancel (call-token service id) (lambda () (m:cast child '(:cancel))))
     (m:cast child (list :run :messages (list (list :role :user :content task))))
     nil))
@@ -551,6 +565,7 @@ reason DISPATCH-TOOL's reply does, and cancelling the call cancels the child."
   (let ((cell (assoc id (%pending service) :test #'equal)))
     (when (and cell (outstanding-p (cdr cell)))
       (setf (cdr cell) result)
+      (record-done service (list (list id result)))
       (emit-event (agent-events service) (tool-result-event (m:agent-ref service) id result))
       (pump-calls service)
       (when (notany (lambda (c) (outstanding-p (cdr c))) (%pending service))
@@ -575,6 +590,7 @@ or an :INTERRUPTED error where none has arrived."
 
 (defun close-pending-calls (service)
   (cancel-pending-calls service)
+  (record-outstanding service :interrupted)
   (dolist (cell (%pending service))
     (when (outstanding-p (cdr cell))
       (setf (cdr cell) (fail :interrupted))
@@ -584,7 +600,58 @@ or an :INTERRUPTED error where none has arrived."
     (push-message service message))
   (setf (%pending service) nil
         (%pending-order service) nil
-        (%call-tokens service) nil))
+        (%call-tokens service) nil
+        (%call-log-ids service) nil))
+
+;;; --- the call log (~takeiteasy/nyaa#73) -------------------------------------
+
+;;; TODO: synchronous file writes under an flock, on the agent's own process;
+;;; a batched writer thread if a slow disk shows up as latency (#181).
+
+(defun call-log-of (service)
+  (%call-log-path (agent-call-log service)))
+
+(defun call-log-id (service id)
+  (cdr (assoc id (%call-log-ids service) :test #'equal)))
+
+(defun record-accepted (service calls)
+  (a:when-let ((path (call-log-of service)))
+    (setf (%call-log-ids service)
+          (mapcar #'cons
+                  (mapcar (lambda (call) (getf call :id)) calls)
+                  (call-log-accept path (m:service-name service) (%turns service) calls
+                                   :cap (or (agent-max-tool-result service)
+                                            *call-log-max-content*))))))
+
+(defun record-running (service ids)
+  (a:when-let ((path (call-log-of service)))
+    (call-log-running path (remove nil (mapcar (lambda (id) (call-log-id service id)) ids)))))
+
+(defun record-done (service results)
+  "Log each of RESULTS, (provider call id, result), as finished."
+  (a:when-let ((path (call-log-of service)))
+    (call-log-done
+     path
+     (loop for (id result) in results
+           for log-id = (call-log-id service id)
+           when log-id
+             collect (list log-id
+                           (cond ((not (tool-error-p result)) :ok)
+                                 ((eq (tool-error result) :interrupted) :interrupted)
+                                 (t :error))
+                           (%cut-text (render-tool-result result)
+                                      (or (agent-max-tool-result service)
+                                          *call-log-max-content*)))))))
+
+(defun record-outstanding (service outcome)
+  "Log every call this turn still awaiting a result as finished with OUTCOME."
+  (a:when-let ((path (call-log-of service)))
+    (call-log-done
+     path
+     (loop for cell in (%pending service)
+           for log-id = (call-log-id service (car cell))
+           when (and log-id (outstanding-p (cdr cell)))
+             collect (list log-id outcome nil)))))
 
 (defun tool-message (id result)
   (list :role :tool :tool-call-id id :content (render-tool-result result)))
@@ -808,7 +875,8 @@ timeout."
         (%pending service) nil
         (%pending-order service) nil
         (%queued service) nil
-        (%call-tokens service) nil)
+        (%call-tokens service) nil
+        (%call-log-ids service) nil)
   ;; Invalidates any turn already in flight, so its late TURN-REPLY is
   ;; dropped rather than reopening a run that has already finished.
   (incf (%step-ref service))
@@ -896,12 +964,14 @@ here but not assumed of the caller's own services)."
   (close-turn-stream service)
   (cancel-turn service)
   (cancel-pending-calls service)
+  (record-outstanding service :interrupted)
   (release-steer-claims service)
   (setf (%messages service) (reverse (getf state :messages))
         (%turns service) (getf state :turns)
         (%pending service) nil
         (%pending-order service) nil
         (%call-tokens service) nil
+        (%call-log-ids service) nil
         (%steer-queue service) nil
         (%turn-in-flight service) nil
         (%running-p service) nil)

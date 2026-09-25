@@ -52,7 +52,7 @@ the original's call carries on.
 - A model cannot fork; there is no agent message or tool for it
   ([#178](https://todo.sr.ht/~takeiteasy/nyaa/178)).
 
-[^mount]: Same class, options and restart policy, so `:sink` and `:vault` are
-    shared with the original: a fork's events reach the same sink, and its
-    steering is recorded in the same vault log. Mount options are read from
+[^mount]: Same class, options and restart policy, so `:sink`, `:vault` and
+    `:call-log` are shared with the original: a fork's events reach the same
+    sink, and its steering and tool calls are recorded in the same logs. Mount options are read from
     the original's mount, so a credential-holding option is copied too.

@@ -66,6 +66,7 @@ sends `:run` with `:continue t` to carry on from it. Mount with
 | `:sink` | nil | a stream sink, as `complete` takes |
 | `:sampling` | nil | a plist passed through to `complete`, e.g. `:temperature` |
 | `:vault` | nil | record steering to the [vault](vault.md): nil is off, `t` the default log, a path to record there instead |
+| `:call-log` | nil | record each dispatched tool call to the [call log](calls.md): nil is off, `t` the default log, a path to record there instead |
 
 ## The allow-list and trust
 
@@ -284,7 +285,7 @@ sink that signals an error loses that event and carries on.
 With `:sub-agents t`, the model gets a reserved tool, `agent-task`, taking one
 `:task` string. Calling it delegates a child agent — under meow's own agent
 supervisor, via `m:delegate` — with this agent's model, allow-list,
-`:max-parallel-tools` and `:vault`, runs it to completion, and returns its final answer as the tool
+`:max-parallel-tools`, `:vault` and `:call-log`, runs it to completion, and returns its final answer as the tool
 result. The child's `:ref`, echoed on its events, is a cons of an internal
 step counter and the call id. A child does not itself get `:sub-agents`, so
 delegation does not nest by default, and it is never registered under a name, so a steer
