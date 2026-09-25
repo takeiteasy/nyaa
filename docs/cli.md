@@ -1,7 +1,8 @@
 # The command line
 
 `nyaa run` runs one [agent](agent.md) to completion, prints the answer and
-exits. [`nyaa chat`](chat.md) talks to one agent turn by turn. Both are in the
+exits. [`nyaa chat`](chat.md) talks to one agent turn by turn, and `nyaa chats`
+lists the chats it [saved](chat.md#saving-and-resuming). All are in the
 secondary system `nyaa/cli`, started through [the launcher](launcher.md).
 
 ```sh
@@ -21,11 +22,12 @@ nyaa run "how many .lisp files are here?" --model ollama:llama3.2 \
 | `--max-turns N` | most model turns before the run stops itself; default 16, see [the agent](agent.md#mount-options) |
 | `-v`, `--verbose` | `run` only: one line per event on stderr, and streamed text |
 
-`chat` takes the same options except `PROMPT` and `-v`. A provider or tool is mounted by name from the [definitions](tools.md#definitions)
+`chat` takes the same options except `PROMPT` and `-v`, and `--resume [ID]`, which
+[carries on a saved chat](chat.md#saving-and-resuming). A provider or tool is mounted by name from the [definitions](tools.md#definitions)
 table, so anything `define-provider` or `define-tool` has defined in the
 launched core is available. `tool-fs` is rooted at the current directory.
 `$NYAA_HOME/init.lisp`, when it exists, is loaded first, so it can define
-more.
+more. Chats are saved under `$NYAA_HOME/chats/`.
 
 ## Output and exit codes
 

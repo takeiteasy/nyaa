@@ -27,7 +27,7 @@
    #:fork-conversation #:fork-agent
    #:run-start-event #:steer-event #:turn-event #:tool-call-event #:tool-result-event #:run-done-event
    ;; checkpoints
-   #:snapshot #:restore #:secret-initargs #:checkpoint #:rollback #:generations
+   #:snapshot #:restore #:secret-initargs #:checkpoint #:rollback #:generations #:generation-id
    #:*generations-directory*
    ;; image generations
    #:save-image #:relaunch #:save-recovery-image

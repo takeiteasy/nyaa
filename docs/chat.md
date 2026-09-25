@@ -2,7 +2,8 @@
 
 `nyaa chat` is a line-by-line chat with one [agent](agent.md). It streams the
 answer, shows tool calls and their results, and takes a line typed mid-run as
-a steer. It is the secondary system `nyaa/cli`, drawn from
+a steer, and [saves each run](#saving-and-resuming) so a chat can be resumed.
+It is the secondary system `nyaa/cli`, drawn from
 [client state](client-state.md).
 
 ```sh
@@ -19,8 +20,12 @@ There are 41.
 
 ## Options
 
-The options of [`nyaa run`](cli.md#options), without `PROMPT` and `-v`. A prompt
-argument is a usage error (exit 2).
+The options of [`nyaa run`](cli.md#options), without `PROMPT` and `-v`, and
+`--resume`. A prompt argument is a usage error (exit 2).
+
+| Option | Meaning |
+|---|---|
+| `--resume [ID]` | carry on a [saved chat](#saving-and-resuming): the newest, or the one named `ID`; not with `--model`, `--tools`, `--system-file`, `--system-replace` or `--max-turns` |
 
 ## Keys
 
@@ -45,7 +50,33 @@ what came before. It is unmounted when the chat ends.
 | `[run ended: reason]` | the run stopped for any reason but `:stop` |
 | `> ` | the run is over; the next line goes to the model |
 
-An existing install needs `nyaa install` again to get `chat` into its saved core.
+An existing install needs `nyaa install` again to get `chat` and `chats` into its saved core.
+
+## Saving and resuming
+
+Each run that ends is saved as a [generation](checkpoints.md), one folder per
+chat under `$NYAA_HOME/chats/`[^save]. A chat that runs nothing saves nothing.
+
+```sh
+nyaa chats
+# 20260925-191231-123456-482  2026-09-25T18:12:40Z  how many .lisp files are here?
+nyaa chat --resume                        # the newest chat
+nyaa chat --resume 20260925-191231-123456-482
+```
+
+`nyaa chats` prints one line per chat, newest first: its id, when it was last
+saved and its first line. `--resume` prints the saved conversation as it was
+drawn, then a prompt; the next line carries on from it. The model, tools and
+system prompt are the saved ones, and a resumed chat keeps saving into its own
+folder.
+
+| Exit | When |
+|---|---|
+| 2 | nothing saved, no chat with that id, or `--resume` with an option that describes a new agent |
+| 1 | the saved agent, provider or a tool could not be mounted again, e.g. its class is gone |
+
+A provider's API key is never saved: it comes from the same environment
+variable as in a new chat ([credentials](checkpoints.md#credentials)).
 
 ## Limitations
 
@@ -54,5 +85,11 @@ An existing install needs `nyaa install` again to get `chat` into its saved core
 - The chat draws the [text the provider streams](protocols.md#streaming), so an
   answer that is not streamed is not shown
   ([#205](https://todo.sr.ht/~takeiteasy/nyaa/205)).
-- A chat starts empty: it does not resume a saved conversation
-  ([#100](https://todo.sr.ht/~takeiteasy/nyaa/100)).
+- The options of a resumed chat cannot be changed
+  ([#207](https://todo.sr.ht/~takeiteasy/nyaa/207)).
+- Saved chats are never deleted or pruned
+  ([#208](https://todo.sr.ht/~takeiteasy/nyaa/208)).
+
+[^save]: Saved by a thread of its own, so a slow disk never holds up the
+    prompt, and once more as the chat ends, so a run cut short by Ctrl-D is kept.
+    Only the newest generation of a chat is kept.

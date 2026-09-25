@@ -17,8 +17,8 @@
 ;;; of a call (1 announced, 2 answered), or :FINISHED. START is the first index that
 ;;; is not.
 
-(defstruct (renderer (:constructor make-renderer (out)))
-  out (progress (make-hash-table)) (start 0) (last-status :idle))
+(defstruct (renderer (:constructor make-renderer (out &optional on-done)))
+  out on-done (progress (make-hash-table)) (start 0) (last-status :idle))
 
 (defun abbreviate (object)
   (let ((text (let ((*print-pretty* nil)) (prin1-to-string object))))
@@ -76,9 +76,121 @@ has just ended."
           (fresh-line out)
           (unless (eq :stop (ui:state-reason state))
             (format out "[run ended: ~(~a~)]~%" (ui:state-reason state)))
-          (write-string *prompt* out))
+          (write-string *prompt* out)
+          (a:when-let ((on-done (renderer-on-done renderer)))
+            (funcall on-done)))
         (setf (renderer-last-status renderer) status))
       (finish-output out))))
+
+;;; --- saving ---------------------------------------------------------------
+
+;;; A run's end only asks the saver for a save: checkpointing from the thread
+;;; that delivers events would ask the agent to snapshot itself while it waits
+;;; on that thread.
+
+(defparameter *label-length* 60)
+
+(defstruct (saver (:constructor make-saver (context directory err)))
+  context directory err
+  (lock (bt:make-lock :name "nyaa chat saver"))
+  (wake (bt:make-condition-variable))
+  pending stopping thread)
+
+(defun conversation (&optional (agent :chat))
+  (getf (m:call (m:lookup agent) '(:snapshot)) :messages))
+
+(defun first-user-line (messages)
+  (a:when-let ((message (find :user messages :key (lambda (message) (getf message :role)))))
+    (let* ((text (nyaa:content-text (getf message :content)))
+           (line (subseq text 0 (position #\Newline text))))
+      (if (> (length line) *label-length*)
+          (format nil "~a..." (subseq line 0 *label-length*))
+          line))))
+
+(defun save-chat (saver)
+  (handler-case
+      (let ((label (first-user-line (conversation))))
+        (when label
+          (nyaa:checkpoint (saver-context saver) :dir (saver-directory saver) :keep 1 :label label)))
+    (error (e)
+      (format (saver-err saver) "~&nyaa: could not save the chat: ~a~%" e))))
+
+(defun request-save (saver)
+  (bt:with-lock-held ((saver-lock saver))
+    (setf (saver-pending saver) t)
+    (bt:condition-notify (saver-wake saver))))
+
+(defun saver-loop (saver)
+  (loop
+    (let ((stop nil))
+      (bt:with-lock-held ((saver-lock saver))
+        (loop until (or (saver-pending saver) (saver-stopping saver))
+              do (bt:condition-wait (saver-wake saver) (saver-lock saver)))
+        (setf stop (saver-stopping saver)
+              (saver-pending saver) nil))
+      (when stop (return))
+      (save-chat saver))))
+
+(defun start-saver (saver)
+  (setf (saver-thread saver) (bt:make-thread (lambda () (saver-loop saver)) :name "nyaa chat saver")))
+
+(defun stop-saver (saver)
+  "Let a save under way finish, then save once more so a run cut short is kept."
+  (bt:with-lock-held ((saver-lock saver))
+    (setf (saver-stopping saver) t)
+    (bt:condition-notify (saver-wake saver)))
+  (bt:join-thread (saver-thread saver))
+  (save-chat saver))
+
+;;; --- sessions -------------------------------------------------------------
+
+(defun session-id ()
+  (nyaa:generation-id))
+
+(defun chats-directory (home)
+  (merge-pathnames "chats/" home))
+
+(defun session-ids (home)
+  "The saved sessions' ids, newest first."
+  (sort (mapcar (lambda (directory) (car (last (pathname-directory directory))))
+                (uiop:subdirectories (chats-directory home)))
+        #'string>))
+
+(defun session-directory (home id)
+  (merge-pathnames (format nil "~a/" id) (chats-directory home)))
+
+(defun resolve-session (home resume)
+  "The id RESUME, :LATEST or an id, names, or a usage error."
+  (let ((ids (session-ids home)))
+    (cond ((null ids) (usage-error "no saved chats"))
+          ((eq resume :latest) (first ids))
+          ((member resume ids :test #'string=) resume)
+          (t (usage-error "no saved chat ~a" resume)))))
+
+;;; --- listing --------------------------------------------------------------
+
+(defun list-chats (home out)
+  "One line per saved chat, newest first: id, when it was last saved, its first line."
+  (dolist (id (session-ids home))
+    (let ((generation (first (nyaa:generations :dir (session-directory home id)))))
+      (when generation
+        (format out "~a  ~a  ~a~%" id (getf generation :created) (getf generation :label))))))
+
+;;; --- replaying ------------------------------------------------------------
+
+(defun replay (messages out)
+  "Print MESSAGES, a saved conversation, as the chat would have drawn it."
+  (dolist (message messages)
+    (let ((text (nyaa:content-text (getf message :content))))
+      (ecase (getf message :role)
+        (:system)
+        (:user (format out "~a~a~%" *prompt* text))
+        (:assistant
+         (when (plusp (length text)) (format out "~a~%" text))
+         (dolist (call (getf message :tool-calls))
+           (format out "[~(~a~) ~a]~%" (getf call :name) (abbreviate (getf call :arguments)))))
+        (:tool (format out "[result ~a]~%" (abbreviate text))))))
+  (finish-output out))
 
 ;;; --- the session ----------------------------------------------------------
 
@@ -104,17 +216,37 @@ agent answered."
 (defun next-line (in)
   (if (functionp in) (funcall in) (read-line in nil)))
 
-(defun chat (options context in out err)
+(defun mount-chat (options context home)
+  "Mount the agent for a new chat, or, for --resume, bring the saved one back.
+Answers the session's id."
+  (if (getf options :resume)
+      (let* ((id (resolve-session home (getf options :resume)))
+             (generation (first (nyaa:generations :dir (session-directory home id))))
+             (outcome (and generation (nyaa:rollback context (getf generation :path)))))
+        (unless (and outcome (member :chat (getf (second outcome) :restored)))
+          (error "could not resume ~a: ~a" id
+                 (or (second (assoc :chat (getf (second outcome) :unremounted))) "no saved conversation")))
+        id)
+      (multiple-value-bind (provider-name tools system) (prepare options context)
+        (apply #'m:mount context 'nyaa:agent :name :chat :model provider-name :system system
+               (agent-options options tools))
+        (session-id))))
+
+(defun chat (options context in out err home)
   "Chat with one agent until IN, a stream or a function answering a line or
 nil, ends, and return an exit code. Ctrl-C cancels a run, or leaves the chat
-when none is under way."
-  (declare (ignore err))
-  (multiple-value-bind (provider-name tools system) (prepare options context)
-    (apply #'m:mount context 'nyaa:agent :name :chat :model provider-name :system system
-           (agent-options options tools))
+when none is under way. Each run is saved under HOME, and options :resume
+brings a saved chat back."
+  (let ((saver nil))
     (unwind-protect
-         (let* ((renderer (make-renderer out))
-                (client (ui:attach :chat :on-change (lambda (state) (render renderer state)))))
+         (let* ((id (mount-chat options context home))
+                (renderer (make-renderer out))
+                (client nil))
+           (setf saver (make-saver context (session-directory home id) err))
+           (setf (renderer-on-done renderer) (lambda () (request-save saver)))
+           (replay (conversation) out)
+           (start-saver saver)
+           (setf client (ui:attach :chat :on-change (lambda (state) (render renderer state))))
            (bt:with-lock-held (*output-lock*)
              (write-string *prompt* out)
              (finish-output out))
@@ -131,4 +263,7 @@ when none is under way."
                    (cond ((null line) (return-from session 0))
                          ((string= "" (string-trim '(#\Space #\Tab) line)))
                          (t (submit client line))))))))
-      (m:unmount context :chat))))
+      (when (and saver (saver-thread saver))
+        (stop-saver saver))
+      (when (m:lookup :chat)
+        (m:unmount context :chat)))))

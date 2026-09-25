@@ -6,7 +6,9 @@
   "usage: nyaa run PROMPT [--model PROVIDER:MODEL] [--tools NAME,...]
                  [--system-file FILE] [--system-replace] [--max-turns N] [-v]
        nyaa chat [--model PROVIDER:MODEL] [--tools NAME,...]
-                 [--system-file FILE] [--system-replace] [--max-turns N]")
+                 [--system-file FILE] [--system-replace] [--max-turns N]
+       nyaa chat --resume [ID]
+       nyaa chats")
 
 (defparameter *default-system*
   "You are nyaa, an agent run from the command line. Do the task, then answer briefly.")
@@ -24,17 +26,27 @@
 
 (defun parse-args (args &key (takes-prompt t))
   "ARGS after `run` or `chat`, as a plist: :prompt :model :tools :system-file
-:system-replace :max-turns :verbose. Without TAKES-PROMPT a prompt is an error."
-  (let (prompt (model *default-model*) tools system-file system-replace max-turns verbose)
+:system-replace :max-turns :verbose :resume. Without TAKES-PROMPT a prompt is an
+error and --resume, answered as :LATEST or an id, is allowed, but not with the
+options that describe a new agent."
+  (let (prompt (model *default-model*) tools system-file system-replace max-turns verbose resume
+        (described '()))
     (flet ((value (flag)
              (or (pop args) (usage-error "~a needs a value" flag))))
       (loop while args
             do (let ((arg (pop args)))
-                 (cond ((string= arg "--model") (setf model (value arg)))
-                       ((string= arg "--tools") (setf tools (uiop:split-string (value arg) :separator ",")))
-                       ((string= arg "--system-file") (setf system-file (value arg)))
-                       ((string= arg "--system-replace") (setf system-replace t))
+                 (cond ((string= arg "--model") (push arg described) (setf model (value arg)))
+                       ((string= arg "--tools")
+                        (push arg described)
+                        (setf tools (uiop:split-string (value arg) :separator ",")))
+                       ((string= arg "--system-file") (push arg described) (setf system-file (value arg)))
+                       ((string= arg "--system-replace") (push arg described) (setf system-replace t))
+                       ((and (string= arg "--resume") (not takes-prompt))
+                        (setf resume (if (and args (plusp (length (first args))) (char/= #\- (char (first args) 0)))
+                                         (pop args)
+                                         :latest)))
                        ((string= arg "--max-turns")
+                        (push arg described)
                         (let ((n (parse-integer (value arg) :junk-allowed t)))
                           (unless (and n (plusp n)) (usage-error "--max-turns wants a positive integer"))
                           (setf max-turns n)))
@@ -45,11 +57,14 @@
                        ((not takes-prompt) (usage-error "unexpected argument ~s" arg))
                        (prompt (usage-error "more than one prompt: ~s and ~s" prompt arg))
                        (t (setf prompt arg))))))
+    (when (and resume described)
+      (usage-error "--resume takes its settings from the saved chat, not ~a" (first (last described))))
     (when (and takes-prompt (not prompt)) (usage-error "no prompt"))
     (when (and system-replace (not system-file))
       (usage-error "--system-replace needs --system-file"))
     (list :prompt prompt :model model :tools tools :system-file system-file
-          :system-replace system-replace :max-turns max-turns :verbose verbose)))
+          :system-replace system-replace :max-turns max-turns :verbose verbose
+          :resume resume)))
 
 (defun split-model (spec)
   "SPEC, PROVIDER:MODEL, split on the first colon."

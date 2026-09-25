@@ -4,19 +4,15 @@
 ;;; `nyaa chat` (~takeiteasy/nyaa#99): the session against the echo provider,
 ;;; and its pieces against a stalling backend.
 
-(defun count-prompts (text)
-  (loop with start = 0
-        for at = (search "> " text :start2 start)
-        while at count t do (setf start (+ at 2))))
-
 (defun chat-session (lines &rest args)
   "ARGS after `chat`, with LINES typed one at a time, each once the last run has
-drawn its prompt. Answers the exit code, everything printed and, from the
-agent as the input ended, its conversation's roles."
+drawn its prompt, against *HOME* or a home of its own. Answers the exit code,
+everything printed, from the agent as the input ended its conversation's roles,
+and stderr."
   (let* ((out (make-string-output-stream))
          (text "")
          (roles nil)
-         (needed 1)
+         (mark 0)
          (reader (lambda ()
                    (is-true (eventually
                              (lambda ()
@@ -24,12 +20,13 @@ agent as the input ended, its conversation's roles."
                                            'string text
                                            (bt:with-lock-held (nyaa/cli::*output-lock*)
                                              (get-output-stream-string out))))
-                               (>= (count-prompts text) needed))
+                               (and (> (length text) mark)
+                                    (alexandria:ends-with-subseq "> " text)))
                              5))
                    (if lines
                        (let ((line (pop lines)))
                          (unless (string= "" (string-trim " " line))
-                           (incf needed))
+                           (setf mark (length text)))
                          line)
                        (progn
                          (setf roles (mapcar (lambda (message) (getf message :role))
@@ -37,9 +34,24 @@ agent as the input ended, its conversation's roles."
                                                    :messages)))
                          nil))))
          (err (make-string-output-stream))
-         (code (nyaa/cli:main (cons "chat" args) :context *protocol-context*
-                                                  :in reader :out out :err err)))
+         (code (flet ((in-home (home)
+                        (nyaa/cli:main (cons "chat" args) :context *protocol-context* :home home
+                                                          :in reader :out out :err err)))
+                 (if *home*
+                     (in-home *home*)
+                     (with-home () (in-home *home*))))))
     (values code text roles (get-output-stream-string err))))
+
+(defun saved-chats ()
+  (nyaa/cli::session-ids *home*))
+
+(defun saved-conversation (id)
+  "The roles and first line of the conversation saved as ID."
+  (let* ((generation (first (nyaa:generations :dir (nyaa/cli::session-directory *home* id))))
+         (state (getf (find :chat (getf (nyaa::%read-generation (getf generation :path)) :services)
+                            :key (lambda (entry) (getf entry :name)))
+                      :state)))
+    (mapcar (lambda (message) (getf message :role)) (getf state :messages))))
 
 (test chat-answers-each-line-and-continues-the-conversation
   (with-protocol
@@ -52,11 +64,13 @@ agent as the input ended, its conversation's roles."
 
 (test chat-ignores-blank-lines-and-ends-at-once-on-no-input
   (with-protocol
-    (multiple-value-bind (code text roles err)
-        (chat-session '("" "   ") "--model" "test-echo:any")
-      (is (= 0 code) "~a" err)
-      (is (equal "> " text))
-      (is (null roles)))))
+    (with-home ()
+      (multiple-value-bind (code text roles err)
+          (chat-session '("" "   ") "--model" "test-echo:any")
+        (is (= 0 code) "~a" err)
+        (is (equal "> " text))
+        (is (null roles))
+        (is (null (saved-chats)) "a chat that ran nothing saves nothing")))))
 
 (test chat-unmounts-its-agent
   (with-protocol
@@ -149,3 +163,102 @@ agent as the input ended, its conversation's roles."
                (is (eq :cancelled (ui:state-reason (ui:client-state client))))
                (is (eq :exit (nyaa/cli::handle-interrupt client)))))
         (setf (car release) t)))))
+
+;;; --- saving and resuming (#100) --------------------------------------------
+
+(test a-chat-is-saved-and-listed
+  (with-protocol
+    (with-home ()
+      (chat-session '("hello there" "again") "--model" "test-echo:any")
+      (is (= 1 (length (saved-chats))))
+      (is (equal '(:system :user :assistant :user :assistant)
+                 (saved-conversation (first (saved-chats)))))
+      (is (= 1 (length (nyaa:generations :dir (nyaa/cli::session-directory *home* (first (saved-chats)))))))
+      (multiple-value-bind (code out) (cli "chats")
+        (is (= 0 code))
+        (is (search (first (saved-chats)) out))
+        (is (search "hello there" out))))))
+
+(test chats-lists-nothing-for-an-empty-home-and-takes-no-arguments
+  (with-protocol
+    (multiple-value-bind (code out) (cli "chats")
+      (is (= 0 code))
+      (is (equal "" out)))
+    (is (= 2 (cli "chats" "extra")))))
+
+(test chats-lists-the-newest-first
+  (with-protocol
+    (with-home ()
+      (chat-session '("first") "--model" "test-echo:any")
+      (chat-session '("second") "--model" "test-echo:any")
+      (let ((out (nth-value 1 (cli "chats"))))
+        (is (< (search "second" out) (search "first" out)))))))
+
+(test resume-carries-on-from-the-saved-conversation
+  (with-protocol
+    (with-home ()
+      (chat-session '("hello") "--model" "test-echo:any")
+      (let ((id (first (saved-chats))))
+        (multiple-value-bind (code text roles err)
+            (chat-session '("again") "--resume")
+          (is (= 0 code) "~a" err)
+          (is (equal '(:system :user :assistant :user :assistant) roles))
+          (is (search "> hello" text) "the saved conversation is replayed")
+          (is (search "hello!" text))
+          (is (search "again!" text)))
+        (is (equal (list id) (saved-chats)) "a resumed chat keeps saving into its own session")
+        (is (equal '(:system :user :assistant :user :assistant) (saved-conversation id)))))))
+
+(test resume-names-a-session
+  (with-protocol
+    (with-home ()
+      (chat-session '("one") "--model" "test-echo:any")
+      (let ((old (first (saved-chats))))
+        (chat-session '("two") "--model" "test-echo:any")
+        (multiple-value-bind (code text)
+            (chat-session '() "--resume" old)
+          (is (= 0 code))
+          (is (search "> one" text))
+          (is (not (search "> two" text))))))))
+
+(test resume-mounts-the-saved-agent-and-provider-again
+  (with-protocol
+    (with-home ()
+      (chat-session '("hello") "--model" "test-echo:any"
+                    "--system-file" (namestring (merge-pathnames "sys.txt" (make-system-file))))
+      (let* ((registry (make-instance 'm:registry))
+             (m:*registry* registry)
+             (context (m:start-service (make-instance 'm:context :name :fresh) :registry registry)))
+        (unwind-protect
+             (let ((out (make-string-output-stream)) (err (make-string-output-stream)))
+               (is (null (m:lookup :chat)))
+               (is (= 0 (nyaa/cli:main '("chat" "--resume") :context context :home *home*
+                                                             :in (lambda () nil) :out out :err err))
+                   "~a" (get-output-stream-string err))
+               (is (search "> hello" (get-output-stream-string out))))
+          (m:stop context))))))
+
+(defun make-system-file ()
+  (let ((directory (uiop:ensure-directory-pathname (make-sandbox-directory))))
+    (alexandria:write-string-into-file "Be terse." (merge-pathnames "sys.txt" directory))
+    directory))
+
+(test resume-is-a-usage-error-when-there-is-nothing-to-resume
+  (with-protocol
+    (with-home ()
+      (dolist (args '(("chat" "--resume") ("chat" "--resume" "nosuch")))
+        (multiple-value-bind (code out err) (apply #'cli args)
+          (is (= 2 code) "~s" args)
+          (is (equal "" out))
+          (is (search "no saved chat" err)))))))
+
+(test resume-refuses-the-options-that-describe-a-new-agent
+  (with-protocol
+    (dolist (args '(("chat" "--resume" "--model" "test-echo:any")
+                    ("chat" "--resume" "--tools" "tool-fs")
+                    ("chat" "--resume" "--max-turns" "3")
+                    ("chat" "--resume" "--system-file" "x")))
+      (is (= 2 (apply #'cli args)) "~s" args))
+    (is (= 2 (cli "run" "hi" "--resume")))
+    (is (eq :latest (getf (nyaa/cli::parse-args '("--resume") :takes-prompt nil) :resume)))
+    (is (equal "abc" (getf (nyaa/cli::parse-args '("--resume" "abc") :takes-prompt nil) :resume)))))

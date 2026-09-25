@@ -4,12 +4,27 @@
 ;;; `nyaa run` through NYAA/CLI:MAIN against the echo provider, which
 ;;; answers with the last user message and a bang.
 
+(defvar *home* nil "The NYAA_HOME a test's command line runs against, when it needs to keep it.")
+
+(defun call-with-home (body)
+  (let ((*home* (uiop:ensure-directory-pathname (make-sandbox-directory))))
+    (unwind-protect (funcall body)
+      (uiop:delete-directory-tree *home* :validate t :if-does-not-exist :ignore))))
+
+(defmacro with-home (() &body body)
+  `(call-with-home (lambda () ,@body)))
+
 (defun cli (&rest args)
-  "ARGS through MAIN, as (values exit-code stdout stderr)."
-  (let* ((out (make-string-output-stream))
-         (err (make-string-output-stream))
-         (code (nyaa/cli:main args :context *protocol-context* :out out :err err)))
-    (values code (get-output-stream-string out) (get-output-stream-string err))))
+  "ARGS through MAIN, as (values exit-code stdout stderr). Against *HOME*, or an
+empty home of its own."
+  (flet ((in-home (home)
+           (let* ((out (make-string-output-stream))
+                  (err (make-string-output-stream))
+                  (code (nyaa/cli:main args :context *protocol-context* :home home :out out :err err)))
+             (values code (get-output-stream-string out) (get-output-stream-string err)))))
+    (if *home*
+        (in-home *home*)
+        (with-home () (in-home *home*)))))
 
 (test run-prints-the-answer-and-exits-zero
   (with-protocol

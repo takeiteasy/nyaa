@@ -14,7 +14,8 @@ exec ros -Q -- $0 "$@"
 
 (defparameter *usage* "usage: nyaa [--core FILE] [-- sbcl-args...]
        nyaa [--core FILE] run PROMPT [options]
-       nyaa [--core FILE] chat [options]
+       nyaa [--core FILE] chat [options | --resume [ID]]
+       nyaa [--core FILE] chats
        nyaa install")
 
 (defun usage-error (format &rest args)
@@ -68,7 +69,7 @@ exec ros -Q -- $0 "$@"
       (setf core (second argv) argv (cddr argv)))
     (cond
       ((equal (first argv) "install") (install))
-      ((member (first argv) '("run" "chat") :test #'equal)
+      ((member (first argv) '("run" "chat" "chats") :test #'equal)
        (run-command (nyaa/launcher:select-core :core core) argv))
       ((or (null argv) (equal (first argv) "--"))
        (ros:exec (nyaa/launcher:launch-argv (nyaa/launcher:select-core :core core) (rest argv))))

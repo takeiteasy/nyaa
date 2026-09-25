@@ -165,7 +165,7 @@ cannot bring back."
 
 ;;; --- the generation file --------------------------------------------------
 
-(defun %generation-id ()
+(defun generation-id ()
   "A name that sorts by the time it was made, to the microsecond, then a random
 tail so two processes in the same microsecond do not collide."
   (multiple-value-bind (seconds microseconds) (sb-ext:get-time-of-day)
@@ -175,7 +175,7 @@ tail so two processes in the same microsecond do not collide."
               year month day hour min sec microseconds (random 1000)))))
 
 (defun %generation-filename ()
-  (format nil "~a.generation" (%generation-id)))
+  (format nil "~a.generation" (generation-id)))
 
 (defun %now-iso8601 (&optional (universal-time (get-universal-time)))
   (multiple-value-bind (sec min hour day month year) (decode-universal-time universal-time 0)
