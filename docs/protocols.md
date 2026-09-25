@@ -23,7 +23,7 @@ A protocol registers under `:protocol-<name>`, and its `metadata` plist carries
     (:summary "One line on the wire shape"
      :params '((:temperature number :doc "sampling temperature")))
     (service request)
-  (nyaa:fail :unavailable))
+  (list :error "not implemented"))
 ```
 
 `define-protocol` expands to the service class, its `metadata` and a
