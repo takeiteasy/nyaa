@@ -44,7 +44,8 @@ A `sink` is a function, a symbol naming one, or a meow process.
 | The mount `:sink` | is the first subscriber, and `:unsubscribe` refuses it |
 | Subscribing twice | once is enough; the second changes nothing |
 | Idle agent | the sink is kept and hears the next run from its `:run-start` |
-| Running agent | the sink hears everything from now on, and a turn sent while nothing listened has no `:text-delta`; the answer says which turn |
+| Running agent | the sink is first sent the run so far, from its `:run-start`, then hears everything live; the answer says which turn |
+| Replay | a sub-agent's events are replayed too, and adjacent `:text-delta`s of one agent arrive merged into one |
 | Unsubscribing | events already queued for the sink are still delivered; nothing after |
 | Snapshots | subscribers are not part of a [checkpoint](checkpoints.md) |
 
@@ -107,13 +108,13 @@ folds in as a `:user` message is not a steer: it has its `:tool-result`.
 A run that refuses every [resumed call](calls.md#resuming-a-call) and has no
 messages never starts, and emits nothing.
 
-A sink that subscribes mid-run has no `:run-start`: the `:subscribe` answer
-says a run is under way and its turn.
+A sink that subscribes mid-run hears the run so far first, then the live
+events, each once and in order. The replay covers the current run only.[^replay]
 
 ## Limitations
 
-- A subscriber that attaches mid-run cannot see the run so far, only what
-  follows ([#196](https://todo.sr.ht/~takeiteasy/nyaa/196)).
+- A run's events are all held until it ends, for a mid-run subscriber's replay
+  ([#202](https://todo.sr.ht/~takeiteasy/nyaa/202)).
 - Operator approvals ([#118](https://todo.sr.ht/~takeiteasy/nyaa/118)) and the
   live list of agents and sub-agents
   ([#121](https://todo.sr.ht/~takeiteasy/nyaa/121)) are not part of the
@@ -122,6 +123,10 @@ says a run is under way and its turn.
 
 [^restart]: A crash brings the agent back as a fresh instance under mount's
     default `:transient` restart, with no conversation.
+
+[^replay]: The run's events are recorded from `:run-start` while it lasts. A
+    turn's text is kept as it was streamed, merged, so a replayed `:text-delta`
+    may hold several of the original ones.
 
 [^subscribers]: The subscribers of a named agent are kept beside the mount,
     keyed by its registry and name, so a restarted instance finds them. An agent

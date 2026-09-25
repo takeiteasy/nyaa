@@ -15,8 +15,7 @@
 (test a-fresh-state-is-idle-and-empty
   (let ((state (ui:make-state)))
     (is (eq :idle (ui:state-status state)))
-    (is (null (ui:state-transcript state)))
-    (is (null (ui:state-joined-mid-run state)))))
+    (is (null (ui:state-transcript state)))))
 
 (test a-run-folds-into-a-transcript-with-streamed-text
   (let ((state (ui:fold-events
@@ -145,8 +144,7 @@
       (let ((state (ui:client-state client)))
         (is (eq :stop (ui:state-reason state)))
         (is (equal '(:message :text) (kinds (ui:state-root state))))
-        (is (equal "ok" (ui:entry-text (second (ui:state-transcript state)))))
-        (is (null (ui:state-joined-mid-run state))))
+        (is (equal "ok" (ui:entry-text (second (ui:state-transcript state))))))
       (is (plusp changes))
       (is (eq :ok (ui:detach client)))
       (let ((frozen (ui:client-state client)))
@@ -172,7 +170,7 @@
                  (is (eq :cancelled (ui:state-reason state))))))
         (setf (car release) t)))))
 
-(test a-client-attached-mid-run-starts-from-the-running-answer
+(test a-client-attached-mid-run-catches-up-on-the-run-so-far
   (let ((release (list nil)))
     (with-agent ((interruptible-backend release))
       (unwind-protect
@@ -183,7 +181,15 @@
                                   5))
              (let ((late (ui:attach :assistant)))
                (is (eq :running (ui:state-status (ui:client-state late))))
-               (is-true (ui:state-joined-mid-run (ui:client-state late)))
+               (is-true (eventually
+                         (lambda ()
+                           (let ((root (ui:state-root (ui:client-state late))))
+                             (and (entries-of :message root) (entries-of :text root))))
+                         5))
+               (let ((root (ui:state-root (ui:client-state late))))
+                 (is (equal "go" (ui:entry-text (first (entries-of :message root)))))
+                 (is (equal (ui:entry-text (first (entries-of :text (ui:state-root (ui:client-state early)))))
+                            (ui:entry-text (first (entries-of :text root))))))
                (is (eql 1 (ui:state-turn (ui:client-state late))))))
         (setf (car release) t)))))
 

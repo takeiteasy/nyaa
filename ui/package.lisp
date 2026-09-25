@@ -6,7 +6,7 @@
   (:export
    ;; state
    #:make-state #:fold-event #:fold-events
-   #:state-status #:state-reason #:state-turn #:state-transcript #:state-joined-mid-run
+   #:state-status #:state-reason #:state-turn #:state-transcript
    #:state-root #:state-nodes #:state-children
    #:node-key #:node-name #:node-call-id #:node-parent #:node-status #:node-reason
    #:node-turn #:node-transcript

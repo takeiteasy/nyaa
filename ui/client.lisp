@@ -33,8 +33,9 @@
       (funcall on-change state))))
 
 (defun seed (client answer)
-  "Take what a :subscribe ANSWER says of a run already under way, unless events
-have arrived first and say more."
+  "Take what a :subscribe ANSWER says of a run already under way, so the state
+is running before the replay of the run so far arrives, unless events have
+arrived first and say more."
   (destructuring-bind (&key running turn &allow-other-keys) (second answer)
     (when running
       (bt:with-lock-held ((client-lock client))
@@ -44,7 +45,6 @@ have arrived first and say more."
                  (next (copy-state old)))
             (setf (node-status root) :running (node-turn root) (or turn 0)
                   (state-nodes next) (substitute root (state-root old) (state-nodes old))
-                  (state-joined-mid-run next) t
                   (client-current client) next)))))))
 
 (defun send (client message)

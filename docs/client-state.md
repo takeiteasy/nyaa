@@ -22,7 +22,9 @@ nothing: a renderer reads the state and never reads events itself.
 | `(client-state client)` | the state so far, an immutable snapshot |
 
 `on-change` is called with each new state, from the thread that delivered the
-event. A snapshot is safe to draw from any thread.
+event. A snapshot is safe to draw from any thread. A client that attaches
+mid-run is sent the [run so far](ui.md#subscribing) first, so it ends up in the
+same state as one that was there from the start.
 
 ## Commands
 
@@ -40,8 +42,9 @@ signals `agent-unavailable`.
 ## State
 
 `fold-event` takes a state and an event and returns the next state. It never
-changes the state it is given and never signals, so a subscriber that joined
-mid-run, or an event type it does not know, is folded as far as it makes sense.
+changes the state it is given and never signals, so an event type it does not
+know, or one that arrives without those before it, is folded as far as it makes
+sense.
 
 | Reader | Meaning |
 |---|---|
@@ -49,7 +52,6 @@ mid-run, or an event type it does not know, is folded as far as it makes sense.
 | `(state-reason s)` | the last `:run-done` reason |
 | `(state-turn s)` | the current turn |
 | `(state-transcript s)` | the root's entries, oldest first |
-| `(state-joined-mid-run s)` | true when the client attached during a run |
 | `(state-root s)`, `(state-children s node)` | the agent tree, see [below](#agents) |
 
 Each transcript entry has an `entry-kind`:
@@ -80,8 +82,6 @@ node whose call started it.[^tree]
 
 ## Limitations
 
-- A client that attaches mid-run has the status and turn but not the run so
-  far ([#196](https://todo.sr.ht/~takeiteasy/nyaa/196)).
 - Sub-agent nodes are found by call id, and cannot be steered or cancelled
   ([#200](https://todo.sr.ht/~takeiteasy/nyaa/200)).
 - There is no state for operator approvals

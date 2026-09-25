@@ -129,7 +129,11 @@ restarting it after its last run. Returns the answer."
       (run-assistant recorder 1)
       (is (= 5 (length (recorded-events recorder))) "the mount sink is not told twice"))))
 
-(test a-subscriber-joining-mid-run-hears-the-rest-of-it
+(defun merged-text (events)
+  (apply #'concatenate 'string
+         (loop for e in events when (eq :text-delta (getf e :type)) collect (getf e :text))))
+
+(test a-subscriber-joining-mid-run-is-replayed-the-run-so-far
   (let ((release (list nil))
         (early (make-recorder))
         (late (make-recorder)))
@@ -144,10 +148,41 @@ restarting it after its last run. Returns the answer."
                         (send-to-assistant (list :subscribe (recorder-sink late)))))
              (setf (car release) t)
              (await-run-dones late 1)
-             (let ((types (types-of (recorded-events late))))
-               (is (not (member :run-start types)))
-               (is (eq :run-done (car (last types))))))
+             (await-run-dones early 1)
+             (let ((late-events (recorded-events late))
+                   (early-events (recorded-events early)))
+               (is (eq :run-start (getf (first late-events) :type)))
+               (is (eq :run-done (getf (car (last late-events)) :type)))
+               (is (equal (remove :text-delta (types-of early-events))
+                          (remove :text-delta (types-of late-events))))
+               (is (equal (merged-text early-events) (merged-text late-events)))
+               (is (not (recorder-overlapped late)))))
         (setf (car release) t)))))
+
+(test a-fanout-replays-its-history-then-goes-live-and-never-changes-an-event
+  (let* ((fanout (nyaa::make-fanout nil t))
+         (seen '())
+         (first-delta (list :type :text-delta :ref nil :text "a" :agent :x))
+         (child-delta (list :type :text-delta :ref nil :text "c" :agent :x :parent nil)))
+    (nyaa::emit-event fanout (list :type :run-start :ref nil :agent :x))
+    (nyaa::emit-event fanout first-delta)
+    (nyaa::emit-event fanout (list :type :text-delta :ref nil :text "b" :agent :x))
+    (nyaa::emit-event fanout child-delta)
+    (nyaa::fanout-add fanout (lambda (event) (push event seen)) :replay t)
+    (nyaa::emit-event fanout (list :type :run-done :ref nil :agent :x))
+    (let ((events (reverse seen)))
+      (is (equal '(:run-start :text-delta :text-delta :run-done) (types-of events)))
+      (is (equal "ab" (getf (second events) :text)) "adjacent text merges")
+      (is (equal "c" (getf (third events) :text)) "a child's text does not merge with the root's"))
+    (is (equal "a" (getf first-delta :text)) "the event a live sink holds is untouched")))
+
+(test a-fanout-that-is-not-recording-replays-nothing
+  (let ((fanout (nyaa::make-fanout))
+        (seen '()))
+    (nyaa::emit-event fanout (list :type :run-start :ref nil))
+    (nyaa::fanout-add fanout (lambda (event) (push event seen)) :replay t)
+    (sleep 0.1)
+    (is (null seen))))
 
 (test a-subscription-goes-with-an-unmounted-agent
   (with-agent ((streamed-reply "ok"))
@@ -272,9 +307,13 @@ restarting it after its last run. Returns the answer."
              (setf (car release) t)
              (await-run-dones late 2)
              (let* ((events (recorded-events late))
+                    (child-start (position-if (lambda (e) (and (member :parent e)
+                                                               (eq :run-start (getf e :type))))
+                                              events))
                     (child-done (position-if (lambda (e) (and (member :parent e)
                                                               (eq :run-done (getf e :type))))
                                              events)))
+               (is (integerp child-start) "the child's :run-start was replayed")
                (is (integerp child-done) "the child's :run-done reached the late subscriber")
                (is (find :tool-result events :key (lambda (e) (getf e :type)) :start (or child-done 0)))
                (is (not (member :parent (car (last events)))))

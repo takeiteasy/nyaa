@@ -1204,7 +1204,8 @@ SINK itself."
     sink))
 
 (defun open-fanout (service)
-  (let ((fanout (make-fanout)))
+  ;; A sub-agent's fanout sits inside its parent's, which records for both.
+  (let ((fanout (make-fanout nil (not (slot-boundp service 'parent-name)))))
     (dolist (sink (append (and (agent-sink service) (list (agent-sink service)))
                           (subscribers service)))
       (fanout-add fanout (sink-target service sink)))
@@ -1230,7 +1231,7 @@ parent's fanout, which the parent's own run-end retires."
                        (member sink (subscribers service)))
              (setf (subscribers service) (append (subscribers service) (list sink)))
              (a:when-let ((fanout (%fanout service)))
-               (fanout-add fanout (sink-target service sink))))
+               (fanout-add fanout (sink-target service sink) :replay t)))
            (if (%running-p service)
                (ok :running t :turn (%turns service))
                (ok :running nil)))))

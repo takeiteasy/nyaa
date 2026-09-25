@@ -315,11 +315,38 @@ across deltas."
   scheduled stopping dead finished job thread
   (drained (bt:make-semaphore)))
 
-(defstruct (fanout (:constructor make-fanout (&optional targets)))
-  (lock (bt:make-lock)) targets)
+(defstruct (fanout (:constructor make-fanout (&optional targets recording)))
+  (lock (bt:make-lock)) targets recording
+  ;; Newest first, kept only when RECORDING.
+  history)
 
-(defun fanout-add (fanout target)
+;; TODO: every event but adjacent text stays in the history until the run ends;
+;; merge tool-call deltas or cap it (#202).
+(defun record-event (fanout event)
+  "Add EVENT to FANOUT's history, merging streamed text into the last entry
+when it continues it. The merged entry is a new plist: the one it replaces may
+still be queued at a sink. Called holding the lock."
+  (let ((last (first (fanout-history fanout))))
+    (if (and last
+             (eq :text-delta (getf event :type))
+             (eq :text-delta (getf last :type))
+             (equal (getf event :ref) (getf last :ref))
+             (eq (and (member :parent event) t) (and (member :parent last) t))
+             (stringp (getf event :text))
+             (stringp (getf last :text)))
+        (setf (first (fanout-history fanout))
+              (list* :text (concatenate 'string (getf last :text) (getf event :text))
+                     (a:remove-from-plist last :text)))
+        (push event (fanout-history fanout)))))
+
+(defun fanout-add (fanout target &key replay)
+  "Add TARGET. With REPLAY, it first gets the events recorded so far, so it
+hears each event once, in order: those recorded before now by the replay and
+those after by the fanout itself."
   (bt:with-lock-held ((fanout-lock fanout))
+    (when (and replay (fanout-recording fanout))
+      (dolist (event (reverse (fanout-history fanout)))
+        (emit-event target event)))
     (pushnew target (fanout-targets fanout))))
 
 (defun fanout-remove (fanout target)
@@ -341,6 +368,8 @@ of those. A null sink drops it."
     (m:process (m:send sink event))
     (emitter (emitter-send sink event))
     (fanout (dolist (target (bt:with-lock-held ((fanout-lock sink))
+                              (when (fanout-recording sink)
+                                (record-event sink event))
                               (reverse (fanout-targets sink))))
               (emit-event target event)))
     ((or function symbol) (funcall sink event)))

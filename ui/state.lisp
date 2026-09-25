@@ -12,8 +12,7 @@
   key name call-id parent (status :idle) reason (turn 0) entries)
 
 (defstruct (state (:copier copy-state))
-  (nodes (list (make-node)))
-  joined-mid-run)
+  (nodes (list (make-node))))
 
 ;;; --- reading --------------------------------------------------------------
 
@@ -121,21 +120,18 @@ by, or the root."
   (and (consp reason) (eq :error (first reason))))
 
 (defun fold-event (state event)
-  "STATE after EVENT. An event that is not part of the contract, or that a
-subscriber joining mid-run sees without the ones before it, is folded as far
-as it makes sense and never signals."
+  "STATE after EVENT. An event that is not part of the contract, or that
+arrives without the ones before it, is folded as far as it makes sense and
+never signals."
   (flet ((node-fold (fn) (with-node state event fn)))
     (case (getf event :type)
       (:run-start
-       (let ((next (node-fold
-                    (lambda (node)
-                      (setf (node-status node) :running (node-reason node) nil (node-turn node) 0)
-                      (dolist (message (getf event :messages))
-                        (add-entry node :kind :message :role (getf message :role)
-                                        :chunks (list (text-of (getf message :content)))))))))
-         (when (null (event-key event))
-           (setf (state-joined-mid-run next) nil))
-         next))
+       (node-fold
+        (lambda (node)
+          (setf (node-status node) :running (node-reason node) nil (node-turn node) 0)
+          (dolist (message (getf event :messages))
+            (add-entry node :kind :message :role (getf message :role)
+                            :chunks (list (text-of (getf message :content))))))))
       (:steer
        (node-fold (lambda (node)
                     (add-entry node :kind :steer :chunks (list (text-of (getf event :content)))
