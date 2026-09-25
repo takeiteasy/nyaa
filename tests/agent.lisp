@@ -682,6 +682,115 @@ RUN-ARGS and return the run's result."
     (is (not (search "earlier answer" (getf (first (requests)) :body))))
     (is (search "fresh" (getf (first (requests)) :body)))))
 
+;;; --- forking (~takeiteasy/nyaa#74) ------------------------------------
+
+(defun tooled-conversation ()
+  "system, user, an assistant turn with a call and its result, user, assistant."
+  (list (list :role :system :content "be brief")
+        (list :role :user :content "first")
+        (list :role :assistant :content nil
+              :tool-calls (list (list :id "c1" :name :tool-echo :arguments nil)))
+        (list :role :tool :tool-call-id "c1" :content "{}")
+        (list :role :user :content "second")
+        (list :role :assistant :content "answer")))
+
+(defun roles-of (messages) (mapcar (lambda (m) (getf m :role)) messages))
+
+(test fork-conversation-keeps-a-prefix-at-a-message-index
+  (let ((messages (tooled-conversation)))
+    (multiple-value-bind (prefix turns) (nyaa:fork-conversation messages :at 2)
+      (is (equal '(:system :user) (roles-of prefix)))
+      (is (= 0 turns)))
+    (is (equal '(:system :user :assistant :tool) (roles-of (nyaa:fork-conversation messages :at 4))))
+    (is (= 6 (length (nyaa:fork-conversation messages))))
+    (is (null (nyaa:fork-conversation messages :at 0)))))
+
+(test fork-conversation-refuses-a-cut-inside-a-tool-call-turn
+  (signals error (nyaa:fork-conversation (tooled-conversation) :at 3))
+  (signals error (nyaa:fork-conversation (tooled-conversation) :at 7))
+  (signals error (nyaa:fork-conversation (tooled-conversation) :at -1)))
+
+(test fork-conversation-cuts-at-a-turn
+  (let ((messages (tooled-conversation)))
+    (multiple-value-bind (prefix turns) (nyaa:fork-conversation messages :turn 1)
+      (is (equal '(:system :user :assistant :tool) (roles-of prefix)))
+      (is (= 1 turns)))
+    (is (equal '(:system :user) (roles-of (nyaa:fork-conversation messages :turn 0))))
+    (is (= 6 (length (nyaa:fork-conversation messages :turn 2))))
+    (signals error (nyaa:fork-conversation messages :turn 3))))
+
+(test fork-conversation-takes-one-cut-and-leaves-its-input-alone
+  (let* ((messages (tooled-conversation))
+         (before (copy-tree messages)))
+    (signals error (nyaa:fork-conversation messages :at 1 :turn 1))
+    (nyaa:fork-conversation messages :at 2)
+    (is (equal before messages))))
+
+(defun mount-source-agent (&rest initargs)
+  (apply #'m:mount *ctx* 'nyaa:agent :name :source :model :provider-test-keyed initargs)
+  (m:call (m:lookup :source)
+          (list :restore (list :messages (tooled-conversation) :turns 2))))
+
+(test a-fork-continues-from-the-cut-and-leaves-the-source-alone
+  (with-agent ((final-reply "branch") 'tool-echo)
+    (mount-source-agent)
+    (let ((before (copy-tree (m:call (m:lookup :source) '(:snapshot)))))
+      (is (eq :branch (nyaa:fork-agent *ctx* :source :turn 1 :as :branch)))
+      (m:cast (m:lookup :branch)
+              (list :run :continue t :messages '((:role :user :content "instead"))))
+      (is-true (eventually (lambda () (plusp (length (getf (first (requests)) :body))))))
+      (let ((sent (getf (first (requests)) :body)))
+        (is (search "first" sent))
+        (is (search "instead" sent))
+        (is (not (search "answer" sent))))
+      (is (equal before (m:call (m:lookup :source) '(:snapshot)))))))
+
+(test two-forks-from-one-point-carry-only-the-prefix
+  (with-agent ((final-reply "branch") 'tool-echo)
+    (mount-source-agent)
+    (nyaa:fork-agent *ctx* :source :at 2 :as :one)
+    (nyaa:fork-agent *ctx* :source :at 2 :as :two)
+    (m:cast (m:lookup :one) (list :run :continue t :messages '((:role :user :content "left"))))
+    (m:cast (m:lookup :two) (list :run :continue t :messages '((:role :user :content "right"))))
+    (is-true (eventually (lambda () (= 2 (length (requests))))))
+    (let ((bodies (mapcar (lambda (r) (getf r :body)) (requests))))
+      (is (= 1 (count-if (lambda (b) (search "left" b)) bodies)))
+      (is (= 1 (count-if (lambda (b) (search "right" b)) bodies)))
+      (is (every (lambda (b) (and (search "first" b) (not (search "answer" b)))) bodies)))
+    (is (= 6 (length (getf (m:call (m:lookup :source) '(:snapshot)) :messages))))))
+
+(test forking-a-running-agent-closes-its-unanswered-calls
+  (with-agent ((tool-call-reply "c1" "tool-hold" "{}") 'tool-hold)
+    (m:mount *ctx* 'nyaa:agent :name :source :model :provider-test-keyed
+                               :tools '(:tool-hold))
+    (m:cast (m:lookup :source) (list :run :messages '((:role :user :content "go"))))
+    (is-true (eventually
+              (lambda ()
+                (getf (getf (m:call (m:lookup :source) '(:snapshot)) :in-flight) :tool-calls))))
+    (nyaa:fork-agent *ctx* :source :as :branch)
+    (let ((messages (getf (m:call (m:lookup :branch) '(:snapshot)) :messages)))
+      (is (eq :tool (getf (car (last messages)) :role)))
+      (is (search "interrupted" (nyaa:content-text (getf (car (last messages)) :content)))))
+    (is-true (m:process-alive-p (m:lookup :source)))))
+
+(test fork-agent-refuses-a-bad-name
+  (with-agent ((final-reply "ok") 'tool-echo)
+    (mount-source-agent)
+    (signals error (nyaa:fork-agent *ctx* :nobody :as :branch))
+    (signals error (nyaa:fork-agent *ctx* :tool-echo :as :branch))
+    (signals error (nyaa:fork-agent *ctx* :source :as :source))
+    (signals error (nyaa:fork-agent *ctx* :source))))
+
+(test a-system-prompt-is-not-sent-twice
+  (with-agent ((final-reply "ok"))
+    (m:with-process (runner)
+      (let ((child (m:delegate *ctx* 'nyaa:agent :model :provider-test-keyed
+                                                 :system "be brief")))
+        (m:cast child (list :run :messages (restored-conversation)))
+        (multiple-value-bind (message received) (m:receive :timeout 5)
+          (is-true received)
+          (is (= 1 (count :system (roles-of (getf (second (fourth message)) :messages))))))))))
+
 ;;; --- events ---------------------------------------------------------
 
 (test stream-events-reach-the-sink-in-order

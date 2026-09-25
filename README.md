@@ -21,6 +21,7 @@ Runs on SBCL.
 - [The agent loop](docs/agent.md)
 - [Parameter schemas](docs/schema.md)
 - [Checkpoints and rollback](docs/checkpoints.md)
+- [Forking a conversation](docs/forking.md)
 - [Image generations](docs/images.md)
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)

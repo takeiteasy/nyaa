@@ -154,6 +154,7 @@ pathname: record there instead.")
                          (if (and (getf args :continue) (%messages service))
                              (%messages service)
                              (and (agent-system service)
+                                  (not (eq :system (getf (first (getf args :messages)) :role)))
                                   (list (list :role :system :content (agent-system service))))))
               (%turns service) 0
               (%pending service) nil
@@ -909,3 +910,73 @@ here but not assumed of the caller's own services)."
   ;; each checks the step ref it was issued against.
   (incf (%step-ref service))
   t)
+
+;;; --- forking (~takeiteasy/nyaa#74) ----------------------------------------
+
+;;; A conversation is append-only, so a prefix of it is a conversation of its
+;;; own. A fork keeps a prefix and continues it as a separate agent; the source
+;;; is only ever read.
+
+(defun %cut-inside-unit-p (units cut)
+  "Whether CUT falls between the messages of one of UNITS."
+  (some (lambda (unit) (and (< (first unit) cut) (<= cut (car (last unit))))) units))
+
+(defun %turn-cut (messages units turn)
+  "The index after the unit of MESSAGES' TURNth assistant message, or, for turn
+0, the index of the first one."
+  (let ((assistants (loop for message in messages for index from 0
+                          when (eq (getf message :role) :assistant) collect index)))
+    (cond ((not (and (integerp turn) (<= 0 turn (length assistants))))
+           (error "turn ~s is outside the conversation's ~d turns" turn (length assistants)))
+          ((zerop turn) (or (first assistants) (length messages)))
+          (t (let ((index (nth (1- turn) assistants)))
+               (1+ (car (last (find-if (lambda (unit) (member index unit)) units)))))))))
+
+(defun fork-conversation (messages &key at turn)
+  "The prefix of MESSAGES, oldest first, in a list of its own, and the number of
+assistant messages in it. :AT n keeps the first n messages; :TURN n keeps up to
+and including the nth assistant turn and the tool results it drew, and 0 keeps
+what comes before the first. Neither keeps all of it. A cut that would part an
+assistant turn from its tool results is an error, as are both keys together.
+MESSAGES is not changed."
+  (when (and at turn) (error "give :at or :turn, not both"))
+  (let* ((units (%conversation-units messages))
+         (cut (cond (turn (%turn-cut messages units turn))
+                    (at at)
+                    (t (length messages)))))
+    (unless (and (integerp cut) (<= 0 cut (length messages)))
+      (error ":at ~s is outside the conversation's ~d messages" cut (length messages)))
+    (when (%cut-inside-unit-p units cut)
+      (error ":at ~d falls between an assistant turn and its tool results" cut))
+    (let ((prefix (subseq messages 0 cut)))
+      (values prefix (count :assistant prefix :key (lambda (m) (getf m :role)))))))
+
+(defun fork-agent (context name &key at turn as)
+  "Mount AS, a new agent beside the one registered as NAME under CONTEXT (or
+under a context beneath it), holding the prefix of NAME's conversation that
+FORK-CONVERSATION's :AT and :TURN pick, and return AS. It is mounted as NAME
+was, its :SINK and :VAULT included. NAME is only read, so it may be mid-run and
+carries on; a call it has not answered is in the fork closed as interrupted.
+Send the fork (:RUN :CONTINUE T) to go on from the cut."
+  (unless as (error ":as, the fork's name, is required"))
+  (let* ((entries (%context-entries context :specs t))
+         (entry (find name entries :key (lambda (e) (getf e :name))))
+         (parent (a:if-let ((parent-name (getf (getf entry :spec) :parent)))
+                   (getf (find parent-name entries :key (lambda (e) (getf e :name))) :process)
+                   context)))
+    (unless entry (error "No agent registered under ~s." name))
+    (when (find as entries :key (lambda (e) (getf e :name)))
+      (error "~s is already mounted." as))
+    (let ((spec (m:child-spec parent name)))
+      (unless (subtypep (getf spec :class) 'agent)
+        (error "~s is not an agent." name))
+      (multiple-value-bind (prefix turns)
+          (fork-conversation (getf (m:call (getf entry :process) '(:snapshot)) :messages)
+                             :at at :turn turn)
+        (let ((fork (apply #'m:mount parent (getf spec :class)
+                           :name as
+                           (append (getf spec :initargs)
+                                   (loop for key in '(:restart :shutdown :backoff :backoff-max)
+                                         when (getf spec key) append (list key (getf spec key)))))))
+          (m:call fork (list :restore (list :messages prefix :turns turns)))
+          as)))))

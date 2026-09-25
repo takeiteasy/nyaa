@@ -48,6 +48,9 @@ sent to a provider as it is; results that had arrived are kept. `restore`
 always lands a not-running agent; `(:run :continue t)` carries on from the
 restored conversation.
 
+[Forking](forking.md) builds on the same snapshot: it restores a prefix of
+one agent's `:messages` onto a new one.
+
 Any service whose state is a plist with a non-nil `:in-flight` is reported
 as interrupted.
 

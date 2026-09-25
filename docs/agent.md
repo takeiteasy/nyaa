@@ -40,7 +40,8 @@ convention), and mount's default restart is `:transient`, which restarts on
 anything but `:normal` or `:shutdown` — so `:assistant` comes back as a
 fresh instance under the same name, ready for another `:run`, but with no
 memory of the last one. A caller wanting the conversation to continue passes
-the previous result's `:messages` back in as the next `:run`'s, or, on an
+the previous result's `:messages` back in as the next `:run`'s (a `:system`
+prompt already opening them is not added again), or, on an
 agent that already holds a conversation (a [restored](checkpoints.md) one),
 sends `:run` with `:continue t` to carry on from it. Mount with
 `:restart :temporary` for a one-shot agent that stays gone after it finishes.
@@ -307,6 +308,11 @@ mid-run keeps the conversation, closes each unanswered tool call as
 `interrupted` and drops the abandoned turn; `restore` always lands a
 not-running agent, ready for `(:run :continue t)`, and nothing more from the
 abandoned turn reaches the sink.
+
+## Forking
+
+`fork-agent` continues a prefix of an agent's conversation as a sibling agent,
+leaving the original alone -- see [forking](forking.md).
 
 ## Limitations
 
