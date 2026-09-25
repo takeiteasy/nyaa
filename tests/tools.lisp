@@ -441,7 +441,7 @@ last resort with no dedicated OS mechanism behind it."
   (with-tools
     (listing-fixture)
     (is (equal '(".hidden" "real.txt" "sub")
-               (result-value (nyaa::apply-fs-op :list *sandbox* *sandbox* nil t) :files)))))
+               (result-value (nyaa::apply-fs-op :list *sandbox* *sandbox* nil :text t) :files)))))
 
 ;;; --- shell -------------------------------------------------------------
 
@@ -709,6 +709,46 @@ cleared again so STOP-FAKE-HTTP's join does not wait on it.")
 (test http-returns-an-empty-non-text-body-as-an-empty-string
   (with-tools
     (is (equal "" (http-body-of (list :octets 200 '("Content-Type" "image/png") (octets)))))))
+
+;;; --- fs: base64 bytes (~takeiteasy/nyaa#155) -----------------------------
+
+(defun base64-of (octets)
+  (cl-base64:usb8-array-to-base64-string octets))
+
+(test fs-round-trips-bytes-as-base64
+  (with-tools
+    (is (eq :ok (first (tool :tool-fs :op :write :path "b.bin" :encoding :base64
+                                      :data (base64-of +png-octets+)))))
+    (is (equalp +png-octets+
+                (alexandria:read-file-into-byte-vector
+                 (format nil "~a/b.bin" *sandbox*))))
+    (is (equal (base64-of +png-octets+)
+               (result-value (tool :tool-fs :op :read :path "b.bin" :encoding :base64)
+                             :data)))))
+
+(test fs-writes-an-empty-base64-body-as-an-empty-file
+  (with-tools
+    (tool :tool-fs :op :write :path "e.bin" :encoding :base64 :data "")
+    (is (zerop (length (alexandria:read-file-into-byte-vector
+                        (format nil "~a/e.bin" *sandbox*)))))))
+
+(test fs-refuses-invalid-base64-and-keeps-the-file
+  (with-tools
+    (tool :tool-fs :op :write :path "k.txt" :data "keep")
+    (is (equal :bad-request
+               (first (nyaa:tool-error (tool :tool-fs :op :write :path "k.txt"
+                                                 :encoding :base64 :data "a$b!")))))
+    (is (equal "keep" (result-value (tool :tool-fs :op :read :path "k.txt") :data)))))
+
+(test fs-saves-a-tool-http-body
+  (with-tools
+    (let ((result (http-result-of (list :octets 200 '("Content-Type" "image/png")
+                                        +png-octets+))))
+      (tool :tool-fs :op :write :path "saved.png" :encoding (result-value result :body-encoding)
+                     :data (result-value result :body))
+      (is (equalp +png-octets+
+                  (alexandria:read-file-into-byte-vector
+                   (format nil "~a/saved.png" *sandbox*)))))))
 
 (test declared-charset-reads-the-charset-parameter
   (is (eq :utf-8 (nyaa::declared-charset "text/plain; charset=UTF-8")))

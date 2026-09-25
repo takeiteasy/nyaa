@@ -11,12 +11,14 @@
                :doc "operation to perform")
               (:path string :required t
                :doc "path relative to the sandbox root")
-              (:data string :required-when (:op :write) :doc "file contents")))
-  (:invoke (op path data)
+              (:data string :required-when (:op :write) :doc "file contents")
+              (:encoding (member :text :base64) :default :text
+               :doc "how :data is encoded on read and write: text, or base64 for bytes")))
+  (:invoke (op path data encoding)
     (let ((lexical (normalize-path (join-path (fs-root service) path))))
       (if (not (under-root (fs-root service) lexical))
           (fail (list :forbidden "path escapes sandbox root"))
-          (apply-fs-op op (fs-root service) lexical data (fs-hide-links service))))))
+          (apply-fs-op op (fs-root service) lexical data encoding (fs-hide-links service))))))
 
 (defmethod initialize-instance :after ((service tool-fs) &key)
   ;; Normalise once, without a trailing slash, so UNDER-ROOT's boundary
@@ -88,7 +90,7 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
     (:enoent (fail (list :error not-found-message)))
     (t (fail (list :error (string-downcase errno))))))
 
-(defun apply-fs-op (op root lexical data hide-links)
+(defun apply-fs-op (op root lexical data encoding hide-links)
   (let* ((components (path-components root lexical))
          (dirs (butlast components))
          (leaf (car (last components))))
@@ -99,8 +101,8 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
           (unwind-protect
                (case op
                  (:list (fs-op-list dirfd leaf hide-links))
-                 (:read (fs-op-read dirfd leaf))
-                 (:write (fs-op-write dirfd leaf data))
+                 (:read (fs-op-read dirfd leaf encoding))
+                 (:write (fs-op-write dirfd leaf data encoding))
                  (:mkdir (fs-op-mkdir dirfd leaf))
                  (:delete (fs-op-delete dirfd leaf))
                  (:rmdir (fs-op-rmdir dirfd leaf))
@@ -117,22 +119,31 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
 ;;; closing it again here would risk closing a descriptor another thread has
 ;;; since been handed.
 
-(defun fs-op-read (dirfd leaf)
+(defun fs-op-read (dirfd leaf encoding)
   (if (null leaf)
       (fail (list :error "is a directory"))
       (multiple-value-bind (fd errno) (fs-open-leaf dirfd leaf '(:rdonly) 0)
-        (if fd
-            (ok :data (fs-slurp-fd fd))
-            (errno-result errno)))))
+        (cond ((null fd) (errno-result errno))
+              ((eq encoding :base64)
+               (ok :data (cl-base64:usb8-array-to-base64-string (fs-slurp-octets-fd fd))))
+              (t (ok :data (fs-slurp-fd fd)))))))
 
-(defun fs-op-write (dirfd leaf data)
+(defun fs-op-write (dirfd leaf data encoding)
   (if (null leaf)
       (fail (list :error "is a directory"))
-      (multiple-value-bind (fd errno)
-          (fs-open-leaf dirfd leaf '(:wronly :creat :trunc) #o644)
-        (if fd
-            (progn (fs-spit-fd fd data) (ok))
-            (errno-result errno)))))
+      (let ((octets (and (eq encoding :base64) (decode-base64 data))))
+        (if (and (eq encoding :base64) (null octets))
+            (bad-request "data is not valid base64")
+            ;; Validated before the open, so bad data cannot truncate the file.
+            (multiple-value-bind (fd errno)
+                (fs-open-leaf dirfd leaf '(:wronly :creat :trunc) #o644)
+              (cond ((null fd) (errno-result errno))
+                    (octets (fs-spit-octets-fd fd octets) (ok))
+                    (t (fs-spit-fd fd data) (ok))))))))
+
+(defun decode-base64 (string)
+  "STRING's octets, or NIL when it is not valid base64."
+  (ignore-errors (cl-base64:base64-string-to-usb8-array string)))
 
 (defun fs-op-mkdir (dirfd leaf)
   (if (null leaf)
@@ -172,6 +183,7 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
               (:enotdir (bad-request "not a directory"))
               (t (errno-result errno)))))))
 
+;;; A file that is not valid UTF-8 signals a decoding error here (#157).
 (defun fs-slurp-fd (fd)
   (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type 'character))
     (uiop:slurp-stream-string s)))
@@ -179,3 +191,11 @@ is not enough: it would admit siblings such as /sandbox-root-evil."
 (defun fs-spit-fd (fd data)
   (with-open-stream (s (sb-sys:make-fd-stream fd :output t :element-type 'character))
     (write-string data s)))
+
+(defun fs-slurp-octets-fd (fd)
+  (with-open-stream (s (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8)))
+    (a:read-stream-content-into-byte-vector s)))
+
+(defun fs-spit-octets-fd (fd octets)
+  (with-open-stream (s (sb-sys:make-fd-stream fd :output t :element-type '(unsigned-byte 8)))
+    (write-sequence octets s)))

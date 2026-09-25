@@ -142,7 +142,7 @@ in flight, and none after it) and `tool-self` (an `:eval` or `:define`, or the w
 
 | Tool | Parameters | Notes |
 |---|---|---|
-| `:tool-fs` | `:op` (member), `:path`, `:data` | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`, `rmdir`. `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
+| `:tool-fs` | `:op` (member), `:path`, `:data`, `:encoding` (member) | Sandboxed to the root given at mount. Ops: `read`, `write`, `list`, `mkdir`, `delete`, `rmdir`. `:encoding` is `text` (the default) or `base64`, for `read` and `write` ([below](#tool-fs-bytes)). `list` shows every entry, symlinks included; mount with `:hide-links t` to leave symlinks out. |
 | `:tool-shell` | `:cmd`, `:timeout` | Runs via `sh -c` in its own process group; merged stdout and stderr, plus the exit status. |
 | `:tool-http` | `:url`, `:method` (member), `:headers` (map), `:body`, `:timeout` | Single request. Redirects are not followed and statuses pass through. The request body is sent as UTF-8; the body comes back as text or base64, named by `:body-encoding` ([below](#tool-http-text)). |
 | `:tool-eval` | `:form`, `:timeout` | Evaluates one form in a [worker](#workers) started for it and killed after it. |
@@ -201,6 +201,17 @@ stops) is dropped, killing its worker the same way an unmounted `tool-repl`
 does. An eval still running past `:idle` keeps its session; the check is
 against time since the last one finished, not time since the session
 started.
+
+<a id="tool-fs-bytes"></a>
+`tool-fs` `:encoding` `"base64"` reads and writes a file's bytes as base64 in
+`:data`. Invalid base64 is a `:bad-request` and leaves the file untouched.
+Saving a `tool-http` body as it came:
+
+```lisp
+(let ((r (second (invoke-tool :tool-http :url "https://example.com/a.png"))))
+  (invoke-tool :tool-fs :op :write :path "a.png"
+               :data (getf r :body) :encoding (getf r :body-encoding)))
+```
 
 <a id="tool-http-text"></a>
 `tool-http` answers `:body` with `:body-encoding` `"text"` or `"base64"`:
@@ -314,8 +325,9 @@ or `tool-self`'s job. See [introspection](introspection.md).
 
 ## Limitations
 
-- `tool-fs` is text only, so a base64 `tool-http` body cannot be written to a
-  file as bytes ([#155](https://todo.sr.ht/~takeiteasy/nyaa/155)).
+- `tool-fs` `read` as `text` crashes the tool on a file that is not valid
+  UTF-8; read it as `base64` instead
+  ([#157](https://todo.sr.ht/~takeiteasy/nyaa/157)).
 - `tool-services`'s `:state` is `m:children`'s restart bookkeeping, not the
   richer lifecycle `service-status` tracks
   ([#46](https://todo.sr.ht/~takeiteasy/nyaa/46)).
