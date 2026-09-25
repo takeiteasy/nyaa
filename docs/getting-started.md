@@ -67,13 +67,13 @@ Runs on SBCL.
 
 ## Launching
 
-`bin/nyaa-install` builds a recovery image once, and `bin/nyaa` launches
-nyaa from the newest saved [image generation](images.md) afterwards,
-falling back to recovery if it won't load:
+`nyaa install` builds a recovery image once, and `nyaa` launches nyaa from
+the newest saved [image generation](images.md) afterwards, falling back to
+recovery if it won't load -- see [the launcher](launcher.md):
 
 ```sh
-bin/nyaa-install
-bin/nyaa
+nyaa install
+nyaa
 ```
 
 ## Tests

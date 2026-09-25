@@ -23,6 +23,7 @@ Runs on SBCL.
 - [Checkpoints and rollback](docs/checkpoints.md)
 - [Forking a conversation](docs/forking.md)
 - [Image generations](docs/images.md)
+- [The launcher](docs/launcher.md)
 - [Self-modification](docs/self.md)
 - [The vault](docs/vault.md)
 - [The call log](docs/calls.md)

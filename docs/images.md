@@ -45,7 +45,7 @@ returns on success.
 The saved core's own toplevel, on load:
 
 1. Exits at once if `NYAA_IMAGE_PROBE` is set -- `relaunch` and
-   `bin/nyaa` both use this to check a core loads without reviving its
+   [the launcher](launcher.md) both use this to check a core loads without reviving its
    services.
 2. Otherwise, `forget-workers` marks every worker the heap holds as stale --
    its pid and pipes belong to the process that saved it, so it is never
@@ -61,19 +61,10 @@ The saved core's own toplevel, on load:
 sibling `.core`'s path, or nil if none was taken. `:keep` prunes a core
 alongside its generation.
 
-## `bin/nyaa` and `bin/nyaa-install`
+## Launching
 
-```sh
-bin/nyaa-install                    # build ~/.nyaa/images/recovery.core
-bin/nyaa                            # run the newest generation, or recovery
-bin/nyaa path/to/some.core          # run a specific core
-bin/nyaa -- --eval '(+ 1 2)'        # extra args reach sbcl
-```
-
-`bin/nyaa` probes its chosen core the same way `relaunch` does, and falls
-back to the recovery image -- a plain image with no services, built by
-`bin/nyaa-install` -- if it doesn't load cleanly. `NYAA_HOME` (default
-`~/.nyaa`) holds both the recovery image and the generations directory.
+`nyaa` starts the newest generation, or the recovery image built by
+`nyaa install` -- see [the launcher](launcher.md).
 
 ## Trust posture
 
@@ -96,5 +87,5 @@ model-reachable tool op.
 - Vault claims on an agent's queued steers are taken again by the launched
   core under its own token ([vault](vault.md#claims)); one another running
   process holds is dropped from the queue.
-- A core is tens of megabytes; taking one is not free, and `bin/nyaa`'s
+- A core is tens of megabytes; taking one is not free, and the launcher's
   probe launches a whole second SBCL process.

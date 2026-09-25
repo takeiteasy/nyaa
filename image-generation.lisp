@@ -8,8 +8,8 @@
 ;;; forks, suspends nothing on the calling thread's own account (M:SUSPEND,
 ;;; meow#64) so every other thread is gone, then has the child
 ;;; SAVE-LISP-AND-DIE while the parent resumes and carries on. RELAUNCH
-;;; re-execs into a saved core; BIN/NYAA and BIN/NYAA-INSTALL (bin/) are the
-;;; shell side of launch and recovery.
+;;; re-execs into a saved core; roswell/nyaa.ros is the launcher and
+;;; recovery side.
 
 ;;; --- refusals -----------------------------------------------------------
 
@@ -48,7 +48,7 @@ and FORGET-POOLS first: the workers and pooled threads that heap holds
 belong to the process that saved it, and
 so do the vault claims on its agents' queued steers, which are claimed again
 as this image (RECLAIM-STEER-CLAIMS). NYAA_IMAGE_PROBE
-set skips all of that: BIN/NYAA and the integration tests use it to check
+set skips all of that: the launcher and the integration tests use it to check
 a core loads without actually reviving its services."
   (lambda ()
     (cond
@@ -199,17 +199,6 @@ reports through tool-self."
 
 ;;; --- launching --------------------------------------------------------
 
-(defun %probe-core (core)
-  "T if CORE loads and its toplevel runs cleanly under NYAA_IMAGE_PROBE, in
-a throwaway subprocess -- RELAUNCH and BIN/NYAA both refuse a core that
-doesn't, rather than exec into a half-written or foreign one."
-  (zerop (nth-value 2
-          (uiop:run-program
-           (list (namestring sb-ext:*runtime-pathname*) "--core" (namestring core)
-                 "--noinform" "--non-interactive")
-           :environment (list* "NYAA_IMAGE_PROBE=1" (sb-ext:posix-environ))
-           :ignore-error-status t))))
-
 ;;; No Lisp-level execv wrapper exists in this SBCL build (sb-posix,
 ;;; sb-ext and sb-unix were all checked by hand against the running
 ;;; implementation) -- bound straight to libc's.
@@ -233,23 +222,23 @@ signals an error on failure, execv's usual contract."
 
 (defun relaunch (core)
   "Replace the running SBCL process with CORE (EXECV), after confirming it
-loads (%PROBE-CORE), killing this process's workers and running shell
+loads (NYAA/LAUNCHER:PROBE-CORE), killing this process's workers and running shell
 commands first so none outlives it as an orphan. A generation's core is code-exact -- unlike
 declared-state ROLLBACK, this is the manual way tool-self's :DEFINE
 writes can actually be undone (~takeiteasy/nyaa#63) until an operator
 does it. Never returns on success."
   (unless (probe-file core) (error "no such core: ~a" core))
-  (unless (%probe-core core) (error "~a did not load cleanly; refusing to relaunch into it" core))
+  (unless (nyaa/launcher:probe-core core) (error "~a did not load cleanly; refusing to relaunch into it" core))
   (kill-live-workers)
   (kill-live-commands)
   (finish-output) (finish-output *error-output*)
-  (let ((runtime (namestring sb-ext:*runtime-pathname*)))
-    (%execv runtime (list runtime "--core" (namestring core)))))
+  (let ((argv (nyaa/launcher:launch-argv core nil)))
+    (%execv (first argv) argv)))
 
 (defun save-recovery-image (path)
-  "A plain image with no services mounted, for BIN/NYAA-INSTALL: the
-fallback BIN/NYAA falls back to when a generation's core fails
-%PROBE-CORE. Must run on the main thread, same as SAVE-IMAGE."
+  "A plain image with no services mounted, for `nyaa install`: the
+image the launcher falls back to when a generation's core fails
+NYAA/LAUNCHER:PROBE-CORE. Must run on the main thread, same as SAVE-IMAGE."
   (%require-main-thread)
   (ensure-directories-exist path)
   (sb-ext:save-lisp-and-die

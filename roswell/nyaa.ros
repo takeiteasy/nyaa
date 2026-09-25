@@ -1,0 +1,81 @@
+#!/bin/sh
+#|-*- mode:lisp -*-|#
+#|
+exec ros -Q -- $0 "$@"
+|#
+
+;;; The nyaa launcher: docs/launcher.md.
+
+(let ((asd (merge-pathnames "../nyaa.asd" (or *load-truename* *default-pathname-defaults*)))
+      (*standard-output* (make-broadcast-stream))
+      (*error-output* (make-broadcast-stream)))
+  (when (probe-file asd) (asdf:load-asd (truename asd)))
+  (asdf:load-system "nyaa/launcher"))
+
+(defparameter *usage* "usage: nyaa [--core FILE] [-- sbcl-args...]
+       nyaa [--core FILE] run PROMPT [options]
+       nyaa install")
+
+(defun usage-error (format &rest args)
+  (format *error-output* "nyaa: ~?~%~a~%" format args *usage*)
+  (ros:quit 2))
+
+(defun source-directory ()
+  (let ((asd (probe-file (merge-pathnames "../nyaa.asd" (or *load-truename* #p"")))))
+    (and asd (make-pathname :name nil :type nil :version nil :defaults asd))))
+
+(defun quicklisp-setup ()
+  (let ((setup (or (uiop:getenv "QUICKLISP_SETUP")
+                   (namestring (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))))
+    (unless (probe-file setup)
+      (error "no Quicklisp at ~a; set QUICKLISP_SETUP" setup))
+    setup))
+
+(defun install ()
+  (let ((source (source-directory)))
+    (ros:exec
+     (list (namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--non-interactive" "--no-userinit"
+           "--load" (quicklisp-setup)
+           "--eval" (if source
+                        (format nil "(asdf:load-asd ~s)" (namestring (merge-pathnames "nyaa.asd" source)))
+                        "nil")
+           "--eval" "(ql:quickload :nyaa :silent t)"
+           "--eval" (format nil "(nyaa:save-recovery-image ~s)"
+                            (namestring (nyaa/launcher:recovery-core)))))))
+
+(defparameter *bootstrap*
+  "(progn
+     (unless (find-package \"NYAA/CLI\") (require :asdf) (asdf:load-system \"nyaa/cli\"))
+     (let ((code (funcall (intern \"MAIN\" \"NYAA/CLI\")
+                          (rest (member \"--end-toplevel-options\" sb-ext:*posix-argv*
+                                        :test #'string=)))))
+       (finish-output) (finish-output *error-output*)
+       (sb-ext:exit :code code :abort t)))")
+
+(defun run-command (core args)
+  (ros:exec (nyaa/launcher:launch-argv
+             core
+             (append (list "--noinform" "--end-runtime-options"
+                           "--no-userinit" "--disable-debugger" "--eval" *bootstrap*
+                           "--end-toplevel-options")
+                     args))))
+
+(defun dispatch (argv)
+  (let ((core nil))
+    (when (equal (first argv) "--core")
+      (unless (second argv) (usage-error "--core needs a file"))
+      (setf core (second argv) argv (cddr argv)))
+    (cond
+      ((equal (first argv) "install") (install))
+      ((member (first argv) '("run") :test #'equal)
+       (run-command (nyaa/launcher:select-core :core core) argv))
+      ((or (null argv) (equal (first argv) "--"))
+       (ros:exec (nyaa/launcher:launch-argv (nyaa/launcher:select-core :core core) (rest argv))))
+      (t (usage-error "unknown command ~a" (first argv))))))
+
+(defun main (&rest argv)
+  (handler-case (dispatch argv)
+    (error (e)
+      (format *error-output* "nyaa: ~a~%" e)
+      (ros:quit 1))))

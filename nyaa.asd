@@ -1,13 +1,23 @@
 #-sbcl
 (error "nyaa requires SBCL; running on ~a." (lisp-implementation-type))
 
+(defsystem "nyaa/launcher"
+  :description "Core selection for the nyaa launcher."
+  :author "George Watson"
+  :license "GPLv3"
+  :depends-on ("uiop")
+  :pathname "launcher/"
+  :serial t
+  :components ((:file "package")
+               (:file "launcher")))
+
 (defsystem "nyaa"
   :description "Not Your Average Agent: an agent harness built on meow."
   :author "George Watson"
   :license "GPLv3"
   :version "0.1.0"
   :depends-on ("meow" "meow/logger" "alexandria" "com.inuoe.jzon" "drakma" "flexi-streams"
-               "usocket" "bordeaux-threads" "uiop" "puri" "chunga" "cl+ssl" "cl-base64" "sb-md5")
+               "usocket" "bordeaux-threads" "uiop" "puri" "chunga" "cl+ssl" "cl-base64" "sb-md5" "nyaa/launcher")
   :serial t
   :components ((:file "package")
                (:file "nyaa")
@@ -86,6 +96,7 @@
                (:file "suite")
                (:file "schema")
                (:file "definitions")
+               (:file "launcher")
                (:file "smoke")
                (:file "protocol")
                (:file "fake-http")

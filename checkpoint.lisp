@@ -31,8 +31,7 @@ which a generation never writes to disk. NIL by default. A class is asked
 through its prototype, so the method reads nothing but the class.")
   (:method ((service m:service)) nil))
 
-(defvar *generations-directory*
-  (merge-pathnames ".nyaa/generations/" (user-homedir-pathname))
+(defvar *generations-directory* (nyaa/launcher:generations-directory)
   "Default directory CHECKPOINT writes to and GENERATIONS lists from.")
 
 ;;; --- walking the mount tree ---------------------------------------------
